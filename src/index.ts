@@ -1,4 +1,5 @@
 import { loadConfig } from './config'
+import { openDatabase } from './db'
 
 function main(): void {
   const cfg = loadConfig()
@@ -11,6 +12,12 @@ function main(): void {
   console.log(`  http           http://${cfg.httpBind}:${cfg.httpPort}`)
   console.log(`  sqlite         ${cfg.dbPath}`)
   // ark identity key is loaded but never logged.
+
+  const db = openDatabase(cfg.dbPath)
+  const migrationCount = db
+    .query<{ count: number }, []>('SELECT COUNT(*) as count FROM schema_migrations')
+    .get()
+  console.log(`  schema         v${migrationCount?.count ?? 0}`)
 }
 
 main()
