@@ -32,8 +32,10 @@ zap 수령은 부차적 (make_invoice 는 지원하지만 active notification �
 | 런타임 | **Bun** (TypeScript) | `package.json` 이 이미 bun 베이스. sqlite 도 `bun:sqlite` 로 zero-dep. |
 | 프론트엔드 | **Bun.serve + 서버 렌더 HTML** | 화면이 적고(`/`, `/connections`, `/history`) 별도 빌드 파이프라인 둘 가치가 없음. |
 | 저장소 | **SQLite** (`bun:sqlite`) | 파일 하나, 첫 기동에 자동 생성. |
-| 시크릿 보관 | `.env` 의 mnemonic 평문 | 로컬-only PoC. 본격 사용은 추후. |
-| 연결별 키 | **커넥션마다 새 service keypair** | NIP-47 권장사항. 결제 활동을 사용자 메인키와 연결하지 않기 위함. |
+| Ark 키 표현 | **`nsec` 한 줄** (`.env` 평문) | wallet/ 의 백업키와 동일 표현. Amber 등 nostr 도구와 백업 호환. 니모닉은 결국 단일 키만 derive 하므로 (`m/44/1237/0'/0/0` 고정) 의미 없음. |
+| 시크릿 보관 | `.env` 평문 | 로컬-only PoC. OS keystore / 암호화 keyfile 은 phase 2 (NWC 메서드 완성 후). |
+| Remote signer 위임 | **하지 않음** | NIP-46 은 `sign_event` 만 노출 — Ark 의 PSBT/MuSig2 서명은 위임 불가. Amber 등 통한 nsec 외부화는 표준 변경 전까지 막혀 있음. |
+| 연결별 키 | **커넥션마다 새 service keypair** | NIP-47 권장사항. 결제 활동을 사용자 메인키와 연결하지 않기 위함. Ark 키와는 완전 별개. |
 | Notifications | **미구현, info 에서도 광고 안 함** | zap 발송은 응답 이벤트로 충분. 수령 알림은 추후 고도화. |
 | HTTP 노출 | **`127.0.0.1` 바인딩, 인증 없음** | 외부와의 통신은 모두 nostr relay 를 통한 아웃바운드. 인바운드 자체가 없음. reverse proxy / auth 불필요. |
 
@@ -70,9 +72,9 @@ zap 수령은 부차적 (make_invoice 는 지원하지만 active notification �
 
 ```
 src/
-  config.ts          // .env 파싱, 네트워크/relays/mnemonic
+  config.ts          // .env 파싱, 네트워크/relays/nsec
   db.ts              // bun:sqlite 초기화 + 마이그레이션
-  wallet.ts          // MnemonicIdentity + Wallet + boltz client 부트스트랩
+  wallet.ts          // nsec → SingleKey identity + Wallet + boltz client 부트스트랩
   nostr/
     service.ts       // pool, info event 발행, 요청 구독, 디스패치
     crypto.ts        // nip44/nip04 추상화 + 라우팅
@@ -192,7 +194,7 @@ replaceable 로 별도 발행. content 는 `"get_info get_balance make_invoice p
 ## 8. `.env` 형식
 
 ```dotenv
-ARK_MNEMONIC="word1 word2 ... word12"
+ARK_NSEC="nsec1..."                      # Arkade Wallet 의 백업키 그대로 import 가능
 ARK_SERVER_URL="https://arkade.computer"
 BOLTZ_URL="https://api.boltz.exchange"
 NETWORK="bitcoin"
@@ -239,3 +241,16 @@ DB_PATH="./data/bridge.sqlite"
 - **VTXO 만료**: Ark 의 vtxo 는 만료가 있음. `wallet.create` 의 기본
   `settlementConfig` (3일 임계로 자동 renew) 를 그대로 쓴다. 단, 브릿지가
   꺼져 있으면 renew 가 안 됨 — 24/7 가동 전제 위반 시 데이터 손실 위험.
+- **Remote signer (NIP-46/Amber) 위임 불가 — 검토 완료, 폐기**:
+  - Ark Identity 는 3가지 서명을 요구: 임의 메시지 schnorr (`signMessage`),
+    PSBT 입력 (`sign`, BIP-341 sighash), MuSig2 트리 서명 (`signerSession`,
+    인터랙티브 멀티 라운드).
+  - NIP-46 표준 메서드는 `sign_event` 뿐 — 입력이 nostr event JSON 으로
+    강제되어 임의 32바이트 해시 서명을 끌어낼 수 없음. raw schnorr / MuSig2
+    라운드 메서드는 표준에 없음.
+  - 따라서 "Amber 에 위임해서 .env 에서 nsec 빼기" 는 현 시점 불가능.
+    NIP-46 이 raw 서명을 표준화하더라도 MuSig2 인터랙티브 라운드는 별도
+    프로토콜이 필요 — phase 2 후보에서 제외.
+  - 더 현실적인 키 격리 경로 (필요해질 때): OS keystore (Keychain/libsecret),
+    부팅 시 패스프레이즈로 unlock 되는 암호화 keyfile, 별도 머신의 signer
+    데몬. 일단은 모두 미루고 `.env` 평문으로 간다.
