@@ -1,12 +1,25 @@
 {
   "name": "arkade-nwc-bridge",
-  "module": "index.ts",
+  "module": "src/index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --hot run src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "@arkade-os/boltz-swap": "^0.3.31",
+    "@arkade-os/sdk": "^0.4.27",
+    "eventsource": "^4.1.0",
+    "light-bolt11-decoder": "^3.2.0",
+    "nostr-tools": "^2.23.3",
+    "qr": "^0.6.0"
   }
 }
