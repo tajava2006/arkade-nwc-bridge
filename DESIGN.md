@@ -35,6 +35,7 @@ zap 수령은 부차적 (make_invoice 는 지원하지만 active notification �
 | Ark 키 표현 | **`nsec` 한 줄** (`.env` 평문) | wallet/ 의 백업키와 동일 표현. Amber 등 nostr 도구와 백업 호환. 니모닉은 결국 단일 키만 derive 하므로 (`m/44/1237/0'/0/0` 고정) 의미 없음. |
 | 시크릿 보관 | `.env` 평문 | 로컬-only PoC. OS keystore / 암호화 keyfile 은 phase 2 (NWC 메서드 완성 후). |
 | Remote signer 위임 | **하지 않음** | NIP-46 은 `sign_event` 만 노출 — Ark 의 PSBT/MuSig2 서명은 위임 불가. Amber 등 통한 nsec 외부화는 표준 변경 전까지 막혀 있음. |
+| VTXO 갱신 위임 (delegation) | **하지 않음** (브릿지가 24/7 가동 전제) | `delegatorProvider` 를 켜면 offchain tapscript 에 delegation path 가 추가되어 *같은 키여도 다른 ark 주소* 가 생성됨. arkade.money 는 default 가 ON 이므로 같은 nsec 로 import 해도 잔고가 안 보임 — arkade.money 쪽에서 delegate 를 끄거나 별개 계정으로 운용해야 함. |
 | 연결별 키 | **커넥션마다 새 service keypair** | NIP-47 권장사항. 결제 활동을 사용자 메인키와 연결하지 않기 위함. Ark 키와는 완전 별개. |
 | Notifications | **미구현, info 에서도 광고 안 함** | zap 발송은 응답 이벤트로 충분. 수령 알림은 추후 고도화. |
 | HTTP 노출 | **`127.0.0.1` 바인딩, 인증 없음** | 외부와의 통신은 모두 nostr relay 를 통한 아웃바운드. 인바운드 자체가 없음. reverse proxy / auth 불필요. |
