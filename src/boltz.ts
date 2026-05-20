@@ -47,6 +47,12 @@ export interface BoltzContext {
 }
 
 export async function initBoltz(wallet: Wallet): Promise<BoltzContext> {
+  // No swapProvider — let ArkadeSwaps.create pick the SDK's built-in default
+  // (api.boltz.exchange for bitcoin), which is the same endpoint the
+  // arkade.money production wallet ships with and gives lower submarine fees
+  // (0.1% vs 0.25%) than the ark-specific endpoint that the d.ts docstring
+  // incorrectly claims is the default. If we ever need to point at a
+  // different Boltz instance, add it back behind an opt-in env var.
   const swaps = await ArkadeSwaps.create({
     wallet,
     swapRepository: new InMemorySwapRepository(),

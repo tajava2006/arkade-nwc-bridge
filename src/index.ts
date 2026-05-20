@@ -3,6 +3,7 @@ import { loadConfig } from './config'
 import { openDatabase } from './db'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
+import { startNostrService } from './nostr/service'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -10,7 +11,6 @@ async function main(): Promise<void> {
   console.log('arkade-nwc-bridge starting')
   console.log(`  network        ${cfg.network}`)
   console.log(`  ark server     ${cfg.arkServerUrl}`)
-  console.log(`  boltz          ${cfg.boltzUrl}`)
   console.log(`  nwc relays     ${cfg.nwcRelays.join(', ')}`)
   console.log(`  http           http://${cfg.httpBind}:${cfg.httpPort}`)
   console.log(`  sqlite         ${cfg.dbPath}`)
@@ -35,6 +35,32 @@ async function main(): Promise<void> {
   console.log(
     `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
   )
+
+  const nostr = await startNostrService({ cfg, db, wallet })
+
+  // Minimal graceful shutdown so SIGINT/SIGTERM don't leave open sockets
+  // straggling. Full ark-wallet / boltz-swap teardown comes in phase 10.
+  const shutdown = async (signal: string): Promise<void> => {
+    console.log(`\n${signal} received, shutting down`)
+    await nostr.stop()
+    await swaps.dispose()
+    db.close()
+    process.exit(0)
+  }
+  process.on('SIGINT', () => {
+    shutdown('SIGINT').catch((err) => {
+      console.error('shutdown error:', err)
+      process.exit(1)
+    })
+  })
+  process.on('SIGTERM', () => {
+    shutdown('SIGTERM').catch((err) => {
+      console.error('shutdown error:', err)
+      process.exit(1)
+    })
+  })
+
+  console.log('ready — waiting for NWC requests')
 }
 
 main().catch((err) => {

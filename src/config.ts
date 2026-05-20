@@ -7,7 +7,6 @@ export interface Config {
   arkPrivateKey: Uint8Array
   network: Network
   arkServerUrl: string
-  boltzUrl: string
   nwcRelays: string[]
   httpBind: string
   httpPort: number
@@ -76,7 +75,6 @@ export function loadConfig(): Config {
     arkPrivateKey,
     network,
     arkServerUrl: optionalEnv('ARK_SERVER_URL', 'https://arkade.computer'),
-    boltzUrl: optionalEnv('BOLTZ_URL', 'https://api.boltz.exchange'),
     nwcRelays,
     httpBind: optionalEnv('HTTP_BIND', '127.0.0.1'),
     httpPort,

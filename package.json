@@ -6,7 +6,8 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --hot run src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "new-connection": "bun run scripts/new-connection.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

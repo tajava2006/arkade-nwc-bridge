@@ -197,8 +197,8 @@ replaceable 로 별도 발행. content 는 `"get_info get_balance make_invoice p
 ```dotenv
 ARK_NSEC="nsec1..."                      # Arkade Wallet 의 백업키 그대로 import 가능
 ARK_SERVER_URL="https://arkade.computer"
-BOLTZ_URL="https://api.boltz.exchange"
 NETWORK="bitcoin"
+# Boltz endpoint 는 SDK default 사용 — 명시 안 함 (§10 참조).
 NWC_RELAYS="wss://relay.getalby.com/v1,wss://relay.damus.io"
 HTTP_PORT=4282
 HTTP_BIND="127.0.0.1"
@@ -234,6 +234,13 @@ DB_PATH="./data/bridge.sqlite"
 - **boltz-swap Node 호환**: `wallet/` 이 쓰는 `ServiceWorkerArkadeSwaps` 는
   브라우저 SW 전용. 패키지 안의 다른 export (`SwapManagerClient` 등) 가
   헤드리스에서 쓰일 수 있는지 install 후 살펴봐야 함. 4번 단계에서 결정.
+- **Boltz endpoint 는 SDK default 사용** — `ArkadeSwaps.create({ wallet, ... })`
+  에 `swapProvider` 를 안 넘기면 SDK 내부 default 인 `api.boltz.exchange`
+  로 자동 연결된다 (chunk-B3Q4TFWT.js:318 의 하드코딩 URL). `arkade.money`
+  production wallet 도 같은 endpoint 박아 둠. d.ts 의 docstring 은
+  "default = api.ark.boltz.exchange" 라고 *틀리게* 적어두어서 한 번 헷갈렸음
+  — 실제 default 는 일반 Boltz 이고 submarine fee 도 더 낮다 (0.1% vs 0.25%).
+  다른 Boltz 인스턴스가 필요해질 때 그때 옵트인 env 로 다시 추가.
 - **Reverse swap 알림 부재**: `make_invoice` 후 결제 수령은 `lookup_invoice`
   폴링으로만 알 수 있음. 일부 클라이언트는 폴링을 안 함 — 추후 23197
   notification 구현 필요.
