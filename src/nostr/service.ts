@@ -20,9 +20,9 @@ import { handleGetInfo } from '../handlers/get_info'
 import { handleGetBalance } from '../handlers/get_balance'
 import { handleMakeInvoice } from '../handlers/make_invoice'
 import { handlePayInvoice } from '../handlers/pay_invoice'
-
-const SUPPORTED_METHODS = ['get_info', 'get_balance', 'make_invoice', 'pay_invoice'] as const
-type SupportedMethod = (typeof SUPPORTED_METHODS)[number]
+import { handleLookupInvoice } from '../handlers/lookup_invoice'
+import { handleListTransactions } from '../handlers/list_transactions'
+import { SUPPORTED_METHODS, type SupportedMethod } from '../lib/methods'
 
 interface NwcRequest {
   method: string
@@ -203,6 +203,10 @@ async function dispatch(
         { swaps: deps.swaps, db: deps.db, conn, eventId: event.id },
         params,
       )
+    case 'lookup_invoice':
+      return handleLookupInvoice({ db: deps.db }, params)
+    case 'list_transactions':
+      return handleListTransactions({ db: deps.db }, params)
     default:
       throw new NwcError('NOT_IMPLEMENTED', `unknown method '${method}'`)
   }
