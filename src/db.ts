@@ -77,6 +77,22 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    description: 'boltz_swaps table backing the SwapRepository for @arkade-os/boltz-swap',
+    sql: `
+      CREATE TABLE boltz_swaps (
+        id          TEXT    PRIMARY KEY,
+        type        TEXT    NOT NULL,   -- 'reverse' | 'submarine' | 'chain'
+        status      TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL,
+        data        TEXT    NOT NULL    -- JSON blob of the full BoltzSwap object
+      );
+      CREATE INDEX idx_boltz_swaps_status ON boltz_swaps(status);
+      CREATE INDEX idx_boltz_swaps_type ON boltz_swaps(type);
+      CREATE INDEX idx_boltz_swaps_created_at ON boltz_swaps(created_at);
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {
