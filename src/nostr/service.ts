@@ -19,6 +19,7 @@ import { decryptContent, encryptContent, pickRequestScheme, type EncryptionSchem
 import { handleGetInfo } from '../handlers/get_info'
 import { handleGetBalance } from '../handlers/get_balance'
 import { handleMakeInvoice } from '../handlers/make_invoice'
+import { handlePayInvoice } from '../handlers/pay_invoice'
 
 const SUPPORTED_METHODS = ['get_info', 'get_balance', 'make_invoice', 'pay_invoice'] as const
 type SupportedMethod = (typeof SUPPORTED_METHODS)[number]
@@ -198,7 +199,10 @@ async function dispatch(
         params,
       )
     case 'pay_invoice':
-      throw new NwcError('NOT_IMPLEMENTED', `${method} not yet implemented (phase 6c)`)
+      return handlePayInvoice(
+        { swaps: deps.swaps, db: deps.db, conn, eventId: event.id },
+        params,
+      )
     default:
       throw new NwcError('NOT_IMPLEMENTED', `unknown method '${method}'`)
   }
