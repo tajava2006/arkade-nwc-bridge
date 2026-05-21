@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet } from '@arkade-os/sdk'
+import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
 import { NWCWalletInfo, NWCWalletRequest, NWCWalletResponse } from 'nostr-tools/kinds'
@@ -17,6 +18,7 @@ import {
 import { decryptContent, encryptContent, pickRequestScheme, type EncryptionScheme } from './crypto'
 import { handleGetInfo } from '../handlers/get_info'
 import { handleGetBalance } from '../handlers/get_balance'
+import { handleMakeInvoice } from '../handlers/make_invoice'
 
 const SUPPORTED_METHODS = ['get_info', 'get_balance', 'make_invoice', 'pay_invoice'] as const
 type SupportedMethod = (typeof SUPPORTED_METHODS)[number]
@@ -30,6 +32,7 @@ export interface NostrServiceDeps {
   cfg: Config
   db: Database
   wallet: Wallet
+  swaps: ArkadeSwaps
 }
 
 export interface NostrService {
@@ -163,7 +166,7 @@ async function handleEvent(
   console.log(`nostr: conn #${conn.id} → ${method}`)
 
   try {
-    const result = await dispatch(deps, conn, method, request.params)
+    const result = await dispatch(deps, conn, event, method, request.params)
     await respondOk(pool, cfg.nwcRelays, conn, event, scheme, method, result)
   } catch (err) {
     const nwcErr =
@@ -179,7 +182,8 @@ async function handleEvent(
 
 async function dispatch(
   deps: NostrServiceDeps,
-  _conn: Connection,
+  conn: Connection,
+  event: NostrEvent,
   method: string,
   params: Record<string, unknown>,
 ): Promise<unknown> {
@@ -189,10 +193,13 @@ async function dispatch(
     case 'get_balance':
       return handleGetBalance({ wallet: deps.wallet })
     case 'make_invoice':
+      return handleMakeInvoice(
+        { swaps: deps.swaps, db: deps.db, conn, eventId: event.id },
+        params,
+      )
     case 'pay_invoice':
-      throw new NwcError('NOT_IMPLEMENTED', `${method} not yet implemented (phase 6)`)
+      throw new NwcError('NOT_IMPLEMENTED', `${method} not yet implemented (phase 6c)`)
     default:
-      void params
       throw new NwcError('NOT_IMPLEMENTED', `unknown method '${method}'`)
   }
 }

@@ -36,7 +36,7 @@ async function main(): Promise<void> {
     `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
   )
 
-  const nostr = await startNostrService({ cfg, db, wallet })
+  const nostr = await startNostrService({ cfg, db, wallet, swaps })
 
   // Minimal graceful shutdown so SIGINT/SIGTERM don't leave open sockets
   // straggling. Full ark-wallet / boltz-swap teardown comes in phase 10.
