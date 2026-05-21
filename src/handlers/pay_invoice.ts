@@ -81,18 +81,23 @@ export async function handlePayInvoice(
   }
 
   // SendLightningPaymentResponse.amount is documented as "Amount paid in
-  // satoshis" — the on-Ark amount we handed Boltz, which equals the invoice
-  // amount + Boltz fee. Subtracting the invoice amount yields fees in sats.
+  // satoshis" — the on-Ark amount we handed the swap provider, which
+  // equals the invoice amount + the swap fee. That's the number that
+  // actually left the wallet, so we promote it into amount_msat on
+  // success (replacing the invoice-nominal value we wrote at INSERT time).
+  // lookup_invoice / list_transactions now report wallet movement, with
+  // fees_paid covering the difference — mirroring how the arkade.money
+  // wallet presents the same flow.
   const paidMsat = satsToMsats(result.amount)
   const feesPaidMsat = Math.max(0, paidMsat - invoiceMsat)
   const settledAt = Math.floor(Date.now() / 1000)
 
   deps.db
     .query(
-      `UPDATE payments SET state = 'settled', preimage = ?, fees_paid_msat = ?, settled_at = ?
+      `UPDATE payments SET state = 'settled', preimage = ?, amount_msat = ?, fees_paid_msat = ?, settled_at = ?
        WHERE request_event_id = ?`,
     )
-    .run(result.preimage, feesPaidMsat, settledAt, deps.eventId)
+    .run(result.preimage, paidMsat, feesPaidMsat, settledAt, deps.eventId)
   deps.db
     .query(`UPDATE connections SET spent_msat = spent_msat + ? WHERE id = ?`)
     .run(invoiceMsat, deps.conn.id)

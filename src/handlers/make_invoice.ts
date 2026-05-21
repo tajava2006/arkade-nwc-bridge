@@ -2,7 +2,7 @@ import type { Database } from 'bun:sqlite'
 import { NetworkError, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import { NwcError } from '../lib/errors'
-import { msatsToSats } from '../lib/msat'
+import { msatsToSats, satsToMsats } from '../lib/msat'
 import type { Connection } from '../nostr/connections'
 
 export interface MakeInvoiceDeps {
@@ -57,19 +57,30 @@ export async function handleMakeInvoice(
   const createdAt = Math.floor(Date.now() / 1000)
   const expiresAt = result.expiry
 
+  // result.amount is the on-Ark amount in sats *after* the swap provider's
+  // fee — i.e. what will land in our Ark wallet, not the invoice's nominal
+  // amount. We record that as amount_msat so list_transactions /
+  // lookup_invoice report what the user actually sees in their balance,
+  // matching how arkade.money's wallet UI presents the same flow.
+  // Symmetric with pay_invoice: each side reports the on-Ark movement,
+  // with fees_paid covering the gap to the invoice nominal.
+  const receivedMsat = satsToMsats(result.amount)
+  const feesPaidMsat = Math.max(0, amountMsat - receivedMsat)
+
   deps.db
     .query(
       `INSERT INTO invoices (
          connection_id, request_event_id, invoice, payment_hash,
-         amount_msat, description, swap_id, state, created_at, expires_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+         amount_msat, fees_paid_msat, description, swap_id, state, created_at, expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     )
     .run(
       deps.conn.id,
       deps.eventId,
       result.invoice,
       result.paymentHash,
-      amountMsat,
+      receivedMsat,
+      feesPaidMsat,
       description ?? null,
       result.pendingSwap.id,
       createdAt,
@@ -82,7 +93,8 @@ export async function handleMakeInvoice(
     invoice: result.invoice,
     description,
     payment_hash: result.paymentHash,
-    amount: amountMsat,
+    amount: receivedMsat,
+    fees_paid: feesPaidMsat > 0 ? feesPaidMsat : undefined,
     created_at: createdAt,
     expires_at: expiresAt,
   }

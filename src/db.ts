@@ -93,6 +93,13 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_boltz_swaps_created_at ON boltz_swaps(created_at);
     `,
   },
+  {
+    version: 3,
+    description: 'invoices.fees_paid_msat — captures swap fee on the receive side',
+    sql: `
+      ALTER TABLE invoices ADD COLUMN fees_paid_msat INTEGER;
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

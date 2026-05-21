@@ -13,7 +13,12 @@ export interface InvoiceRow {
   request_event_id: string
   invoice: string
   payment_hash: string
+  // amount_msat semantics: actual sats credited to the Ark wallet (i.e.
+  // invoice nominal minus the swap provider's fee). Matches outgoing's
+  // "what left the wallet" — both sides report the on-Ark movement, not
+  // the LN nominal.
   amount_msat: number
+  fees_paid_msat: number | null
   description: string | null
   swap_id: string | null
   state: string
@@ -49,6 +54,7 @@ export function invoiceRowToTransaction(row: InvoiceRow): Record<string, unknown
     preimage: row.preimage ?? undefined,
     payment_hash: row.payment_hash,
     amount: row.amount_msat,
+    fees_paid: row.fees_paid_msat ?? undefined,
     created_at: row.created_at,
     expires_at: row.expires_at ?? undefined,
     settled_at: row.settled_at ?? undefined,
