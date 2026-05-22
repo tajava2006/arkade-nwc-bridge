@@ -4,6 +4,7 @@ import { openDatabase } from './db'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
+import { startWebServer } from './web/server'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -38,10 +39,14 @@ async function main(): Promise<void> {
 
   const nostr = await startNostrService({ cfg, db, wallet, swaps })
 
+  const web = startWebServer({ cfg, db, wallet, arkAddress: address })
+  console.log(`  web ui         ${web.url}`)
+
   // Minimal graceful shutdown so SIGINT/SIGTERM don't leave open sockets
   // straggling. Full ark-wallet / boltz-swap teardown comes in phase 10.
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n${signal} received, shutting down`)
+    await web.stop()
     await nostr.stop()
     await swaps.dispose()
     db.close()

@@ -56,7 +56,12 @@ export interface NewConnectionResult {
 
 export function createConnection(
   db: Database,
-  args: { label: string | null; relays: string[] },
+  args: {
+    label: string | null
+    relays: string[]
+    /** Per-connection spending cap in msats. null = unlimited. */
+    budgetMsat?: number | null
+  },
 ): NewConnectionResult {
   if (args.relays.length === 0) {
     throw new Error('at least one relay url is required')
@@ -69,13 +74,20 @@ export function createConnection(
   const createdAt = Math.floor(Date.now() / 1000)
 
   const row = db
-    .query<ConnectionRow, [string | null, string, string, string, number]>(
+    .query<ConnectionRow, [string | null, string, string, string, number | null, number]>(
       `INSERT INTO connections (
-         label, service_secret_hex, service_pubkey_hex, client_pubkey_hex, created_at
-       ) VALUES (?, ?, ?, ?, ?)
+         label, service_secret_hex, service_pubkey_hex, client_pubkey_hex, budget_msat, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?)
        RETURNING *`,
     )
-    .get(args.label, bytesToHex(serviceSecret), servicePubkey, clientPubkey, createdAt)
+    .get(
+      args.label,
+      bytesToHex(serviceSecret),
+      servicePubkey,
+      clientPubkey,
+      args.budgetMsat ?? null,
+      createdAt,
+    )
 
   if (!row) {
     throw new Error('failed to insert connection row')
@@ -90,6 +102,33 @@ export function createConnection(
       relays: args.relays,
     }),
   }
+}
+
+export function listAllConnections(db: Database): {
+  active: Connection[]
+  revoked: Connection[]
+} {
+  const rows = db.query<ConnectionRow, []>('SELECT * FROM connections ORDER BY id DESC').all()
+  const active: Connection[] = []
+  const revoked: Connection[] = []
+  for (const row of rows) {
+    const c = rowToConnection(row)
+    if (c.revokedAt === null) active.push(c)
+    else revoked.push(c)
+  }
+  return { active, revoked }
+}
+
+export function revokeConnection(db: Database, id: number): void {
+  // The nostr-side authorization check already gates on revoked_at IS NULL,
+  // so revoking is just a DB flag — any future request from the client
+  // hits findConnectionByServicePubkey, gets null, and is silently dropped.
+  // Subscription pruning + a kind-5 deletion event for the info notice
+  // can land alongside the phase 10 cleanup pass.
+  db.query('UPDATE connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(
+    Math.floor(Date.now() / 1000),
+    id,
+  )
 }
 
 export function listActiveConnections(db: Database): Connection[] {
