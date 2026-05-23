@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { Config } from '../../src/config'
-import { startWebServer, type WebServer } from '../../src/web/server'
+import { startWebServer, type AppStateRef, type WebServer } from '../../src/web/server'
 import type { NostrService } from '../../src/nostr/service'
+import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
-import { emptyBalance, makeWalletStub } from '../helpers/mocks'
+import { emptyBalance, makeSwapsStub, makeWalletStub } from '../helpers/mocks'
 
 // Bun.serve binds to a real port. Use 0 to ask the OS for any free one so
 // concurrent test files don't collide.
@@ -14,14 +15,29 @@ const STUB_NOSTR: NostrService = {
 }
 
 const CFG: Config = {
-  arkNsec: '',
-  arkPrivateKey: new Uint8Array(),
   network: 'bitcoin',
   arkServerUrl: 'https://stub',
   nwcRelays: ['wss://r'],
   httpBind: '127.0.0.1',
   httpPort: 0,
   dbPath: '',
+}
+
+// Pre-built ready-mode AppState so the web server skips the /setup gate.
+// The setup flow itself has its own test below.
+function readyState(): AppStateRef {
+  return {
+    current: {
+      mode: 'ready',
+      wallet: makeWalletStub({
+        balance: emptyBalance({ available: 1234, recoverable: 0 }),
+        address: 'tark1stubaddress',
+      }),
+      swaps: makeSwapsStub() as ArkadeSwaps,
+      nostr: STUB_NOSTR,
+      arkAddress: 'tark1stubaddress',
+    },
+  }
 }
 
 describe('web server', () => {
@@ -34,12 +50,8 @@ describe('web server', () => {
     web = startWebServer({
       cfg: CFG,
       db: temp.db,
-      wallet: makeWalletStub({
-        balance: emptyBalance({ available: 1234, recoverable: 0 }),
-        address: 'tark1stubaddress',
-      }),
-      arkAddress: 'tark1stubaddress',
-      nostr: STUB_NOSTR,
+      state: readyState(),
+      bootReady: async () => {},
     })
     base = web.url
   })
@@ -112,5 +124,92 @@ describe('web server', () => {
     expect(res.status).toBe(400)
     const body = await res.text()
     expect(body).toContain('budget')
+  })
+})
+
+describe('web server — setup mode', () => {
+  let temp: TempDb
+  let web: WebServer
+  let base: string
+  let bootedWith: Uint8Array | null = null
+
+  beforeAll(() => {
+    temp = openTempDb()
+    const state: AppStateRef = { current: { mode: 'setup' } }
+    web = startWebServer({
+      cfg: CFG,
+      db: temp.db,
+      state,
+      bootReady: async (pk) => {
+        // Don't actually bring up wallet/boltz/nostr in tests — just record
+        // the key the route handed us and flip mode like index.ts would.
+        bootedWith = pk
+        state.current = {
+          mode: 'ready',
+          wallet: makeWalletStub({ address: 'tark1stub' }),
+          swaps: makeSwapsStub() as ArkadeSwaps,
+          nostr: STUB_NOSTR,
+          arkAddress: 'tark1stub',
+        }
+      },
+    })
+    base = web.url
+  })
+
+  afterAll(async () => {
+    await web.stop()
+    temp.cleanup()
+  })
+
+  test('non-setup routes redirect to /setup before an account exists', async () => {
+    const res = await fetch(`${base}/`, { redirect: 'manual' })
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/setup')
+  })
+
+  test('GET /setup renders the form', async () => {
+    const res = await fetch(`${base}/setup`)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Paste an existing nsec')
+    expect(body).toContain('Generate new nsec')
+  })
+
+  test('POST /setup with bogus nsec returns the form with an error', async () => {
+    const form = new FormData()
+    form.set('mode', 'paste')
+    form.set('nsec', 'not-an-nsec')
+    const res = await fetch(`${base}/setup`, { method: 'POST', body: form })
+    expect(res.status).toBe(400)
+    const body = await res.text()
+    expect(body).toContain('Could not parse nsec')
+    // No account row should have been written for a parse failure.
+    const row = temp.db.query<{ c: number }, []>('SELECT COUNT(*) AS c FROM accounts').get()
+    expect(row?.c).toBe(0)
+  })
+
+  test('POST /setup with a valid generated key flips to ready mode', async () => {
+    const form = new FormData()
+    form.set('mode', 'generate')
+    const res = await fetch(`${base}/setup`, { method: 'POST', body: form, redirect: 'manual' })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('nsec1') // generated nsec is shown on success page
+    expect(bootedWith).not.toBeNull()
+    expect(bootedWith!.length).toBe(32)
+
+    // Account row exists, and GET / now serves the dashboard instead of redirecting.
+    const accountRow = temp.db.query<{ c: number }, []>('SELECT COUNT(*) AS c FROM accounts').get()
+    expect(accountRow?.c).toBe(1)
+    const dashRes = await fetch(`${base}/`)
+    expect(dashRes.status).toBe(200)
+    const dashBody = await dashRes.text()
+    expect(dashBody).toContain('Dashboard')
+  })
+
+  test('GET /setup once configured redirects to /', async () => {
+    const res = await fetch(`${base}/setup`, { redirect: 'manual' })
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/')
   })
 })

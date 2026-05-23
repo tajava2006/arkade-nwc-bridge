@@ -1,7 +1,9 @@
 // Tier 3 — end-to-end against real Ark mainnet + NWC relays.
 //
 // Gated on RUN_LIVE_TESTS=1 because:
-//   - it requires network + a valid ARK_NSEC in .env
+//   - it requires the user's actual `./data/bridge.sqlite` to have an
+//     account row (created by completing /setup in the running bridge)
+//   - it talks to the real Ark server, real Boltz, real relays
 //   - each run leaves a (free, unpaid) reverse swap record on Boltz
 //   - even though no money moves, repeated runs would be rude to upstream
 //
@@ -26,14 +28,14 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { Config } from '../../src/config'
+import { loadConfig, type Config } from '../../src/config'
 import { openDatabase } from '../../src/db'
+import { loadAccount } from '../../src/account'
 import { initArkWallet } from '../../src/wallet'
 import { initBoltz } from '../../src/boltz'
 import { startNostrService, type NostrService } from '../../src/nostr/service'
 import { createConnection, revokeConnection } from '../../src/nostr/connections'
 import { encryptContent, decryptContent } from '../../src/nostr/crypto'
-import { nip19 } from 'nostr-tools'
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure'
 import { SimplePool } from 'nostr-tools/pool'
 import { NWCWalletRequest, NWCWalletResponse } from 'nostr-tools/kinds'
@@ -44,6 +46,7 @@ const TIMEOUT_MS = 60_000
 interface Harness {
   cfg: Config
   dbDir: string
+  privateKey: Uint8Array
   nostr: NostrService
   swaps: import('@arkade-os/boltz-swap').ArkadeSwaps
   wallet: import('@arkade-os/sdk').Wallet
@@ -55,26 +58,31 @@ interface Harness {
   relays: string[]
 }
 
-function buildLiveConfig(dbPath: string): Config {
-  const arkNsec = process.env.ARK_NSEC
-  if (!arkNsec) throw new Error('ARK_NSEC missing — live tests need .env from the repo root')
-  const decoded = nip19.decode(arkNsec)
-  if (decoded.type !== 'nsec') throw new Error('ARK_NSEC is not an nsec')
-  const relays = (process.env.NWC_RELAYS ?? '')
-    .split(',')
-    .map((r) => r.trim())
-    .filter(Boolean)
-  if (relays.length === 0) throw new Error('NWC_RELAYS missing')
-  return {
-    arkNsec,
-    arkPrivateKey: decoded.data,
-    network: 'bitcoin',
-    arkServerUrl: process.env.ARK_SERVER_URL?.trim() || 'https://arkade.computer',
-    nwcRelays: relays,
-    httpBind: '127.0.0.1',
-    httpPort: 0,
-    dbPath,
+/**
+ * Pull the user's nsec out of the running bridge's sqlite. We don't reuse
+ * the same db for the test (we want a clean temp DB for swap/connection
+ * state so the test doesn't pollute production), just borrow the account
+ * row. WAL mode lets us read concurrently if the bridge happens to be up.
+ */
+function loadPrivateKeyFromProductionDb(): Uint8Array {
+  const productionPath = loadConfig().dbPath
+  const db = openDatabase(productionPath)
+  try {
+    const account = loadAccount(db)
+    if (!account) {
+      throw new Error(
+        `no account row in ${productionPath} — run \`bun run dev\` and complete /setup first`,
+      )
+    }
+    return account.privateKey
+  } finally {
+    db.close()
   }
+}
+
+function buildLiveConfig(dbPath: string): Config {
+  const base = loadConfig()
+  return { ...base, httpPort: 0, dbPath }
 }
 
 /**
@@ -153,9 +161,10 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
   beforeAll(async () => {
     const dir = mkdtempSync(join(tmpdir(), 'nwc-bridge-live-'))
     const cfg = buildLiveConfig(join(dir, 'bridge.sqlite'))
+    const privateKey = loadPrivateKeyFromProductionDb()
 
     const db = openDatabase(cfg.dbPath)
-    const { wallet } = await initArkWallet(cfg)
+    const { wallet } = await initArkWallet(cfg, privateKey)
     const { swaps } = await initBoltz({ db, wallet })
     const nostr = await startNostrService({ cfg, db, wallet, swaps })
 
@@ -180,6 +189,7 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
     harness = {
       cfg,
       dbDir: dir,
+      privateKey,
       nostr,
       swaps,
       wallet,

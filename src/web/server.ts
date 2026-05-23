@@ -1,7 +1,10 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet } from '@arkade-os/sdk'
+import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import type { Config } from '../config'
+import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
+import { nip19 } from 'nostr-tools'
 import { htmlResponse } from '../lib/html'
 import {
   createConnection,
@@ -16,20 +19,40 @@ import { connectionsListView } from './views/connections'
 import { newConnectionForm, newConnectionResultView } from './views/new_connection'
 import { walletHistoryView } from './views/history'
 import { connectionDetailView } from './views/connection_detail'
+import { setupGeneratedView, setupView } from './views/setup'
 import { qrSvg } from './qr'
+
+export type AppState =
+  | { mode: 'setup' }
+  | {
+      mode: 'ready'
+      wallet: Wallet
+      swaps: ArkadeSwaps
+      nostr: NostrService
+      arkAddress: string
+    }
+
+/**
+ * Shared mutable handle. `current` flips from 'setup' to 'ready' the moment
+ * `bootReady` returns from a successful POST /setup, and stays 'ready' for
+ * the rest of the process lifetime. Pass it to the web server so handlers
+ * read the latest mode on every request without rewiring routes.
+ */
+export interface AppStateRef {
+  current: AppState
+}
 
 export interface WebServerDeps {
   cfg: Config
   db: Database
-  wallet: Wallet
-  arkAddress: string
+  state: AppStateRef
   /**
-   * Lets the web layer trigger nostr-side side effects (publish info event
-   * + start listening) when a connection is created, and tear down the
-   * subscription on revoke. The interface is narrow so the web layer
-   * doesn't reach into pool / handler internals.
+   * Brings up wallet → boltz → nostr inside the same process. Called from
+   * POST /setup after the account row is written. Throws if wiring up the
+   * Ark/Boltz/relay clients fails — caller is responsible for cleaning up
+   * the partial state (POST /setup deletes the just-created row on error).
    */
-  nostr: NostrService
+  bootReady: (privateKey: Uint8Array) => Promise<void>
 }
 
 export interface WebServer {
@@ -38,15 +61,94 @@ export interface WebServer {
 }
 
 export function startWebServer(deps: WebServerDeps): WebServer {
-  const { cfg, db, wallet, arkAddress, nostr } = deps
+  const { cfg, db, state, bootReady } = deps
+
+  const redirectToSetup = (): Response => Response.redirect('/setup', 303)
+
+  // All non-/setup routes funnel through this guard. If we're in setup
+  // mode, bounce to /setup; otherwise hand back the ready-mode handles so
+  // the caller doesn't have to re-narrow state.current.
+  const requireReady = ():
+    | { ok: true; ready: Extract<AppState, { mode: 'ready' }> }
+    | { ok: false; response: Response } => {
+    if (state.current.mode !== 'ready') {
+      return { ok: false, response: redirectToSetup() }
+    }
+    return { ok: true, ready: state.current }
+  }
 
   const server = Bun.serve({
     port: cfg.httpPort,
     hostname: cfg.httpBind,
     routes: {
+      '/setup': {
+        GET: () => {
+          if (state.current.mode === 'ready') return Response.redirect('/', 303)
+          return htmlResponse(setupView())
+        },
+        POST: async (req) => {
+          if (state.current.mode === 'ready') return Response.redirect('/', 303)
+          const form = await req.formData()
+          const mode = form.get('mode')
+
+          let privateKey: Uint8Array
+          let generated = false
+          try {
+            if (mode === 'generate') {
+              privateKey = generatePrivateKey()
+              generated = true
+            } else if (mode === 'paste') {
+              const raw = form.get('nsec')
+              if (typeof raw !== 'string' || raw.trim() === '') {
+                return htmlResponse(setupView({ error: 'nsec is required' }), { status: 400 })
+              }
+              privateKey = parseNsecInput(raw)
+            } else {
+              return htmlResponse(setupView({ error: 'invalid setup mode' }), { status: 400 })
+            }
+          } catch (err) {
+            return htmlResponse(
+              setupView({
+                error: `Could not parse nsec: ${err instanceof Error ? err.message : String(err)}`,
+                pastedNsec: typeof form.get('nsec') === 'string' ? (form.get('nsec') as string) : '',
+              }),
+              { status: 400 },
+            )
+          }
+
+          const account = createAccount(db, privateKey)
+          try {
+            await bootReady(privateKey)
+          } catch (err) {
+            // Wallet/Boltz/relay bring-up failed. Undo the row so the user
+            // can retry without a half-configured DB. The just-generated
+            // (or pasted) nsec is only in memory here — surface it in the
+            // error so a generate run doesn't silently lose the key.
+            db.query('DELETE FROM accounts WHERE id = ?').run(account.id)
+            const detail = err instanceof Error ? err.message : String(err)
+            return htmlResponse(
+              setupView({
+                error:
+                  `Saved the account but failed to start the wallet: ${detail}. ` +
+                  (generated
+                    ? `The generated nsec was: ${nip19.nsecEncode(privateKey)} — save it if you want to retry with the same key.`
+                    : 'Try again.'),
+              }),
+              { status: 500 },
+            )
+          }
+
+          if (generated) {
+            return htmlResponse(setupGeneratedView({ nsec: nip19.nsecEncode(privateKey) }))
+          }
+          return Response.redirect('/', 303)
+        },
+      },
       '/': {
         GET: async () => {
-          const balance = await wallet.getBalance()
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const balance = await r.ready.wallet.getBalance()
           const { active } = listAllConnections(db)
           const txCountRow = db
             .query<{ c: number }, []>(
@@ -56,7 +158,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             dashboardView({
               balanceMsat: (balance.available + balance.recoverable) * 1000,
-              arkAddress,
+              arkAddress: r.ready.arkAddress,
               activeConnections: active.length,
               totalTxCount: txCountRow?.c ?? 0,
             }),
@@ -65,13 +167,21 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/connections': {
         GET: () => {
+          const r = requireReady()
+          if (!r.ok) return r.response
           const { active, revoked } = listAllConnections(db)
           return htmlResponse(connectionsListView({ active, revoked }))
         },
       },
       '/connections/new': {
-        GET: () => htmlResponse(newConnectionForm()),
+        GET: () => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          return htmlResponse(newConnectionForm())
+        },
         POST: async (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
           const form = await req.formData()
           const rawLabel = form.get('label')
           const rawBudget = form.get('budget_sats')
@@ -106,7 +216,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // until the next bridge restart and would refuse to connect.
           // publishToRelays inside is best-effort, so a flaky relay won't
           // block the response.
-          await nostr.registerConnection(connection)
+          await r.ready.nostr.registerConnection(connection)
           return htmlResponse(
             newConnectionResultView({
               connectionId: connection.id,
@@ -118,6 +228,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/connections/:id': {
         GET: (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
           const id = Number.parseInt(req.params.id, 10)
           if (!Number.isFinite(id)) return new Response('Invalid id', { status: 400 })
           const conn = findConnectionById(db, id)
@@ -132,6 +244,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/connections/:id/revoke': {
         POST: (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
           const id = Number.parseInt(req.params.id, 10)
           if (!Number.isFinite(id)) {
             return new Response('Invalid id', { status: 400 })
@@ -142,16 +256,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // both treat the row as gone, so this has to happen first.
           const conn = findConnectionById(db, id)
           revokeConnection(db, id)
-          if (conn) nostr.unregisterConnection(conn.servicePubkeyHex)
+          if (conn) r.ready.nostr.unregisterConnection(conn.servicePubkeyHex)
           return Response.redirect('/connections', 303)
         },
       },
       '/history': {
         GET: async () => {
+          const r = requireReady()
+          if (!r.ok) return r.response
           // Raw ark-side wallet history — every onchain/offchain movement
           // the wallet sees. NWC accountability lives on the per-connection
           // detail page; we don't try to correlate the two here.
-          const txs = await wallet.getTransactionHistory()
+          const txs = await r.ready.wallet.getTransactionHistory()
           return htmlResponse(walletHistoryView(txs))
         },
       },

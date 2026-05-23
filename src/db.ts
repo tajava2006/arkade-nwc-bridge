@@ -86,6 +86,20 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_boltz_swaps_created_at ON boltz_swaps(created_at);
     `,
   },
+  {
+    version: 3,
+    description: 'accounts table — Ark identity moves from ARK_NSEC env var to here',
+    // Schema permits multiple rows but the bridge only loads the first by id.
+    // Multi-account would need history/connection scoping changes far beyond
+    // a schema tweak, so for now treat "the account" as `ORDER BY id LIMIT 1`.
+    sql: `
+      CREATE TABLE accounts (
+        id          INTEGER PRIMARY KEY,
+        nsec_hex    TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

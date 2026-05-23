@@ -10,16 +10,21 @@ schema rationale, footguns); this file is just the orientation.
 
 ```
 src/
-  config.ts                  — .env parsing (ARK_NSEC → bytes once, fail-fast)
+  defaults.ts                — static config constants (network, ASP,
+                               relays, bind, port, db path). No env vars
+  config.ts                  — thin wrapper over defaults
+  account.ts                 — accounts table CRUD (loadAccount /
+                               createAccount / parseNsecInput / generate)
   db.ts                      — bun:sqlite + WAL + append-only MIGRATIONS
-  wallet.ts                  — nsec → SingleKey → Wallet (in-memory repos)
+  wallet.ts                  — privateKey → SingleKey → Wallet (in-memory repos)
   boltz.ts                   — ArkadeSwaps + SqliteSwapRepository,
                                SwapManager auto-claim/refund + listener +
                                boot-time reconcile for incoming swaps
   boltz_repository.ts        — SqliteSwapRepository: rows keyed on swap.id,
                                full BoltzSwap stashed as JSON blob
   polyfills.ts               — EventSource shim for the SDK's SSE streams
-  index.ts                   — boot order; SIGINT/SIGTERM teardown
+  index.ts                   — two-phase boot (setup-mode if no account;
+                               ready-mode otherwise); SIGINT/SIGTERM teardown
   nostr/
     connections.ts           — connections table CRUD + URI builder
     crypto.ts                — nip44_v2 / nip04 (request encryption tag
@@ -41,12 +46,10 @@ src/
     msat.ts                  — sat ↔ msat with exact-multiple check
     transaction.ts           — TransactionRow + NIP-47 mapping
   web/
-    server.ts                — Bun.serve routes; loopback only
+    server.ts                — Bun.serve routes; AppState (setup|ready);
+                               loopback only
     qr.ts                    — `qr` package wrapper (SVG)
-    views/                   — server-rendered pages
-scripts/
-  new-connection.ts          — CLI alternative to /connections/new
-.env                         — local-only (gitignored)
+    views/                   — server-rendered pages incl. setup.ts
 data/                        — sqlite file (gitignored)
 ```
 
@@ -56,12 +59,13 @@ data/                        — sqlite file (gitignored)
 bun run dev            # bun --hot run src/index.ts
 bun run start          # plain run
 bun run typecheck      # tsc --noEmit
-bun run new-connection [label]   # mint a connection via CLI
 ```
 
-The web UI lives at http://127.0.0.1:4282 by default. Logs go to
-stdout; when running in background pipe to `/tmp/bridge.log` for
-`tail`-friendly debugging.
+The web UI lives at http://127.0.0.1:4282 by default. First-run
+flow: open `/setup` to paste or generate an nsec; the bridge stays
+in setup-mode (all other routes redirect there) until the account
+row exists. Logs go to stdout; when running in background pipe to
+`/tmp/bridge.log` for `tail`-friendly debugging.
 
 ## Conventions
 
@@ -94,6 +98,15 @@ stdout; when running in background pipe to `/tmp/bridge.log` for
 
 ## Hot footguns
 
+- **No env vars.** Static defaults live in [`src/defaults.ts`](src/defaults.ts);
+  the nsec lives in the `accounts` sqlite table (created via `/setup`).
+  Don't reintroduce `.env` parsing — it was deliberately removed so the
+  bridge is "clone + `bun run dev`" with no setup ritual.
+- **Two-phase boot.** [`src/index.ts`](src/index.ts) starts the web
+  server first, then either calls `bootReady` immediately (account
+  exists) or waits for POST `/setup` to call it. Don't reorder this
+  to "wallet first" — there's no nsec to hand the wallet until setup
+  completes. AppState lives in [`src/web/server.ts`](src/web/server.ts).
 - **Reference dirs** (`nips/`, `nostr-tools/`, `ts-sdk/`, `wallet/`,
   `arkd/`) are gitignored convenience clones. Don't link to them
   from anything that gets committed — public links will 404.

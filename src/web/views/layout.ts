@@ -31,7 +31,7 @@ const STYLES = `
   .pill.failed { background: #f8d7da; color: #721c24; }
 `
 
-type Nav = 'dashboard' | 'connections' | 'history'
+type Nav = 'dashboard' | 'connections' | 'history' | 'setup'
 
 export function layout(args: {
   title: string
@@ -40,6 +40,16 @@ export function layout(args: {
 }): RawHtml {
   const tab = (key: Nav, href: string, label: string) =>
     html`<a href="${href}" class="${args.current === key ? 'active' : ''}">${label}</a>`
+  // Setup mode has no useful nav targets — every other page would just
+  // redirect back here — so render bare.
+  const nav =
+    args.current === 'setup'
+      ? html``
+      : html`<nav>
+          ${tab('dashboard', '/', 'Dashboard')}
+          ${tab('connections', '/connections', 'Connections')}
+          ${tab('history', '/history', 'History')}
+        </nav>`
   return html`
 <html lang="en">
 <head>
@@ -49,11 +59,7 @@ export function layout(args: {
   <style>${raw(STYLES)}</style>
 </head>
 <body>
-  <nav>
-    ${tab('dashboard', '/', 'Dashboard')}
-    ${tab('connections', '/connections', 'Connections')}
-    ${tab('history', '/history', 'History')}
-  </nav>
+  ${nav}
   <h1>${args.title}</h1>
   ${args.body}
 </body>

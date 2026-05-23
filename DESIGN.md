@@ -33,7 +33,7 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 | Runtime | **Bun** (TypeScript) | sqlite via `bun:sqlite`, native HTTP server, no build pipeline. |
 | Frontend | **Server-rendered HTML** (no JS, no framework) | Few pages, local-only, build complexity not worth it. Tagged-template builder in [`src/lib/html.ts`](src/lib/html.ts) with auto-escape + `raw()` escape hatch. |
 | Persistence | **SQLite** via `bun:sqlite` | Single file, WAL, foreign keys on. |
-| Identity input | **`ARK_NSEC` in `.env`** (plaintext) | The Arkade wallet derives a single key from its mnemonic (path `m/44/1237/0'/0/0` — 1237 is Nostr's BIP-44 coin type) and exposes it as `nsec`. A single nsec is functionally equivalent to the mnemonic for this wallet, and matches the reference wallet's backup format so users can paste theirs in directly. |
+| Identity input | **`accounts` sqlite row**, captured via the first-run `/setup` web flow (paste or generate) | The Arkade wallet derives a single key from its mnemonic (path `m/44/1237/0'/0/0` — 1237 is Nostr's BIP-44 coin type) and exposes it as `nsec`. A single nsec is functionally equivalent to the mnemonic for this wallet, and matches the reference wallet's backup format so users can paste theirs in directly. Sqlite over `.env` so cloning the repo and running `bun run dev` is the entire setup; no file editing, no env vars. Plaintext-at-rest matches `.env` — same threat model (local-only, loopback-only, OS file perms). |
 | Service keypair | **One per connection** | NIP-47 SHOULD; per-connection pubkey prevents linking payment activity across clients. |
 | Notifications (kind 23197) | **Not implemented, not advertised** | The primary use case (zap sending) is satisfied by the synchronous 23195 response. Receive notifications need server→client push which requires a listener side we don't write; clients fall back to polling `lookup_invoice`. |
 | Remote signer (NIP-46/Amber) delegation | **Rejected as infeasible** | See §6. |
@@ -86,12 +86,23 @@ and info events update live without a bridge restart.
 
 ## 4. SQLite schema
 
-Four user-facing tables + a schema_migrations bookkeeping table.
+Five user-facing tables + a schema_migrations bookkeeping table.
 The bridge owns its own DB; it is *not* the Wallet's repository
 (that one lives in-memory in this process and rebuilds from the
 indexer on each boot).
 
 ```sql
+-- The Ark identity. Schema permits multiple rows but the bridge
+-- only ever loads the first (`ORDER BY id LIMIT 1`) — multi-account
+-- would need history/connection scoping changes far beyond a
+-- schema tweak. Stored as raw private-key hex; bech32 encoding/
+-- decoding happens at the edges (UI, account.ts).
+accounts (
+  id          INTEGER PRIMARY KEY,
+  nsec_hex    TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL
+)
+
 -- One row per NWC connection. Each gets a fresh service keypair;
 -- the client secret from the URI is NOT stored (NIP-47 guidance).
 connections (
@@ -263,20 +274,36 @@ Defenses, in order of importance:
    (that creates a new swap with no native idempotency), so the
    DB PK is the only thing keeping that side honest.
 
-## 8. `.env` format
+## 8. Configuration
 
-```dotenv
-ARK_NSEC="nsec1..."                          # required
-ARK_SERVER_URL="https://arkade.computer"     # default shown
-NETWORK="bitcoin"                            # bitcoin | signet | mutinynet | regtest
-NWC_RELAYS="wss://relay.getalby.com/v1,wss://relay.damus.io"  # required
-HTTP_BIND="127.0.0.1"                        # do NOT bind 0.0.0.0
-HTTP_PORT=4282
-DB_PATH="./data/bridge.sqlite"
-```
+There is no `.env` and no environment-variable surface. Static
+defaults (network, ASP URL, relays, bind/port, db path) live as
+TypeScript constants in [`src/defaults.ts`](src/defaults.ts); edit
+the source to deviate. The identity (`nsec`) is captured at runtime
+through the `/setup` flow and persisted in the `accounts` sqlite
+table — see §2 *Identity input*.
 
 The Boltz endpoint is intentionally not configurable — SDK default
 is the right answer (§2).
+
+### Two-phase boot
+
+`src/index.ts` always loads defaults and opens the DB first, then
+inspects the `accounts` table:
+
+- **No row** → start the web server in *setup mode*. Every route
+  except `/setup` redirects there. POST `/setup` parses or generates
+  an nsec, INSERTs the account row, and calls `bootReady` in-process
+  to bring up wallet → boltz → nostr. On `bootReady` failure the
+  just-inserted row is deleted so the user can retry cleanly (the
+  /setup response includes the generated nsec on failure so a
+  generate-mode crash doesn't silently lose the key).
+- **Row exists** → call `bootReady` synchronously, then start the
+  web server in *ready mode*.
+
+The mutable handle lives in `AppStateRef` ([`src/web/server.ts`](src/web/server.ts)).
+Shutdown checks `state.current.mode` so SIGINT during setup mode
+skips wallet/boltz/nostr disposal (nothing to dispose yet).
 
 ## 9. Known footguns / known issues
 

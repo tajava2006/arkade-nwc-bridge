@@ -19,8 +19,6 @@ import {
 
 const CFG = {
   network: 'bitcoin',
-  arkNsec: '',
-  arkPrivateKey: new Uint8Array(),
   arkServerUrl: '',
   nwcRelays: ['wss://r'],
   httpBind: '127.0.0.1',

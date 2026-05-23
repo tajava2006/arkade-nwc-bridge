@@ -12,8 +12,8 @@ export interface ArkContext {
   address: string
 }
 
-export async function initArkWallet(cfg: Config): Promise<ArkContext> {
-  const identity = SingleKey.fromPrivateKey(cfg.arkPrivateKey)
+export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promise<ArkContext> {
+  const identity = SingleKey.fromPrivateKey(privateKey)
 
   const wallet = await Wallet.create({
     identity,

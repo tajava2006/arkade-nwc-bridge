@@ -48,36 +48,28 @@ machine for you and exposes the result over NWC.
   - Restore your [arkade.money](https://arkade.money/) wallet with
     delegation **disabled** in settings, and copy out the `nsec`
     backup, **or**
-  - Mint a fresh `nsec` and fund it.
+  - Let the bridge generate a fresh `nsec` and fund the resulting Ark
+    address.
 
-### Install + configure
+### Install + run
 
 ```bash
 bun install
-cp .env.example .env
-$EDITOR .env        # set ARK_NSEC at minimum
-```
-
-`.env` essentials:
-
-```dotenv
-ARK_NSEC="nsec1..."                           # your Ark wallet backup
-NWC_RELAYS="wss://relay.getalby.com/v1,wss://relay.damus.io"
-```
-
-Optional knobs (sane defaults provided): `ARK_SERVER_URL`, `NETWORK`,
-`HTTP_BIND`, `HTTP_PORT`, `DB_PATH`. Don't change `HTTP_BIND` away
-from `127.0.0.1` — there is no auth.
-
-### Run
-
-```bash
 bun run dev          # development (hot reload)
-bun run start        # plain
+# or `bun run start` for plain run
 ```
 
-On first boot it creates `./data/bridge.sqlite` and applies migrations.
-The operator UI is at <http://127.0.0.1:4282>.
+On first boot the bridge creates `./data/bridge.sqlite`, applies
+migrations, and waits for an identity. Open
+<http://127.0.0.1:4282/setup> in a browser and either paste your
+existing `nsec1…` or click *Generate* to mint a fresh one. The nsec
+is stored in the local sqlite file and never leaves the machine.
+
+No `.env` file, no env vars to set. Static defaults (network,
+relays, ASP, bind address, port, db path) live in
+[`src/defaults.ts`](src/defaults.ts) — edit there if you need
+something other than mainnet defaults. Don't change `HTTP_BIND` away
+from `127.0.0.1` — there is no auth.
 
 ## Connecting a nostr client
 
@@ -113,6 +105,7 @@ The web UI surfaces these views:
 
 | Page | What's there |
 |---|---|
+| `/setup` | First-run identity flow (paste or generate nsec). Shown automatically until an account exists; redirects to `/` once configured. |
 | `/` | Balance, Ark address, active-connection count, settled-transaction count. |
 | `/connections` | Active and revoked connections; create / revoke from here. |
 | `/connections/:id` | Per-connection NWC log (every `make_invoice` / `pay_invoice` made through that connection). |
@@ -130,20 +123,22 @@ The web UI surfaces these views:
 - **Boltz takes a fee** on every Lightning send (currently ~0.1%
   submarine, ~0.25% reverse). You'll see the gap as `fees_paid` in
   the per-connection history.
-- **Backup the nsec, not the sqlite file.** Your Ark identity is
-  the `nsec` — the sqlite file is just bridge bookkeeping (NWC
-  connections, swap log) and is rebuilt from on-chain/indexer state
-  on each boot. Losing it loses your connection list, not your
-  money.
+- **Backup the nsec separately.** Your Ark identity is the `nsec`
+  stored in `accounts`. NWC connections, swap log, and other
+  bookkeeping in the same sqlite file rebuild from on-chain/indexer
+  state on each boot, but the nsec doesn't — if you lose the
+  sqlite file you lose access to the funds at its Ark address.
+  Export the nsec to a password manager.
 
 ## Security model
 
 - The HTTP server binds to **loopback only**. There is no auth and
   no inbound traffic from anywhere else — opening it to the network
   is unsafe.
-- The `nsec` is stored **plaintext in `.env`**. Protect that file
-  with normal filesystem permissions. Key-isolation paths (OS
-  keystore, encrypted keyfile, dedicated signer) are documented in
+- The `nsec` is stored **plaintext in the sqlite file**
+  (`./data/bridge.sqlite`, table `accounts`). Protect that file with
+  normal filesystem permissions. Key-isolation paths (OS keystore,
+  encrypted keyfile, dedicated signer) are documented in
   [`DESIGN.md`](DESIGN.md) §6 but not implemented — they need
   signing-API support the current Ark SDK doesn't offer through a
   remote interface.

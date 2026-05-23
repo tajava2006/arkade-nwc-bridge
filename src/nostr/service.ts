@@ -94,7 +94,7 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
   const connections = listActiveConnections(db)
   if (connections.length === 0) {
     console.log(
-      'nostr: no active connections — create one at /connections/new or via `bun run new-connection`',
+      'nostr: no active connections — create one at /connections/new',
     )
   }
   for (const conn of connections) {
