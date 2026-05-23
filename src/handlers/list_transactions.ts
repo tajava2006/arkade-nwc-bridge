@@ -1,15 +1,12 @@
 import type { Database } from 'bun:sqlite'
 
 import { NwcError } from '../lib/errors'
-import {
-  invoiceRowToTransaction,
-  paymentRowToTransaction,
-  type InvoiceRow,
-  type PaymentRow,
-} from '../lib/transaction'
+import { transactionRowToNwc, type TransactionRow } from '../lib/transaction'
+import type { Connection } from '../nostr/connections'
 
 export interface ListTransactionsDeps {
   db: Database
+  conn: Connection
 }
 
 const DEFAULT_LIMIT = 20
@@ -30,28 +27,23 @@ export async function handleListTransactions(
     throw new NwcError('OTHER', `type must be 'incoming' or 'outgoing', got '${type}'`)
   }
 
-  const merged: Array<Record<string, unknown>> = []
-
-  if (type !== 'outgoing') {
-    let sql = 'SELECT * FROM invoices WHERE created_at >= ? AND created_at <= ?'
-    if (!includeUnpaid) sql += " AND state = 'settled'"
-    sql += ' ORDER BY created_at DESC'
-    const rows = deps.db.query<InvoiceRow, [number, number]>(sql).all(from, until)
-    for (const r of rows) merged.push(invoiceRowToTransaction(r))
+  // Single SQL query — connection-scoped so a client never sees activity
+  // belonging to other connections on the same wallet.
+  const clauses = ['connection_id = ?', 'created_at >= ?', 'created_at <= ?']
+  const args: Array<number | string> = [deps.conn.id, from, until]
+  if (type !== undefined) {
+    clauses.push('type = ?')
+    args.push(type)
   }
-  if (type !== 'incoming') {
-    let sql = 'SELECT * FROM payments WHERE created_at >= ? AND created_at <= ?'
-    if (!includeUnpaid) sql += " AND state = 'settled'"
-    sql += ' ORDER BY created_at DESC'
-    const rows = deps.db.query<PaymentRow, [number, number]>(sql).all(from, until)
-    for (const r of rows) merged.push(paymentRowToTransaction(r))
+  if (!includeUnpaid) {
+    clauses.push("state = 'settled'")
   }
 
-  // In-memory merge sort: each side is already sorted desc, but pulling
-  // both then sorting is simpler and fine at the volumes we expect. If row
-  // counts grow we can swap in a UNION ALL query with a window-function
-  // ORDER BY without touching the response shape.
-  merged.sort((a, b) => Number(b.created_at) - Number(a.created_at))
+  const sql =
+    `SELECT * FROM transactions WHERE ${clauses.join(' AND ')} ` +
+    `ORDER BY created_at DESC LIMIT ? OFFSET ?`
+  args.push(limit, offset)
 
-  return { transactions: merged.slice(offset, offset + limit) }
+  const rows = deps.db.query<TransactionRow, typeof args>(sql).all(...args)
+  return { transactions: rows.map(transactionRowToNwc) }
 }

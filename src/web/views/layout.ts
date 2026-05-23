@@ -27,6 +27,7 @@ const STYLES = `
   .pill { display: inline-block; padding: 0.1em 0.5em; border-radius: 999px; font-size: 0.8em; }
   .pill.settled { background: #d4edda; color: #155724; }
   .pill.pending { background: #fff3cd; color: #856404; }
+  .pill.preconfirmed { background: #e2e3e5; color: #495057; }
   .pill.failed { background: #f8d7da; color: #721c24; }
 `
 

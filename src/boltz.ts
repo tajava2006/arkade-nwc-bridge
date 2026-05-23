@@ -44,16 +44,28 @@ export async function initBoltz(deps: {
   // offline) will already be terminal in boltz_swaps but still 'pending'
   // in our invoices table — reconcile those once here so the SDK update
   // path and the bridge's table stay in lockstep.
-  reconcilePendingInvoices(deps.db)
+  reconcilePendingIncoming(deps.db)
 
   return { swaps }
 }
 
-function reconcilePendingInvoices(db: Database): void {
+function reconcilePendingIncoming(db: Database): void {
+  // Reverse swaps that completed before the listener existed (or while the
+  // bridge was offline) are already terminal in boltz_swaps but still
+  // 'pending' in our transactions table — the SwapManager's resume loop
+  // only re-monitors non-final swaps, so the onSwapCompleted callback
+  // wouldn't fire for them. Sweep them on boot so the table matches the
+  // SDK's view.
+  //
+  // The outgoing side doesn't need this: pay_invoice updates the row
+  // synchronously when sendLightningPayment returns or throws. The only
+  // window for drift is a crash mid-await, which is deferred to the phase
+  // 10 cleanup pass.
   const now = Math.floor(Date.now() / 1000)
   const pending = db
     .query<{ swap_id: string }, []>(
-      `SELECT swap_id FROM invoices WHERE state = 'pending' AND swap_id IS NOT NULL`,
+      `SELECT swap_id FROM transactions
+         WHERE type = 'incoming' AND state = 'pending' AND swap_id IS NOT NULL`,
     )
     .all()
 
@@ -72,17 +84,17 @@ function reconcilePendingInvoices(db: Database): void {
     const newState = isReverseSuccessStatus(status) ? 'settled' : 'failed'
     const swap = JSON.parse(swapRow.data) as BoltzReverseSwap
     db.query(
-      `UPDATE invoices
+      `UPDATE transactions
          SET state = ?,
              preimage = COALESCE(preimage, ?),
              settled_at = COALESCE(settled_at, ?)
-       WHERE swap_id = ? AND state = 'pending'`,
+       WHERE type = 'incoming' AND swap_id = ? AND state = 'pending'`,
     ).run(newState, swap.preimage, now, row.swap_id)
     reconciled++
   }
 
   if (reconciled > 0) {
-    console.log(`boltz: reconciled ${reconciled} stale pending invoice row(s)`)
+    console.log(`boltz: reconciled ${reconciled} stale pending incoming row(s)`)
   }
 }
 
@@ -107,23 +119,23 @@ function syncSwapToDb(
 
   if (isPendingReverseSwap(swap)) {
     db.query(
-      `UPDATE invoices
+      `UPDATE transactions
          SET state = ?,
              preimage = COALESCE(preimage, ?),
              settled_at = COALESCE(settled_at, ?)
-       WHERE swap_id = ? AND state = 'pending'`,
+       WHERE type = 'incoming' AND swap_id = ? AND state = 'pending'`,
     ).run(state, swap.preimage, now, swap.id)
     return
   }
 
   if (isPendingSubmarineSwap(swap)) {
     db.query(
-      `UPDATE payments
+      `UPDATE transactions
          SET state = ?,
              preimage = COALESCE(preimage, ?),
              error = COALESCE(error, ?),
              settled_at = COALESCE(settled_at, ?)
-       WHERE swap_id = ? AND state = 'pending'`,
+       WHERE type = 'outgoing' AND swap_id = ? AND state = 'pending'`,
     ).run(state, swap.preimage ?? null, errorMessage ?? null, now, swap.id)
     return
   }

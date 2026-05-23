@@ -104,6 +104,13 @@ export function createConnection(
   }
 }
 
+export function findConnectionById(db: Database, id: number): Connection | null {
+  const row = db
+    .query<ConnectionRow, [number]>('SELECT * FROM connections WHERE id = ?')
+    .get(id)
+  return row ? rowToConnection(row) : null
+}
+
 export function listAllConnections(db: Database): {
   active: Connection[]
   revoked: Connection[]

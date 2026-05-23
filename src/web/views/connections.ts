@@ -23,7 +23,7 @@ export function connectionsListView(args: {
 }): RawHtml {
   const renderActive = (c: Connection) => html`
     <tr>
-      <td>#${c.id}</td>
+      <td><a href="/connections/${c.id}">#${c.id}</a></td>
       <td>${c.label ?? html`<span class="muted">(no label)</span>`}</td>
       <td class="muted">${formatDate(c.createdAt)}</td>
       <td class="num">${c.budgetMsat === null ? formatSpent(c) : formatBudget(c)}</td>
@@ -36,7 +36,7 @@ export function connectionsListView(args: {
   `
   const renderRevoked = (c: Connection) => html`
     <tr>
-      <td class="muted">#${c.id}</td>
+      <td class="muted"><a href="/connections/${c.id}">#${c.id}</a></td>
       <td class="muted">${c.label ?? '(no label)'}</td>
       <td class="muted">${formatDate(c.createdAt)} → ${c.revokedAt ? formatDate(c.revokedAt) : '?'}</td>
       <td class="num muted">${formatSpent(c)}</td>

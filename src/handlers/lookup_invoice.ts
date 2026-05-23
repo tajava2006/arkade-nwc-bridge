@@ -1,15 +1,12 @@
 import type { Database } from 'bun:sqlite'
 
 import { NwcError } from '../lib/errors'
-import {
-  invoiceRowToTransaction,
-  paymentRowToTransaction,
-  type InvoiceRow,
-  type PaymentRow,
-} from '../lib/transaction'
+import { transactionRowToNwc, type TransactionRow } from '../lib/transaction'
+import type { Connection } from '../nostr/connections'
 
 export interface LookupInvoiceDeps {
   db: Database
+  conn: Connection
 }
 
 export async function handleLookupInvoice(
@@ -22,34 +19,25 @@ export async function handleLookupInvoice(
     throw new NwcError('OTHER', 'payment_hash or invoice is required')
   }
 
-  // Try the incoming (invoices) table first, then outgoing (payments).
-  // Payment hashes are globally unique per LN invoice, so either side gives
-  // at most one row — there's no ambiguity in which table to prefer.
-  const incoming = paymentHash
+  // Connection-scoped lookup: a connection only sees its own transactions,
+  // not anything other clients on the same wallet have done. Mirrors how
+  // NIP-47 clients reason about transaction history per-connection.
+  const row = paymentHash
     ? deps.db
-        .query<InvoiceRow, [string]>(
-          'SELECT * FROM invoices WHERE payment_hash = ? ORDER BY id DESC LIMIT 1',
+        .query<TransactionRow, [string, number]>(
+          `SELECT * FROM transactions
+             WHERE payment_hash = ? AND connection_id = ?
+             ORDER BY id DESC LIMIT 1`,
         )
-        .get(paymentHash)
+        .get(paymentHash, deps.conn.id)
     : deps.db
-        .query<InvoiceRow, [string]>(
-          'SELECT * FROM invoices WHERE invoice = ? ORDER BY id DESC LIMIT 1',
+        .query<TransactionRow, [string, number]>(
+          `SELECT * FROM transactions
+             WHERE invoice = ? AND connection_id = ?
+             ORDER BY id DESC LIMIT 1`,
         )
-        .get(invoice as string)
-  if (incoming) return invoiceRowToTransaction(incoming)
+        .get(invoice as string, deps.conn.id)
 
-  const outgoing = paymentHash
-    ? deps.db
-        .query<PaymentRow, [string]>(
-          'SELECT * FROM payments WHERE payment_hash = ? ORDER BY id DESC LIMIT 1',
-        )
-        .get(paymentHash)
-    : deps.db
-        .query<PaymentRow, [string]>(
-          'SELECT * FROM payments WHERE invoice = ? ORDER BY id DESC LIMIT 1',
-        )
-        .get(invoice as string)
-  if (outgoing) return paymentRowToTransaction(outgoing)
-
+  if (row) return transactionRowToNwc(row)
   throw new NwcError('NOT_FOUND', 'no transaction found for the given parameters')
 }

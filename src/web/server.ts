@@ -5,13 +5,16 @@ import type { Config } from '../config'
 import { htmlResponse } from '../lib/html'
 import {
   createConnection,
+  findConnectionById,
   listAllConnections,
   revokeConnection,
 } from '../nostr/connections'
+import type { TransactionRow } from '../lib/transaction'
 import { dashboardView } from './views/dashboard'
 import { connectionsListView } from './views/connections'
 import { newConnectionForm, newConnectionResultView } from './views/new_connection'
-import { historyView, type HistoryRow } from './views/history'
+import { walletHistoryView } from './views/history'
+import { connectionDetailView } from './views/connection_detail'
 import { qrSvg } from './qr'
 
 export interface WebServerDeps {
@@ -24,17 +27,6 @@ export interface WebServerDeps {
 export interface WebServer {
   stop(): Promise<void>
   url: string
-}
-
-interface HistoryRowSql {
-  type: 'incoming' | 'outgoing'
-  state: string
-  amount_msat: number
-  fees_paid_msat: number | null
-  description: string | null
-  payment_hash: string
-  created_at: number
-  settled_at: number | null
 }
 
 export function startWebServer(deps: WebServerDeps): WebServer {
@@ -50,9 +42,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const { active } = listAllConnections(db)
           const txCountRow = db
             .query<{ c: number }, []>(
-              `SELECT
-                 (SELECT COUNT(*) FROM invoices WHERE state = 'settled')
-                 + (SELECT COUNT(*) FROM payments WHERE state = 'settled') AS c`,
+              `SELECT COUNT(*) AS c FROM transactions WHERE state = 'settled'`,
             )
             .get()
           return htmlResponse(
@@ -104,11 +94,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             budgetMsat,
           })
           // The kind 13194 info event for this connection isn't published
-          // until the next bridge restart — keeping the publish path on
-          // the startup sweep is simpler than threading the SimplePool
-          // through the web layer here, and the operator can already see
-          // the URI immediately. Wiring live publish on create lands with
-          // the phase 10 cleanup pass.
+          // until the next bridge restart — bundled with the kind-5
+          // revoke-deletion path in the phase 10 cleanup.
           return htmlResponse(
             newConnectionResultView({
               connectionId: connection.id,
@@ -116,6 +103,20 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               qrSvg: qrSvg(uri),
             }),
           )
+        },
+      },
+      '/connections/:id': {
+        GET: (req) => {
+          const id = Number.parseInt(req.params.id, 10)
+          if (!Number.isFinite(id)) return new Response('Invalid id', { status: 400 })
+          const conn = findConnectionById(db, id)
+          if (!conn) return new Response('Not found', { status: 404 })
+          const transactions = db
+            .query<TransactionRow, [number]>(
+              `SELECT * FROM transactions WHERE connection_id = ? ORDER BY created_at DESC LIMIT 200`,
+            )
+            .all(id)
+          return htmlResponse(connectionDetailView({ conn, transactions }))
         },
       },
       '/connections/:id/revoke': {
@@ -129,31 +130,12 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/history': {
-        GET: () => {
-          // Merge incoming + outgoing into a single feed. Volumes for a
-          // self-hosted personal bridge stay tiny, so an in-memory merge
-          // beats hand-writing a UNION query with consistent column lists
-          // across two schemas.
-          const incoming = db
-            .query<HistoryRowSql, []>(
-              `SELECT
-                 'incoming' AS type, state, amount_msat, fees_paid_msat, description,
-                 payment_hash, created_at, settled_at
-               FROM invoices`,
-            )
-            .all()
-          const outgoing = db
-            .query<HistoryRowSql, []>(
-              `SELECT
-                 'outgoing' AS type, state, amount_msat, fees_paid_msat,
-                 NULL AS description, payment_hash, created_at, settled_at
-               FROM payments`,
-            )
-            .all()
-          const merged: HistoryRow[] = [...incoming, ...outgoing].sort(
-            (a, b) => b.created_at - a.created_at,
-          )
-          return htmlResponse(historyView(merged))
+        GET: async () => {
+          // Raw ark-side wallet history — every onchain/offchain movement
+          // the wallet sees. NWC accountability lives on the per-connection
+          // detail page; we don't try to correlate the two here.
+          const txs = await wallet.getTransactionHistory()
+          return htmlResponse(walletHistoryView(txs))
         },
       },
     },

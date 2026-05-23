@@ -101,7 +101,39 @@ async function publishInfoEvent(
     content: SUPPORTED_METHODS.join(' '),
   }
   const signed = finalizeEvent(template, serviceSecretBytes(conn))
-  await Promise.all(pool.publish(relays, signed))
+  await publishToRelays(pool, relays, signed, `info event (conn #${conn.id})`)
+}
+
+/**
+ * Publish to every relay, but never let a single relay's timeout/rejection
+ * tank the caller. nostr-tools' SimplePool returns one promise per relay
+ * and pool.publish() resolves them independently — Promise.all would
+ * reject as soon as any relay fails, which on boot crashes the bridge
+ * before it ever finishes subscribing.
+ *
+ * Treat publishing as best-effort: log per-relay failures, succeed as
+ * long as we tried. NIP-47 info events are replaceable, so even if every
+ * relay rejects we'll retry on next boot anyway.
+ */
+async function publishToRelays(
+  pool: SimplePool,
+  relays: string[],
+  signed: NostrEvent,
+  context: string,
+): Promise<void> {
+  const results = await Promise.allSettled(pool.publish(relays, signed))
+  const failures = results.flatMap((r, i) =>
+    r.status === 'rejected' ? [{ relay: relays[i] ?? '?', reason: r.reason }] : [],
+  )
+  if (failures.length > 0) {
+    for (const f of failures) {
+      console.warn(
+        `nostr: publish failed for ${context} on ${f.relay}: ${
+          f.reason instanceof Error ? f.reason.message : String(f.reason)
+        }`,
+      )
+    }
+  }
 }
 
 async function handleEvent(
@@ -204,9 +236,9 @@ async function dispatch(
         params,
       )
     case 'lookup_invoice':
-      return handleLookupInvoice({ db: deps.db }, params)
+      return handleLookupInvoice({ db: deps.db, conn }, params)
     case 'list_transactions':
-      return handleListTransactions({ db: deps.db }, params)
+      return handleListTransactions({ db: deps.db, conn }, params)
     default:
       throw new NwcError('NOT_IMPLEMENTED', `unknown method '${method}'`)
   }
@@ -268,5 +300,5 @@ async function sendResponse(
     content: ciphertext,
   }
   const signed = finalizeEvent(template, serviceSecretBytes(conn))
-  await Promise.all(pool.publish(relays, signed))
+  await publishToRelays(pool, relays, signed, `response to event ${request.id}`)
 }

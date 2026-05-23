@@ -23,8 +23,6 @@ export async function handleMakeInvoice(
 
   const { sats: amountSat, exact } = msatsToSats(amountMsat)
   if (!exact) {
-    // Boltz operates in sats. We refuse rather than silently round so the
-    // client knows the request can't be honored exactly.
     throw new NwcError('OTHER', 'amount must be a whole number of sats (multiple of 1000 msat)')
   }
 
@@ -33,8 +31,8 @@ export async function handleMakeInvoice(
   // Reverse swap: Boltz issues a BOLT11 invoice we hand to the client. When
   // the LN side gets paid, Boltz lands a VHTLC on our swap address and the
   // SwapManager auto-claims it into our Ark wallet. We just return the
-  // invoice immediately; the row in `invoices` stays pending until the
-  // manager's onSwapCompleted listener flips it to settled.
+  // invoice immediately; the row stays pending until the manager's
+  // onSwapCompleted listener flips it to settled.
   let result
   try {
     result = await deps.swaps.createLightningInvoice({
@@ -42,11 +40,6 @@ export async function handleMakeInvoice(
       description,
     })
   } catch (err) {
-    // Boltz validates the request server-side (amount limits, memo charset,
-    // rate limits, ...). Surface its message directly so the NWC client can
-    // show the user why the request was rejected — e.g. "invalid invoice
-    // memo" when the description contains non-ASCII characters. Without
-    // this catch the user sees a generic INTERNAL from our service.ts.
     if (err instanceof NetworkError) {
       const boltzMessage = (err.errorData as { error?: string } | undefined)?.error
       throw new NwcError('OTHER', `boltz rejected the request: ${boltzMessage ?? err.message}`)
@@ -57,22 +50,18 @@ export async function handleMakeInvoice(
   const createdAt = Math.floor(Date.now() / 1000)
   const expiresAt = result.expiry
 
-  // result.amount is the on-Ark amount in sats *after* the swap provider's
-  // fee — i.e. what will land in our Ark wallet, not the invoice's nominal
-  // amount. We record that as amount_msat so list_transactions /
-  // lookup_invoice report what the user actually sees in their balance,
-  // matching how arkade.money's wallet UI presents the same flow.
-  // Symmetric with pay_invoice: each side reports the on-Ark movement,
-  // with fees_paid covering the gap to the invoice nominal.
+  // result.amount is the on-Ark amount after the swap provider's fee — what
+  // will actually land in the wallet. amount_msat captures wallet movement,
+  // fees_paid_msat captures the gap to the invoice nominal.
   const receivedMsat = satsToMsats(result.amount)
   const feesPaidMsat = Math.max(0, amountMsat - receivedMsat)
 
   deps.db
     .query(
-      `INSERT INTO invoices (
-         connection_id, request_event_id, invoice, payment_hash,
+      `INSERT INTO transactions (
+         connection_id, type, request_event_id, invoice, payment_hash,
          amount_msat, fees_paid_msat, description, swap_id, state, created_at, expires_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+       ) VALUES (?, 'incoming', ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     )
     .run(
       deps.conn.id,

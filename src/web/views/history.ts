@@ -1,50 +1,58 @@
+import type { ArkTransaction } from '@arkade-os/sdk'
 import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 
-export interface HistoryRow {
-  type: 'incoming' | 'outgoing'
-  state: string
-  amount_msat: number
-  fees_paid_msat: number | null
-  description: string | null
-  payment_hash: string
-  created_at: number
-  settled_at: number | null
+function shortTxid(key: ArkTransaction['key']): string {
+  // Pick whichever of the three is populated. boarding takes precedence
+  // since onboarding is the most distinctive event; otherwise the ark txid
+  // identifies an offchain send/receive; commitment falls back for batch
+  // settlements with no separate ark txid.
+  const id = key.boardingTxid || key.arkTxid || key.commitmentTxid || ''
+  return id ? `${id.slice(0, 8)}…${id.slice(-6)}` : '-'
 }
 
-function statePill(state: string): RawHtml {
-  const cls =
-    state === 'settled' ? 'settled' : state === 'failed' ? 'failed' : 'pending'
-  return html`<span class="pill ${cls}">${state}</span>`
+function txKind(key: ArkTransaction['key']): string {
+  if (key.boardingTxid) return 'boarding'
+  if (key.arkTxid) return 'ark'
+  if (key.commitmentTxid) return 'commitment'
+  return '?'
 }
 
-export function historyView(rows: HistoryRow[]): RawHtml {
+export function walletHistoryView(txs: ArkTransaction[]): RawHtml {
   return layout({
-    title: 'History',
+    title: 'Wallet history',
     current: 'history',
-    body: rows.length === 0
-      ? html`<p class="muted">No transactions yet.</p>`
-      : html`
-          <table>
-            <tr>
-              <th>When</th>
-              <th></th>
-              <th class="num">Amount</th>
-              <th class="num">Fee</th>
-              <th>State</th>
-              <th>Description</th>
-            </tr>
-            ${rows.map((r) => html`
+    body: html`
+      <p class="muted">
+        Raw transaction stream from the Ark wallet — boarding, ark sends/receives, and batch
+        commitments. This view doesn't distinguish NWC activity from anything else; for the
+        NWC-side log scoped to a particular client, open that connection on the
+        <a href="/connections">Connections</a> page.
+      </p>
+      ${txs.length === 0
+        ? html`<p class="muted">No transactions yet.</p>`
+        : html`
+            <table>
               <tr>
-                <td class="muted">${new Date(r.created_at * 1000).toLocaleString()}</td>
-                <td>${r.type === 'incoming' ? '↓' : '↑'}</td>
-                <td class="num">${Math.floor(r.amount_msat / 1000).toLocaleString()} sats</td>
-                <td class="num">${r.fees_paid_msat == null ? '-' : Math.floor(r.fees_paid_msat / 1000).toLocaleString() + ' sats'}</td>
-                <td>${statePill(r.state)}</td>
-                <td>${r.description ?? html`<span class="muted">${r.payment_hash.slice(0, 12)}…</span>`}</td>
+                <th>When</th>
+                <th></th>
+                <th class="num">Amount</th>
+                <th>Kind</th>
+                <th>State</th>
+                <th>Txid</th>
               </tr>
-            `)}
-          </table>
-        `,
+              ${txs.map((tx) => html`
+                <tr>
+                  <td class="muted">${new Date(tx.createdAt).toLocaleString()}</td>
+                  <td>${tx.type === 'RECEIVED' ? '↓' : '↑'}</td>
+                  <td class="num">${tx.amount.toLocaleString()} sats</td>
+                  <td class="muted">${txKind(tx.key)}</td>
+                  <td><span class="pill ${tx.settled ? 'settled' : 'preconfirmed'}">${tx.settled ? 'settled' : 'preconfirmed'}</span></td>
+                  <td class="muted" title="${tx.key.boardingTxid || tx.key.arkTxid || tx.key.commitmentTxid}">${shortTxid(tx.key)}</td>
+                </tr>
+              `)}
+            </table>
+          `}
+    `,
   })
 }

@@ -14,7 +14,7 @@ interface Migration {
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
-    description: 'initial schema (connections, payments, invoices, processed_events)',
+    description: 'initial schema (connections, transactions, processed_events)',
     sql: `
       CREATE TABLE connections (
         id                  INTEGER PRIMARY KEY,
@@ -30,44 +30,37 @@ const MIGRATIONS: readonly Migration[] = [
       );
       CREATE INDEX idx_connections_client_pubkey ON connections(client_pubkey_hex);
 
-      CREATE TABLE payments (
+      -- Single transactions table covering both NWC-side incoming (reverse
+      -- swaps) and outgoing (submarine swaps). type discriminates, the
+      -- rest of the columns are a union of what each side needs:
+      --   incoming uses description / expires_at
+      --   outgoing uses error
+      -- everything else is shared. This mirrors the NIP-47 transaction
+      -- object shape (which is also one shape with a type field) and how
+      -- most LN wallet UIs surface history — a single feed.
+      CREATE TABLE transactions (
         id                  INTEGER PRIMARY KEY,
         connection_id       INTEGER NOT NULL REFERENCES connections(id),
+        type                TEXT    NOT NULL,    -- 'incoming' | 'outgoing'
         request_event_id    TEXT    NOT NULL UNIQUE,
         invoice             TEXT    NOT NULL,
         payment_hash        TEXT    NOT NULL,
-        amount_msat         INTEGER NOT NULL,
+        amount_msat         INTEGER NOT NULL,    -- on-Ark wallet movement
         fees_paid_msat      INTEGER,
-        swap_id             TEXT,
-        state               TEXT    NOT NULL,
-        preimage            TEXT,
-        error               TEXT,
-        created_at          INTEGER NOT NULL,
-        settled_at          INTEGER
-      );
-      CREATE INDEX idx_payments_connection ON payments(connection_id);
-      CREATE INDEX idx_payments_payment_hash ON payments(payment_hash);
-      CREATE INDEX idx_payments_state ON payments(state);
-
-      CREATE TABLE invoices (
-        id                  INTEGER PRIMARY KEY,
-        connection_id       INTEGER NOT NULL REFERENCES connections(id),
-        request_event_id    TEXT    NOT NULL UNIQUE,
-        invoice             TEXT    NOT NULL,
-        payment_hash        TEXT    NOT NULL,
-        amount_msat         INTEGER NOT NULL,
         description         TEXT,
         swap_id             TEXT,
-        state               TEXT    NOT NULL,
+        state               TEXT    NOT NULL,    -- 'pending' | 'settled' | 'failed' | 'expired'
         preimage            TEXT,
-        claimed_txid        TEXT,
+        error               TEXT,
         created_at          INTEGER NOT NULL,
         expires_at          INTEGER,
         settled_at          INTEGER
       );
-      CREATE INDEX idx_invoices_connection ON invoices(connection_id);
-      CREATE INDEX idx_invoices_payment_hash ON invoices(payment_hash);
-      CREATE INDEX idx_invoices_state ON invoices(state);
+      CREATE INDEX idx_transactions_connection ON transactions(connection_id);
+      CREATE INDEX idx_transactions_payment_hash ON transactions(payment_hash);
+      CREATE INDEX idx_transactions_state ON transactions(state);
+      CREATE INDEX idx_transactions_type ON transactions(type);
+      CREATE INDEX idx_transactions_created_at ON transactions(created_at);
 
       CREATE TABLE processed_events (
         event_id            TEXT    PRIMARY KEY,
@@ -91,13 +84,6 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_boltz_swaps_status ON boltz_swaps(status);
       CREATE INDEX idx_boltz_swaps_type ON boltz_swaps(type);
       CREATE INDEX idx_boltz_swaps_created_at ON boltz_swaps(created_at);
-    `,
-  },
-  {
-    version: 3,
-    description: 'invoices.fees_paid_msat — captures swap fee on the receive side',
-    sql: `
-      ALTER TABLE invoices ADD COLUMN fees_paid_msat INTEGER;
     `,
   },
 ]

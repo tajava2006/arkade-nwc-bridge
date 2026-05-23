@@ -1,53 +1,37 @@
-// Row shapes for the invoices / payments tables (snake_case as returned by
-// sqlite) and the conversion to the NIP-47 transaction object shape (camel +
-// underscore mix per the spec).
+// Row shape for the unified transactions table and its conversion to the
+// NIP-47 transaction object the lookup_invoice / list_transactions handlers
+// return.
 //
 // undefined-valued fields drop out of JSON.stringify, so a row without a
-// preimage just doesn't carry a preimage field in the response — matches the
-// "optional if unpaid" semantics NIP-47 specifies for lookup_invoice /
-// list_transactions.
+// preimage just doesn't carry a preimage field in the response — matches
+// the "optional if unpaid" semantics NIP-47 specifies.
 
-export interface InvoiceRow {
+export interface TransactionRow {
   id: number
   connection_id: number
+  type: 'incoming' | 'outgoing'
   request_event_id: string
   invoice: string
   payment_hash: string
-  // amount_msat semantics: actual sats credited to the Ark wallet (i.e.
-  // invoice nominal minus the swap provider's fee). Matches outgoing's
-  // "what left the wallet" — both sides report the on-Ark movement, not
-  // the LN nominal.
+  // amount_msat semantics: the on-Ark wallet movement. For incoming this
+  // is what was credited (invoice nominal minus the swap provider's fee);
+  // for outgoing this is what left the wallet (invoice nominal plus the
+  // fee). fees_paid_msat carries the gap explicitly.
   amount_msat: number
   fees_paid_msat: number | null
   description: string | null
   swap_id: string | null
   state: string
   preimage: string | null
-  claimed_txid: string | null
+  error: string | null
   created_at: number
   expires_at: number | null
   settled_at: number | null
 }
 
-export interface PaymentRow {
-  id: number
-  connection_id: number
-  request_event_id: string
-  invoice: string
-  payment_hash: string
-  amount_msat: number
-  fees_paid_msat: number | null
-  swap_id: string | null
-  state: string
-  preimage: string | null
-  error: string | null
-  created_at: number
-  settled_at: number | null
-}
-
-export function invoiceRowToTransaction(row: InvoiceRow): Record<string, unknown> {
+export function transactionRowToNwc(row: TransactionRow): Record<string, unknown> {
   return {
-    type: 'incoming',
+    type: row.type,
     state: row.state,
     invoice: row.invoice,
     description: row.description ?? undefined,
@@ -57,20 +41,6 @@ export function invoiceRowToTransaction(row: InvoiceRow): Record<string, unknown
     fees_paid: row.fees_paid_msat ?? undefined,
     created_at: row.created_at,
     expires_at: row.expires_at ?? undefined,
-    settled_at: row.settled_at ?? undefined,
-  }
-}
-
-export function paymentRowToTransaction(row: PaymentRow): Record<string, unknown> {
-  return {
-    type: 'outgoing',
-    state: row.state,
-    invoice: row.invoice,
-    preimage: row.preimage ?? undefined,
-    payment_hash: row.payment_hash,
-    amount: row.amount_msat,
-    fees_paid: row.fees_paid_msat ?? undefined,
-    created_at: row.created_at,
     settled_at: row.settled_at ?? undefined,
   }
 }
