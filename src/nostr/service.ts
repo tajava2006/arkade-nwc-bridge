@@ -37,53 +37,89 @@ export interface NostrServiceDeps {
 }
 
 export interface NostrService {
+  /**
+   * Publishes the info event for this connection and starts listening for
+   * its NWC requests, without waiting for the next boot. Called by the
+   * web layer right after createConnection inserts the DB row.
+   */
+  registerConnection(conn: Connection): Promise<void>
+  /**
+   * Stops listening for requests on this service pubkey. Existing requests
+   * already in-flight finish on their own. The info event is left on the
+   * relay (replaceable; it'll be naturally overwritten if the pubkey is
+   * ever reused, otherwise it just expires when the relay sweeps idle
+   * events). NIP-09 kind-5 deletion is not published — relays vary in how
+   * they honor it, and a stale info event with no service listening is
+   * harmless because every request from the client gets dropped at the
+   * authorization step anyway.
+   */
+  unregisterConnection(servicePubkeyHex: string): void
   stop(): Promise<void>
 }
 
 export async function startNostrService(deps: NostrServiceDeps): Promise<NostrService> {
-  const { cfg, db, wallet } = deps
+  const { cfg, db } = deps
   const pool = new SimplePool()
 
-  // Publish a fresh info event per active connection. kind 13194 is
-  // replaceable, so re-publishing on every boot just overwrites the prior
-  // version. If there are no connections yet, this is a no-op.
+  // One SubCloser per connection. A single multi-pubkey filter would also
+  // work, but keeping subs per-connection means we can close just one on
+  // revoke without rebuilding the others — no race window where a request
+  // arrives while we're between unsubscribe and resubscribe.
+  const subs = new Map<string, ReturnType<SimplePool['subscribeMany']>>()
+
+  const subscribeOne = (servicePubkey: string): void => {
+    if (subs.has(servicePubkey)) return
+    const sub = pool.subscribeMany(
+      cfg.nwcRelays,
+      {
+        kinds: [NWCWalletRequest],
+        '#p': [servicePubkey],
+        // Only events newer than the moment we subscribed. For the boot
+        // path that's start-of-service; for registerConnection that's
+        // creation time. Either way, anything older is either a stale
+        // replay (handled by processed_events) or expired by now.
+        since: Math.floor(Date.now() / 1000),
+      },
+      {
+        onevent: (event) => {
+          handleEvent(deps, pool, event).catch((err) => {
+            console.error('nostr: handler crashed:', err)
+          })
+        },
+      },
+    )
+    subs.set(servicePubkey, sub)
+  }
+
   const connections = listActiveConnections(db)
   if (connections.length === 0) {
-    console.log('nostr: no active connections — run `bun run scripts/new-connection.ts` to issue one')
+    console.log(
+      'nostr: no active connections — create one at /connections/new or via `bun run new-connection`',
+    )
   }
   for (const conn of connections) {
     await publishInfoEvent(pool, cfg.nwcRelays, conn)
+    subscribeOne(conn.servicePubkeyHex)
   }
   console.log(
     `nostr: ${connections.length} active connection${connections.length === 1 ? '' : 's'}; ` +
       `subscribing to ${cfg.nwcRelays.length} relay${cfg.nwcRelays.length === 1 ? '' : 's'}`,
   )
 
-  const servicePubkeys = connections.map((c) => c.servicePubkeyHex)
-  const sub =
-    servicePubkeys.length > 0
-      ? pool.subscribeMany(
-          cfg.nwcRelays,
-          {
-            kinds: [NWCWalletRequest],
-            '#p': servicePubkeys,
-            // Only events newer than service start — old events would have been
-            // delivered already on previous runs (or never within their expiration).
-            since: Math.floor(Date.now() / 1000),
-          },
-          {
-            onevent: (event) => {
-              handleEvent(deps, pool, event).catch((err) => {
-                console.error('nostr: handler crashed:', err)
-              })
-            },
-          },
-        )
-      : null
-
   return {
+    async registerConnection(conn) {
+      await publishInfoEvent(pool, cfg.nwcRelays, conn)
+      subscribeOne(conn.servicePubkeyHex)
+    },
+    unregisterConnection(servicePubkeyHex) {
+      const sub = subs.get(servicePubkeyHex)
+      if (!sub) return
+      sub.close()
+      subs.delete(servicePubkeyHex)
+    },
     async stop() {
-      sub?.close()
+      for (const sub of subs.values()) sub.close()
+      subs.clear()
       pool.close(cfg.nwcRelays)
     },
   }

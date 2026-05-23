@@ -39,7 +39,7 @@ async function main(): Promise<void> {
 
   const nostr = await startNostrService({ cfg, db, wallet, swaps })
 
-  const web = startWebServer({ cfg, db, wallet, arkAddress: address })
+  const web = startWebServer({ cfg, db, wallet, arkAddress: address, nostr })
   console.log(`  web ui         ${web.url}`)
 
   // Minimal graceful shutdown so SIGINT/SIGTERM don't leave open sockets

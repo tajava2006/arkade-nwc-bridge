@@ -9,6 +9,7 @@ import {
   listAllConnections,
   revokeConnection,
 } from '../nostr/connections'
+import type { NostrService } from '../nostr/service'
 import type { TransactionRow } from '../lib/transaction'
 import { dashboardView } from './views/dashboard'
 import { connectionsListView } from './views/connections'
@@ -22,6 +23,13 @@ export interface WebServerDeps {
   db: Database
   wallet: Wallet
   arkAddress: string
+  /**
+   * Lets the web layer trigger nostr-side side effects (publish info event
+   * + start listening) when a connection is created, and tear down the
+   * subscription on revoke. The interface is narrow so the web layer
+   * doesn't reach into pool / handler internals.
+   */
+  nostr: NostrService
 }
 
 export interface WebServer {
@@ -30,7 +38,7 @@ export interface WebServer {
 }
 
 export function startWebServer(deps: WebServerDeps): WebServer {
-  const { cfg, db, wallet, arkAddress } = deps
+  const { cfg, db, wallet, arkAddress, nostr } = deps
 
   const server = Bun.serve({
     port: cfg.httpPort,
@@ -93,9 +101,12 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             relays: cfg.nwcRelays,
             budgetMsat,
           })
-          // The kind 13194 info event for this connection isn't published
-          // until the next bridge restart — bundled with the kind-5
-          // revoke-deletion path in the phase 10 cleanup.
+          // Publish the info event and start listening for requests
+          // immediately — without this, the client wouldn't see kind 13194
+          // until the next bridge restart and would refuse to connect.
+          // publishToRelays inside is best-effort, so a flaky relay won't
+          // block the response.
+          await nostr.registerConnection(connection)
           return htmlResponse(
             newConnectionResultView({
               connectionId: connection.id,
@@ -125,7 +136,13 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           if (!Number.isFinite(id)) {
             return new Response('Invalid id', { status: 400 })
           }
+          // Look up the connection before flipping revoked_at so we can
+          // tell the nostr service which service pubkey to drop. After
+          // the UPDATE, listActiveConnections / findConnectionByServicePubkey
+          // both treat the row as gone, so this has to happen first.
+          const conn = findConnectionById(db, id)
           revokeConnection(db, id)
+          if (conn) nostr.unregisterConnection(conn.servicePubkeyHex)
           return Response.redirect('/connections', 303)
         },
       },
