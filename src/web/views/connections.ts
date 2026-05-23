@@ -1,6 +1,7 @@
 import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import type { Connection } from '../../nostr/connections'
+import { renderRelaySummary, type RelayStatus } from '../../lib/relay_status'
 
 function formatBudget(c: Connection): string {
   if (c.budgetMsat === null) return '∞'
@@ -20,6 +21,7 @@ function formatDate(unix: number): string {
 export function connectionsListView(args: {
   active: Connection[]
   revoked: Connection[]
+  relays: RelayStatus[]
 }): RawHtml {
   const renderActive = (c: Connection) => html`
     <tr>
@@ -48,6 +50,10 @@ export function connectionsListView(args: {
     title: 'Connections',
     current: 'connections',
     body: html`
+      <p class="relay-bar">
+        <span data-relay-summary>${renderRelaySummary(args.relays)}</span>
+      </p>
+
       <p><a href="/connections/new">+ New connection</a></p>
 
       <h2>Active</h2>

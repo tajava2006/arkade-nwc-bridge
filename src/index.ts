@@ -6,6 +6,8 @@ import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
 import { startWebServer, type AppStateRef } from './web/server'
+import { SseHub } from './lib/sse'
+import { relayStatusPayload } from './lib/relay_status'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -24,6 +26,7 @@ async function main(): Promise<void> {
   console.log(`  schema         v${migrationCount?.count ?? 0}`)
 
   const appState: AppStateRef = { current: { mode: 'setup' } }
+  const sseHub = new SseHub()
 
   // Lift the wallet/boltz/nostr bring-up into a function so it can run
   // either at boot (if an account row exists) or post-setup from the web
@@ -44,7 +47,15 @@ async function main(): Promise<void> {
       `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
     )
 
-    const nostr = await startNostrService({ cfg, db, wallet, swaps })
+    const nostr = await startNostrService({
+      cfg,
+      db,
+      wallet,
+      swaps,
+      onRelayStatusChange: (status) => {
+        sseHub.broadcast('relay-status', relayStatusPayload(status))
+      },
+    })
 
     appState.current = { mode: 'ready', wallet, swaps, nostr, arkAddress: address }
     console.log('ready — waiting for NWC requests')
@@ -57,11 +68,12 @@ async function main(): Promise<void> {
     console.log('  account        none — open /setup to create or import one')
   }
 
-  const web = startWebServer({ cfg, db, state: appState, bootReady })
+  const web = startWebServer({ cfg, db, state: appState, sseHub, bootReady })
   console.log(`  web ui         ${web.url}`)
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n${signal} received, shutting down`)
+    sseHub.closeAll()
     await web.stop()
     if (appState.current.mode === 'ready') {
       await appState.current.nostr.stop()

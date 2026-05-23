@@ -29,6 +29,14 @@ const STYLES = `
   .pill.pending { background: #fff3cd; color: #856404; }
   .pill.preconfirmed { background: #e2e3e5; color: #495057; }
   .pill.failed { background: #f8d7da; color: #721c24; }
+  /* Relay status — colors picked from a blue/gray/amber set to avoid red/green
+     so the badges stay distinguishable for red-green color blindness. Icon
+     and text label are redundant channels: any one of them disambiguates. */
+  .relay-bar { margin: 0 0 1em; }
+  .relay-pill { display: inline-block; padding: 0.15em 0.65em; border-radius: 999px; font-size: 0.85em; font-weight: 500; }
+  .relay-pill.ok { background: #cfe7ff; color: #00345e; }
+  .relay-pill.partial { background: #ffe6b3; color: #7a4a00; }
+  .relay-pill.down { background: #e3e3e3; color: #444; }
 `
 
 type Nav = 'dashboard' | 'connections' | 'history' | 'setup'
@@ -62,6 +70,35 @@ export function layout(args: {
   ${nav}
   <h1>${args.title}</h1>
   ${args.body}
+  ${args.current === 'setup' ? html`` : raw(LIVE_SCRIPT)}
 </body>
 </html>`
 }
+
+// Subscribes to the server's SSE stream and swaps in fresh fragments
+// when relay status changes. Server-rendered HTML is the source of truth
+// for the markup shape; the client just replaces innerHTML on elements
+// tagged with data-relay-summary / data-relay-detail.
+//
+// EventSource auto-reconnects, so a bridge restart resumes the feed
+// without page reload. Safe to no-op in setup mode (no /events route
+// behavior, but the request just sits idle).
+const LIVE_SCRIPT = `<script>
+(function () {
+  if (typeof EventSource === 'undefined') return
+  var es = new EventSource('/events')
+  es.addEventListener('relay-status', function (ev) {
+    try {
+      var data = JSON.parse(ev.data)
+      document.querySelectorAll('[data-relay-summary]').forEach(function (el) {
+        el.innerHTML = data.summaryHtml
+      })
+      document.querySelectorAll('[data-relay-detail]').forEach(function (el) {
+        el.innerHTML = data.detailHtml
+      })
+    } catch (e) {
+      // swallow — a malformed frame shouldn't break the page
+    }
+  })
+})()
+</script>`

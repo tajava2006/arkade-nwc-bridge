@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { Config } from '../../src/config'
 import { startWebServer, type AppStateRef, type WebServer } from '../../src/web/server'
 import type { NostrService } from '../../src/nostr/service'
+import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
 import { emptyBalance, makeSwapsStub, makeWalletStub } from '../helpers/mocks'
@@ -11,6 +12,7 @@ import { emptyBalance, makeSwapsStub, makeWalletStub } from '../helpers/mocks'
 const STUB_NOSTR: NostrService = {
   registerConnection: async () => {},
   unregisterConnection: () => {},
+  getRelayStatus: () => [{ url: 'wss://r', connected: false }],
   stop: async () => {},
 }
 
@@ -51,6 +53,7 @@ describe('web server', () => {
       cfg: CFG,
       db: temp.db,
       state: readyState(),
+      sseHub: new SseHub(),
       bootReady: async () => {},
     })
     base = web.url
@@ -140,6 +143,7 @@ describe('web server — setup mode', () => {
       cfg: CFG,
       db: temp.db,
       state,
+      sseHub: new SseHub(),
       bootReady: async (pk) => {
         // Don't actually bring up wallet/boltz/nostr in tests — just record
         // the key the route handed us and flip mode like index.ts would.

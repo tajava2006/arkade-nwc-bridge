@@ -13,6 +13,8 @@ import {
   revokeConnection,
 } from '../nostr/connections'
 import type { NostrService } from '../nostr/service'
+import type { SseHub } from '../lib/sse'
+import { relayStatusPayload } from '../lib/relay_status'
 import type { TransactionRow } from '../lib/transaction'
 import { dashboardView } from './views/dashboard'
 import { connectionsListView } from './views/connections'
@@ -46,6 +48,7 @@ export interface WebServerDeps {
   cfg: Config
   db: Database
   state: AppStateRef
+  sseHub: SseHub
   /**
    * Brings up wallet → boltz → nostr inside the same process. Called from
    * POST /setup after the account row is written. Throws if wiring up the
@@ -61,7 +64,7 @@ export interface WebServer {
 }
 
 export function startWebServer(deps: WebServerDeps): WebServer {
-  const { cfg, db, state, bootReady } = deps
+  const { cfg, db, state, sseHub, bootReady } = deps
 
   const redirectToSetup = (): Response => Response.redirect('/setup', 303)
 
@@ -170,7 +173,13 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const r = requireReady()
           if (!r.ok) return r.response
           const { active, revoked } = listAllConnections(db)
-          return htmlResponse(connectionsListView({ active, revoked }))
+          return htmlResponse(
+            connectionsListView({
+              active,
+              revoked,
+              relays: r.ready.nostr.getRelayStatus(),
+            }),
+          )
         },
       },
       '/connections/new': {
@@ -239,7 +248,13 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               `SELECT * FROM transactions WHERE connection_id = ? ORDER BY created_at DESC LIMIT 200`,
             )
             .all(id)
-          return htmlResponse(connectionDetailView({ conn, transactions }))
+          return htmlResponse(
+            connectionDetailView({
+              conn,
+              transactions,
+              relays: r.ready.nostr.getRelayStatus(),
+            }),
+          )
         },
       },
       '/connections/:id/revoke': {
@@ -269,6 +284,50 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // detail page; we don't try to correlate the two here.
           const txs = await r.ready.wallet.getTransactionHistory()
           return htmlResponse(walletHistoryView(txs))
+        },
+      },
+      '/events': {
+        GET: (req) => {
+          // Server-Sent Events feed for live UI updates. Open one per
+          // browser tab; nostr-side and (later) wallet-side state changes
+          // get fanned out through sseHub.broadcast.
+          let active: ReadableStreamDefaultController<Uint8Array> | null = null
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              active = controller
+              sseHub.add(controller)
+              if (state.current.mode === 'ready') {
+                sseHub.sendTo(
+                  controller,
+                  'relay-status',
+                  relayStatusPayload(state.current.nostr.getRelayStatus()),
+                )
+              }
+            },
+            cancel() {
+              if (active) sseHub.remove(active)
+            },
+          })
+          // req.signal aborts on client disconnect; without this the
+          // controller leaks into sseHub forever and every broadcast
+          // tries to enqueue into a dead stream.
+          req.signal.addEventListener('abort', () => {
+            if (active) {
+              sseHub.remove(active)
+              try {
+                active.close()
+              } catch {
+                // already closed
+              }
+            }
+          })
+          return new Response(stream, {
+            headers: {
+              'content-type': 'text/event-stream',
+              'cache-control': 'no-cache, no-transform',
+              connection: 'keep-alive',
+            },
+          })
         },
       },
     },

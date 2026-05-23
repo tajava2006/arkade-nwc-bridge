@@ -2,6 +2,7 @@ import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import type { Connection } from '../../nostr/connections'
 import type { TransactionRow } from '../../lib/transaction'
+import { renderRelayDetail, type RelayStatus } from '../../lib/relay_status'
 
 function statePill(state: string): RawHtml {
   const cls = state === 'settled' ? 'settled' : state === 'failed' ? 'failed' : 'pending'
@@ -22,8 +23,9 @@ function formatBudget(c: Connection): string {
 export function connectionDetailView(args: {
   conn: Connection
   transactions: TransactionRow[]
+  relays: RelayStatus[]
 }): RawHtml {
-  const { conn, transactions } = args
+  const { conn, transactions, relays } = args
   const isRevoked = conn.revokedAt !== null
 
   return layout({
@@ -42,6 +44,18 @@ export function connectionDetailView(args: {
         <tr><th>Spent / budget</th><td>${formatBudget(conn)}</td></tr>
         <tr><th>Service pubkey</th><td><code>${conn.servicePubkeyHex}</code></td></tr>
         <tr><th>Client pubkey</th><td><code>${conn.clientPubkeyHex}</code></td></tr>
+      </table>
+
+      <h2>Relays</h2>
+      <p class="muted">
+        Relays this connection uses for NWC traffic. The list is fixed at
+        creation time — to change it, revoke the connection and create a
+        new one.
+      </p>
+      <table>
+        <tbody data-relay-detail>
+          ${renderRelayDetail(relays)}
+        </tbody>
       </table>
 
       <h2>NWC transactions</h2>

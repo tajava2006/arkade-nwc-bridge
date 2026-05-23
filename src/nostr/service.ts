@@ -23,6 +23,7 @@ import { handlePayInvoice } from '../handlers/pay_invoice'
 import { handleLookupInvoice } from '../handlers/lookup_invoice'
 import { handleListTransactions } from '../handlers/list_transactions'
 import { SUPPORTED_METHODS, type SupportedMethod } from '../lib/methods'
+import type { RelayStatus } from '../lib/relay_status'
 
 interface NwcRequest {
   method: string
@@ -34,6 +35,13 @@ export interface NostrServiceDeps {
   db: Database
   wallet: Wallet
   swaps: ArkadeSwaps
+  /**
+   * Fired whenever the underlying pool reports a relay coming up or going
+   * down. The web layer subscribes to broadcast the new status over SSE.
+   * Pool callbacks aren't debounced — caller should expect bursts during
+   * boot when every relay connects in quick succession.
+   */
+  onRelayStatusChange?: (status: RelayStatus[]) => void
 }
 
 export interface NostrService {
@@ -54,12 +62,33 @@ export interface NostrService {
    * authorization step anyway.
    */
   unregisterConnection(servicePubkeyHex: string): void
+  /**
+   * Snapshot of which configured relays are currently connected. Used by
+   * the web layer for initial page renders before the SSE stream takes
+   * over. Always lists every relay in cfg.nwcRelays, even ones the pool
+   * has never tried (those report `connected: false`).
+   */
+  getRelayStatus(): RelayStatus[]
   stop(): Promise<void>
 }
 
 export async function startNostrService(deps: NostrServiceDeps): Promise<NostrService> {
   const { cfg, db } = deps
   const pool = new SimplePool()
+
+  // Translate pool-level connect/disconnect callbacks into our cfg-scoped
+  // RelayStatus snapshot. The pool tracks any relay it ever touches,
+  // including transient ones from publish retries — we only ever care
+  // about the configured NWC set.
+  const emitRelayStatus = (): void => {
+    deps.onRelayStatusChange?.(snapshotRelayStatus(pool, cfg.nwcRelays))
+  }
+  pool.onRelayConnectionSuccess = (url) => {
+    if (cfg.nwcRelays.includes(url)) emitRelayStatus()
+  }
+  pool.onRelayConnectionFailure = (url) => {
+    if (cfg.nwcRelays.includes(url)) emitRelayStatus()
+  }
 
   // One SubCloser per connection. A single multi-pubkey filter would also
   // work, but keeping subs per-connection means we can close just one on
@@ -117,12 +146,20 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
       sub.close()
       subs.delete(servicePubkeyHex)
     },
+    getRelayStatus() {
+      return snapshotRelayStatus(pool, cfg.nwcRelays)
+    },
     async stop() {
       for (const sub of subs.values()) sub.close()
       subs.clear()
       pool.close(cfg.nwcRelays)
     },
   }
+}
+
+function snapshotRelayStatus(pool: SimplePool, relays: readonly string[]): RelayStatus[] {
+  const live = pool.listConnectionStatus()
+  return relays.map((url) => ({ url, connected: live.get(url) === true }))
 }
 
 async function publishInfoEvent(
