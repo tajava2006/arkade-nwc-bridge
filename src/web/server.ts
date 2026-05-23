@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite'
-import type { Wallet } from '@arkade-os/sdk'
+import type { Wallet, WalletBalance, ArkTransaction } from '@arkade-os/sdk'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import type { Config } from '../config'
@@ -14,6 +14,7 @@ import {
 } from '../nostr/connections'
 import type { NostrService } from '../nostr/service'
 import type { SseHub } from '../lib/sse'
+import type { AsyncCache } from '../lib/cache'
 import { relayStatusPayload } from '../lib/relay_status'
 import type { TransactionRow } from '../lib/transaction'
 import { dashboardView } from './views/dashboard'
@@ -24,6 +25,11 @@ import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
 import { qrSvg } from './qr'
 
+export interface SwrCaches {
+  balance: AsyncCache<WalletBalance>
+  history: AsyncCache<ArkTransaction[]>
+}
+
 export type AppState =
   | { mode: 'setup' }
   | {
@@ -31,6 +37,7 @@ export type AppState =
       wallet: Wallet
       swaps: ArkadeSwaps
       nostr: NostrService
+      caches: SwrCaches
       arkAddress: string
     }
 
@@ -148,10 +155,16 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/': {
-        GET: async () => {
+        GET: () => {
           const r = requireReady()
           if (!r.ok) return r.response
-          const balance = await r.ready.wallet.getBalance()
+          // SWR: hand back the last cached balance immediately, kick off
+          // a background refresh whose result lands via SSE. First visit
+          // ever in this process renders "Loading…" until the fetch
+          // resolves; subsequent visits flash the cached value, then
+          // (sub-second) get the fresh one without a page reload.
+          const { value: balance } = r.ready.caches.balance.snapshot()
+          void r.ready.caches.balance.refresh()
           const { active } = listAllConnections(db)
           const txCountRow = db
             .query<{ c: number }, []>(
@@ -160,7 +173,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             .get()
           return htmlResponse(
             dashboardView({
-              balanceMsat: (balance.available + balance.recoverable) * 1000,
+              balance,
               arkAddress: r.ready.arkAddress,
               activeConnections: active.length,
               totalTxCount: txCountRow?.c ?? 0,
@@ -276,13 +289,15 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/history': {
-        GET: async () => {
+        GET: () => {
           const r = requireReady()
           if (!r.ok) return r.response
-          // Raw ark-side wallet history — every onchain/offchain movement
-          // the wallet sees. NWC accountability lives on the per-connection
-          // detail page; we don't try to correlate the two here.
-          const txs = await r.ready.wallet.getTransactionHistory()
+          // SWR: same pattern as dashboard. getTransactionHistory is the
+          // slowest read in the bridge (full ark-side scan), so serving
+          // the cached list while a fresh fetch runs in the background
+          // is the biggest UX win in this PR.
+          const { value: txs } = r.ready.caches.history.snapshot()
+          void r.ready.caches.history.refresh()
           return htmlResponse(walletHistoryView(txs))
         },
       },

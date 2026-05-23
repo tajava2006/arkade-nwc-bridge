@@ -12,6 +12,8 @@ import type {
   SendLightningPaymentRequest,
   SendLightningPaymentResponse,
 } from '@arkade-os/boltz-swap'
+import { AsyncCache } from '../../src/lib/cache'
+import type { SwrCaches } from '../../src/web/server'
 
 export function emptyBalance(overrides: Partial<WalletBalance> = {}): WalletBalance {
   return {
@@ -43,6 +45,24 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
       return opts.history ?? []
     },
   } as unknown as Wallet
+}
+
+/**
+ * Build SwrCaches around a wallet stub and seed them with the same
+ * snapshot the real bootReady would seed at boot. Tests that drive the
+ * web server need ready-state caches so `/` and `/history` don't render
+ * "Loading…" placeholders.
+ */
+export function makeSwrCaches(wallet: Wallet, balance: WalletBalance): SwrCaches {
+  const caches: SwrCaches = {
+    balance: new AsyncCache({ label: 'test-balance', fetcher: () => wallet.getBalance() }),
+    history: new AsyncCache({
+      label: 'test-history',
+      fetcher: () => wallet.getTransactionHistory(),
+    }),
+  }
+  caches.balance.seed(balance)
+  return caches
 }
 
 export interface SwapsStubOptions {

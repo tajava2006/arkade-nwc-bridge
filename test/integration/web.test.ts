@@ -5,7 +5,7 @@ import type { NostrService } from '../../src/nostr/service'
 import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
-import { emptyBalance, makeSwapsStub, makeWalletStub } from '../helpers/mocks'
+import { emptyBalance, makeSwapsStub, makeSwrCaches, makeWalletStub } from '../helpers/mocks'
 
 // Bun.serve binds to a real port. Use 0 to ask the OS for any free one so
 // concurrent test files don't collide.
@@ -28,15 +28,15 @@ const CFG: Config = {
 // Pre-built ready-mode AppState so the web server skips the /setup gate.
 // The setup flow itself has its own test below.
 function readyState(): AppStateRef {
+  const balance = emptyBalance({ available: 1234, recoverable: 0 })
+  const wallet = makeWalletStub({ balance, address: 'tark1stubaddress' })
   return {
     current: {
       mode: 'ready',
-      wallet: makeWalletStub({
-        balance: emptyBalance({ available: 1234, recoverable: 0 }),
-        address: 'tark1stubaddress',
-      }),
+      wallet,
       swaps: makeSwapsStub() as ArkadeSwaps,
       nostr: STUB_NOSTR,
+      caches: makeSwrCaches(wallet, balance),
       arkAddress: 'tark1stubaddress',
     },
   }
@@ -148,11 +148,13 @@ describe('web server — setup mode', () => {
         // Don't actually bring up wallet/boltz/nostr in tests — just record
         // the key the route handed us and flip mode like index.ts would.
         bootedWith = pk
+        const wallet = makeWalletStub({ address: 'tark1stub' })
         state.current = {
           mode: 'ready',
-          wallet: makeWalletStub({ address: 'tark1stub' }),
+          wallet,
           swaps: makeSwapsStub() as ArkadeSwaps,
           nostr: STUB_NOSTR,
+          caches: makeSwrCaches(wallet, emptyBalance()),
           arkAddress: 'tark1stub',
         }
       },

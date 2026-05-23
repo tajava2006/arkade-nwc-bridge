@@ -87,18 +87,21 @@ const LIVE_SCRIPT = `<script>
 (function () {
   if (typeof EventSource === 'undefined') return
   var es = new EventSource('/events')
-  es.addEventListener('relay-status', function (ev) {
-    try {
-      var data = JSON.parse(ev.data)
-      document.querySelectorAll('[data-relay-summary]').forEach(function (el) {
-        el.innerHTML = data.summaryHtml
-      })
-      document.querySelectorAll('[data-relay-detail]').forEach(function (el) {
-        el.innerHTML = data.detailHtml
-      })
-    } catch (e) {
-      // swallow — a malformed frame shouldn't break the page
-    }
+  function swap(selector, html) {
+    document.querySelectorAll(selector).forEach(function (el) {
+      el.innerHTML = html
+    })
+  }
+  function on(name, fn) {
+    es.addEventListener(name, function (ev) {
+      try { fn(JSON.parse(ev.data)) } catch (e) { /* swallow */ }
+    })
+  }
+  on('relay-status', function (d) {
+    swap('[data-relay-summary]', d.summaryHtml)
+    swap('[data-relay-detail]', d.detailHtml)
   })
+  on('balance-status', function (d) { swap('[data-balance]', d.html) })
+  on('history-status', function (d) { swap('[data-history]', d.html) })
 })()
 </script>`

@@ -5,9 +5,12 @@ import { loadAccount } from './account'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
-import { startWebServer, type AppStateRef } from './web/server'
+import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
 import { SseHub } from './lib/sse'
+import { AsyncCache } from './lib/cache'
 import { relayStatusPayload } from './lib/relay_status'
+import { renderBalanceFragment } from './web/views/dashboard'
+import { renderHistoryFragment } from './web/views/history'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -57,7 +60,36 @@ async function main(): Promise<void> {
       },
     })
 
-    appState.current = { mode: 'ready', wallet, swaps, nostr, arkAddress: address }
+    // SWR caches for the slow ark-side reads. minIntervalMs keeps
+    // back-to-back page visits from hammering the upstream — opening
+    // dashboard, history, dashboard within a few seconds only refetches
+    // once each. Listeners fan out fresh values over SSE so any open
+    // browser tab updates in place.
+    const caches: SwrCaches = {
+      balance: new AsyncCache({
+        label: 'balance',
+        fetcher: () => wallet.getBalance(),
+        minIntervalMs: 2000,
+      }),
+      history: new AsyncCache({
+        label: 'history',
+        fetcher: () => wallet.getTransactionHistory(),
+        minIntervalMs: 2000,
+      }),
+    }
+    caches.balance.onUpdate(({ value }) => {
+      sseHub.broadcast('balance-status', { html: renderBalanceFragment(value).value })
+    })
+    caches.history.onUpdate(({ value }) => {
+      sseHub.broadcast('history-status', { html: renderHistoryFragment(value).value })
+    })
+    // Seed the balance cache with the snapshot we already fetched above
+    // so the first dashboard visit doesn't pay the round-trip again.
+    // Skipping equivalent seeding for history — that read is the slow
+    // one and there's no boot-time consumer that already has the data.
+    caches.balance.seed(balance)
+
+    appState.current = { mode: 'ready', wallet, swaps, nostr, caches, arkAddress: address }
     console.log('ready — waiting for NWC requests')
   }
 
