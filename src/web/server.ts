@@ -159,10 +159,12 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     fetch: () => new Response('Not Found', { status: 404 }),
   })
 
+  // Read server.port instead of cfg.httpPort — they differ when cfg.httpPort
+  // is 0 (tests bind to an OS-picked port).
   return {
     stop: async () => {
       server.stop()
     },
-    url: `http://${cfg.httpBind}:${cfg.httpPort}`,
+    url: `http://${cfg.httpBind}:${server.port}`,
   }
 }

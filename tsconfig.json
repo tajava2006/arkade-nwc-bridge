@@ -27,6 +27,6 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src/**/*", "scripts/**/*"],
+  "include": ["src/**/*", "scripts/**/*", "test/**/*"],
   "exclude": ["node_modules", "nips", "nostr-tools", "arkd", "wallet", "ts-sdk", "data"]
 }

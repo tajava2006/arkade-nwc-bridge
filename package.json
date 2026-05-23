@@ -7,6 +7,9 @@
     "start": "bun run src/index.ts",
     "dev": "bun --hot run src/index.ts",
     "typecheck": "tsc --noEmit",
+    "test": "bun test test/unit test/nostr test/integration",
+    "test:live": "RUN_LIVE_TESTS=1 bun test test/live",
+    "upgrade": "bun update @arkade-os/sdk @arkade-os/boltz-swap nostr-tools light-bolt11-decoder qr eventsource --latest && bun run typecheck && bun run test",
     "new-connection": "bun run scripts/new-connection.ts"
   },
   "devDependencies": {
@@ -16,11 +19,11 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@arkade-os/boltz-swap": "^0.3.31",
-    "@arkade-os/sdk": "^0.4.27",
+    "@arkade-os/boltz-swap": "^0.3.33",
+    "@arkade-os/sdk": "^0.4.28",
     "eventsource": "^4.1.0",
     "light-bolt11-decoder": "^3.2.0",
-    "nostr-tools": "^2.23.3",
+    "nostr-tools": "^2.23.5",
     "qr": "^0.6.0"
   }
 }
