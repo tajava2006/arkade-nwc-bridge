@@ -42,13 +42,15 @@ async function main(): Promise<void> {
   const web = startWebServer({ cfg, db, wallet, arkAddress: address, nostr })
   console.log(`  web ui         ${web.url}`)
 
-  // Minimal graceful shutdown so SIGINT/SIGTERM don't leave open sockets
-  // straggling. Full ark-wallet / boltz-swap teardown comes in phase 10.
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n${signal} received, shutting down`)
     await web.stop()
     await nostr.stop()
     await swaps.dispose()
+    // Wallet.dispose tears down the VtxoManager poll loop, ContractWatcher's
+    // SSE subscription, and ArkProvider's settlement-event stream so the
+    // Ark server sees a clean disconnect rather than a half-open socket.
+    await wallet.dispose()
     db.close()
     process.exit(0)
   }
