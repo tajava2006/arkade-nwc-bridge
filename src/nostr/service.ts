@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet } from '@arkade-os/sdk'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
-import { SimplePool } from 'nostr-tools/pool'
+import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
 import { NWCWalletInfo, NWCWalletRequest, NWCWalletResponse } from 'nostr-tools/kinds'
 
@@ -36,12 +36,11 @@ export interface NostrServiceDeps {
   wallet: Wallet
   swaps: ArkadeSwaps
   /**
-   * Fired whenever the underlying pool reports a relay coming up or going
-   * down. The web layer subscribes to broadcast the new status over SSE.
-   * Pool callbacks aren't debounced — caller should expect bursts during
-   * boot when every relay connects in quick succession.
+   * Shared SimplePool. Same instance the outbox watcher uses — so every
+   * subsystem reads listConnectionStatus from one place and the UI
+   * stays consistent across the outbox panel and connection rows.
    */
-  onRelayStatusChange?: (status: RelayStatus[]) => void
+  pool: SimplePool
 }
 
 export interface NostrService {
@@ -63,32 +62,17 @@ export interface NostrService {
    */
   unregisterConnection(servicePubkeyHex: string): void
   /**
-   * Snapshot of which configured relays are currently connected. Used by
-   * the web layer for initial page renders before the SSE stream takes
-   * over. Always lists every relay in cfg.nwcRelays, even ones the pool
-   * has never tried (those report `connected: false`).
+   * Connection status for the given URLs — used by the web layer to
+   * render per-connection relay badges. Returns one entry per input URL
+   * in the same order; relays the pool has never seen come back as
+   * `connected: false`.
    */
-  getRelayStatus(): RelayStatus[]
+  getRelayStatus(urls: readonly string[]): RelayStatus[]
   stop(): Promise<void>
 }
 
 export async function startNostrService(deps: NostrServiceDeps): Promise<NostrService> {
-  const { cfg, db } = deps
-  const pool = new SimplePool()
-
-  // Translate pool-level connect/disconnect callbacks into our cfg-scoped
-  // RelayStatus snapshot. The pool tracks any relay it ever touches,
-  // including transient ones from publish retries — we only ever care
-  // about the configured NWC set.
-  const emitRelayStatus = (): void => {
-    deps.onRelayStatusChange?.(snapshotRelayStatus(pool, cfg.nwcRelays))
-  }
-  pool.onRelayConnectionSuccess = (url) => {
-    if (cfg.nwcRelays.includes(url)) emitRelayStatus()
-  }
-  pool.onRelayConnectionFailure = (url) => {
-    if (cfg.nwcRelays.includes(url)) emitRelayStatus()
-  }
+  const { db, pool } = deps
 
   // One SubCloser per connection. A single multi-pubkey filter would also
   // work, but keeping subs per-connection means we can close just one on
@@ -96,13 +80,17 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
   // arrives while we're between unsubscribe and resubscribe.
   const subs = new Map<string, ReturnType<SimplePool['subscribeMany']>>()
 
-  const subscribeOne = (servicePubkey: string): void => {
-    if (subs.has(servicePubkey)) return
+  const subscribeOne = (conn: Connection): void => {
+    if (subs.has(conn.servicePubkeyHex)) return
+    if (conn.relays.length === 0) {
+      console.warn(`nostr: conn #${conn.id} has no relays — skipping subscribe`)
+      return
+    }
     const sub = pool.subscribeMany(
-      cfg.nwcRelays,
+      conn.relays,
       {
         kinds: [NWCWalletRequest],
-        '#p': [servicePubkey],
+        '#p': [conn.servicePubkeyHex],
         // Only events newer than the moment we subscribed. For the boot
         // path that's start-of-service; for registerConnection that's
         // creation time. Either way, anything older is either a stale
@@ -117,7 +105,7 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
         },
       },
     )
-    subs.set(servicePubkey, sub)
+    subs.set(conn.servicePubkeyHex, sub)
   }
 
   const connections = listActiveConnections(db)
@@ -127,18 +115,24 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
     )
   }
   for (const conn of connections) {
-    await publishInfoEvent(pool, cfg.nwcRelays, conn)
-    subscribeOne(conn.servicePubkeyHex)
+    if (conn.relays.length === 0) {
+      console.warn(`nostr: conn #${conn.id} has no relays — skipping`)
+      continue
+    }
+    await publishInfoEvent(pool, conn.relays, conn)
+    subscribeOne(conn)
   }
   console.log(
-    `nostr: ${connections.length} active connection${connections.length === 1 ? '' : 's'}; ` +
-      `subscribing to ${cfg.nwcRelays.length} relay${cfg.nwcRelays.length === 1 ? '' : 's'}`,
+    `nostr: ${connections.length} active connection${connections.length === 1 ? '' : 's'}`,
   )
 
   return {
     async registerConnection(conn) {
-      await publishInfoEvent(pool, cfg.nwcRelays, conn)
-      subscribeOne(conn.servicePubkeyHex)
+      if (conn.relays.length === 0) {
+        throw new Error('refusing to register a connection with no relays')
+      }
+      await publishInfoEvent(pool, conn.relays, conn)
+      subscribeOne(conn)
     },
     unregisterConnection(servicePubkeyHex) {
       const sub = subs.get(servicePubkeyHex)
@@ -146,20 +140,17 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
       sub.close()
       subs.delete(servicePubkeyHex)
     },
-    getRelayStatus() {
-      return snapshotRelayStatus(pool, cfg.nwcRelays)
+    getRelayStatus(urls) {
+      const live = pool.listConnectionStatus()
+      return urls.map((url) => ({ url, connected: live.get(url) === true }))
     },
     async stop() {
       for (const sub of subs.values()) sub.close()
       subs.clear()
-      pool.close(cfg.nwcRelays)
+      // Pool is owned by the caller (index.ts) — leave its sockets to
+      // the outbox watcher / shutdown sequence.
     },
   }
-}
-
-function snapshotRelayStatus(pool: SimplePool, relays: readonly string[]): RelayStatus[] {
-  const live = pool.listConnectionStatus()
-  return relays.map((url) => ({ url, connected: live.get(url) === true }))
 }
 
 async function publishInfoEvent(
@@ -214,7 +205,7 @@ async function handleEvent(
   pool: SimplePool,
   event: NostrEvent,
 ): Promise<void> {
-  const { cfg, db, wallet } = deps
+  const { db } = deps
 
   // Which connection does this request target?
   const pTag = event.tags.find((t) => t[0] === 'p')
@@ -251,7 +242,7 @@ async function handleEvent(
     scheme = pickRequestScheme(event.tags)
   } catch (err) {
     if (err instanceof NwcError) {
-      await respondError(pool, cfg.nwcRelays, conn, event, 'nip04', 'unknown', err)
+      await respondError(pool, conn.relays, conn, event, 'nip04', 'unknown', err)
       markEventProcessed(db, { eventId: event.id, connectionId: conn.id, method: 'unknown' })
     }
     return
@@ -273,13 +264,13 @@ async function handleEvent(
 
   try {
     const result = await dispatch(deps, conn, event, method, request.params)
-    await respondOk(pool, cfg.nwcRelays, conn, event, scheme, method, result)
+    await respondOk(pool, conn.relays, conn, event, scheme, method, result)
   } catch (err) {
     const nwcErr =
       err instanceof NwcError
         ? err
         : new NwcError('INTERNAL', err instanceof Error ? err.message : String(err))
-    await respondError(pool, cfg.nwcRelays, conn, event, scheme, method, nwcErr)
+    await respondError(pool, conn.relays, conn, event, scheme, method, nwcErr)
     console.error(`nostr: conn #${conn.id} ${method} failed:`, err)
   } finally {
     markEventProcessed(db, { eventId: event.id, connectionId: conn.id, method })

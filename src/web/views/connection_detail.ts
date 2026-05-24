@@ -53,7 +53,7 @@ export function connectionDetailView(args: {
         new one.
       </p>
       <table>
-        <tbody data-relay-detail>
+        <tbody data-connection-relay-detail="${conn.id}">
           ${renderRelayDetail(relays)}
         </tbody>
       </table>

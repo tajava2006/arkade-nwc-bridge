@@ -8,6 +8,13 @@ export interface Connection {
   serviceSecretHex: string
   servicePubkeyHex: string
   clientPubkeyHex: string
+  /**
+   * Relay set the client embedded in its NWC URI at creation time.
+   * The bridge subscribes to this exact set for this connection — not
+   * the current outbox default — so existing connections keep working
+   * when the outbox default changes.
+   */
+  relays: string[]
   budgetMsat: number | null
   spentMsat: number
   expiresAt: number | null
@@ -21,6 +28,7 @@ interface ConnectionRow {
   service_secret_hex: string
   service_pubkey_hex: string
   client_pubkey_hex: string
+  relays_json: string
   budget_msat: number | null
   spent_msat: number
   expires_at: number | null
@@ -29,12 +37,24 @@ interface ConnectionRow {
 }
 
 function rowToConnection(row: ConnectionRow): Connection {
+  let relays: string[] = []
+  try {
+    const parsed = JSON.parse(row.relays_json) as unknown
+    if (Array.isArray(parsed)) {
+      relays = parsed.filter((x): x is string => typeof x === 'string')
+    }
+  } catch {
+    // Row predates the migration (default '[]') or was hand-edited —
+    // leave relays empty. Caller will surface the broken connection
+    // when it tries to subscribe with zero relays.
+  }
   return {
     id: row.id,
     label: row.label,
     serviceSecretHex: row.service_secret_hex,
     servicePubkeyHex: row.service_pubkey_hex,
     clientPubkeyHex: row.client_pubkey_hex,
+    relays,
     budgetMsat: row.budget_msat,
     spentMsat: row.spent_msat,
     expiresAt: row.expires_at,
@@ -74,10 +94,13 @@ export function createConnection(
   const createdAt = Math.floor(Date.now() / 1000)
 
   const row = db
-    .query<ConnectionRow, [string | null, string, string, string, number | null, number]>(
+    .query<
+      ConnectionRow,
+      [string | null, string, string, string, string, number | null, number]
+    >(
       `INSERT INTO connections (
-         label, service_secret_hex, service_pubkey_hex, client_pubkey_hex, budget_msat, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?)
+         label, service_secret_hex, service_pubkey_hex, client_pubkey_hex, relays_json, budget_msat, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
        RETURNING *`,
     )
     .get(
@@ -85,6 +108,7 @@ export function createConnection(
       bytesToHex(serviceSecret),
       servicePubkey,
       clientPubkey,
+      JSON.stringify(args.relays),
       args.budgetMsat ?? null,
       createdAt,
     )

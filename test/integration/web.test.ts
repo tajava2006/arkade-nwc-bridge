@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { Config } from '../../src/config'
 import { startWebServer, type AppStateRef, type WebServer } from '../../src/web/server'
 import type { NostrService } from '../../src/nostr/service'
+import type { OutboxWatcher } from '../../src/nostr/outbox'
 import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
@@ -12,14 +13,22 @@ import { emptyBalance, makeSwapsStub, makeSwrCaches, makeWalletStub } from '../h
 const STUB_NOSTR: NostrService = {
   registerConnection: async () => {},
   unregisterConnection: () => {},
-  getRelayStatus: () => [{ url: 'wss://r', connected: false }],
+  getRelayStatus: (urls) => urls.map((url) => ({ url, connected: false })),
+  stop: async () => {},
+}
+
+const STUB_OUTBOX: OutboxWatcher = {
+  getOutboxRelays: () => ['wss://r'],
+  isResolved: () => false,
+  getBootstrapRelayStatus: () => [],
+  getOutboxRelayStatus: () => [{ url: 'wss://r', connected: false }],
+  onOutboxChange: () => () => {},
   stop: async () => {},
 }
 
 const CFG: Config = {
   network: 'bitcoin',
   arkServerUrl: 'https://stub',
-  nwcRelays: ['wss://r'],
   httpBind: '127.0.0.1',
   httpPort: 0,
   dbPath: '',
@@ -54,6 +63,7 @@ describe('web server', () => {
       db: temp.db,
       state: readyState(),
       sseHub: new SseHub(),
+      outbox: STUB_OUTBOX,
       bootReady: async () => {},
     })
     base = web.url
@@ -144,6 +154,7 @@ describe('web server — setup mode', () => {
       db: temp.db,
       state,
       sseHub: new SseHub(),
+      outbox: STUB_OUTBOX,
       bootReady: async (pk) => {
         // Don't actually bring up wallet/boltz/nostr in tests — just record
         // the key the route handed us and flip mode like index.ts would.

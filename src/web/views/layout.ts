@@ -32,11 +32,17 @@ const STYLES = `
   /* Relay status — colors picked from a blue/gray/amber set to avoid red/green
      so the badges stay distinguishable for red-green color blindness. Icon
      and text label are redundant channels: any one of them disambiguates. */
-  .relay-bar { margin: 0 0 1em; }
   .relay-pill { display: inline-block; padding: 0.15em 0.65em; border-radius: 999px; font-size: 0.85em; font-weight: 500; }
   .relay-pill.ok { background: #cfe7ff; color: #00345e; }
   .relay-pill.partial { background: #ffe6b3; color: #7a4a00; }
   .relay-pill.down { background: #e3e3e3; color: #444; }
+  .relay-panel { border: 1px solid #ddd; border-radius: 6px; padding: 0.6em 0.9em; margin: 0 0 1.2em; background: #fbfbfb; }
+  .relay-panel-row { display: flex; align-items: center; justify-content: space-between; gap: 0.8em; margin: 0.2em 0; }
+  .relay-panel-label { font-weight: 500; }
+  .relay-panel-list { list-style: none; padding: 0; margin: 0.2em 0 0.6em 1.2em; font-size: 0.85em; }
+  .relay-panel-list li { display: flex; gap: 0.4em; align-items: center; padding: 0.1em 0; }
+  .relay-dot.ok { color: #00345e; }
+  .relay-dot.down { color: #888; }
 `
 
 type Nav = 'dashboard' | 'connections' | 'history' | 'setup'
@@ -97,9 +103,11 @@ const LIVE_SCRIPT = `<script>
       try { fn(JSON.parse(ev.data)) } catch (e) { /* swallow */ }
     })
   }
-  on('relay-status', function (d) {
-    swap('[data-relay-summary]', d.summaryHtml)
-    swap('[data-relay-detail]', d.detailHtml)
+  on('outbox-update', function (d) { swap('[data-outbox-panel]', d.html) })
+  on('connection-update', function (d) {
+    var id = String(d.connectionId)
+    swap('[data-connection-relay-summary="' + id + '"]', d.summaryHtml)
+    swap('[data-connection-relay-detail="' + id + '"]', d.detailHtml)
   })
   on('balance-status', function (d) { swap('[data-balance]', d.html) })
   on('history-status', function (d) { swap('[data-history]', d.html) })

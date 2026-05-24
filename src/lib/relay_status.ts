@@ -6,30 +6,30 @@ export interface RelayStatus {
 }
 
 /**
- * One-line summary used in list views: "● Relays: 2/2 connected".
- * The count is the load-bearing signal — color and icon are redundant
- * channels so the badge stays readable for color-blind operators.
+ * Small badge — "2/3 ● connected" — used on the connections list row
+ * and inline anywhere a one-line relay summary fits. Both the count
+ * and the icon are load-bearing so the badge stays legible without
+ * color (red/green distinction is unreliable for color-blind operators).
  */
-export function renderRelaySummary(relays: RelayStatus[]): RawHtml {
+export function renderRelayBadge(relays: RelayStatus[]): RawHtml {
   if (relays.length === 0) {
-    return html`<span class="relay-pill down">○ No relays configured</span>`
+    return html`<span class="relay-pill down">○ no relays</span>`
   }
   const ok = relays.filter((r) => r.connected).length
   const total = relays.length
   const cls = ok === total ? 'ok' : ok === 0 ? 'down' : 'partial'
   const icon = ok === total ? '●' : ok === 0 ? '○' : '◐'
-  const label = ok === total ? 'all connected' : ok === 0 ? 'all offline' : 'partial'
-  return html`<span class="relay-pill ${cls}">${icon} Relays: ${ok}/${total} ${label}</span>`
+  return html`<span class="relay-pill ${cls}">${icon} ${ok}/${total}</span>`
 }
 
 /**
- * Detail table rows used on the connection page. Returns the rows only
- * (no surrounding table) so the table element can stay in the view
- * template and SSE updates can just swap the rows' innerHTML.
+ * Per-relay rows for the connection detail page. Returns only the
+ * <tr> elements so the outer <table> stays in the template and SSE
+ * pushes can just swap innerHTML of the wrapping <tbody>.
  */
 export function renderRelayDetail(relays: RelayStatus[]): RawHtml {
   if (relays.length === 0) {
-    return html`<tr><td colspan="2" class="muted">No relays configured for this connection.</td></tr>`
+    return html`<tr><td colspan="2" class="muted">This connection has no relays — it can't receive any requests.</td></tr>`
   }
   return html`${relays.map(
     (r) => html`
@@ -45,12 +45,77 @@ export function renderRelayDetail(relays: RelayStatus[]): RawHtml {
   )}`
 }
 
-export function relayStatusPayload(relays: RelayStatus[]): {
-  summaryHtml: string
-  detailHtml: string
-} {
+/**
+ * Top panel on the connections list page. Two stacked sections:
+ *   - Bootstrap relays (informational — only used to discover the
+ *     outbox; here so the operator can see when the hardcoded list
+ *     needs refreshing)
+ *   - Outbox relays (the default relays new connections will get)
+ * Each row is one relay with status.
+ */
+export function renderOutboxPanel(args: {
+  bootstrap: RelayStatus[]
+  outbox: RelayStatus[]
+  outboxResolved: boolean
+}): RawHtml {
+  const bootstrapBadge = renderRelayBadge(args.bootstrap)
+  const outboxBadge = renderRelayBadge(args.outbox)
+  return html`
+    <div class="relay-panel">
+      <div class="relay-panel-row">
+        <span class="relay-panel-label">
+          Bootstrap relays
+          <span class="muted">(outbox discovery)</span>
+        </span>
+        ${bootstrapBadge}
+      </div>
+      ${renderRelayList(args.bootstrap)}
+      <div class="relay-panel-row">
+        <span class="relay-panel-label">
+          ${args.outboxResolved
+            ? html`New connections will use`
+            : html`Outbox unresolved — using fallback`}
+        </span>
+        ${outboxBadge}
+      </div>
+      ${renderRelayList(args.outbox)}
+    </div>
+  `
+}
+
+function renderRelayList(relays: RelayStatus[]): RawHtml {
+  if (relays.length === 0) return html`<p class="muted relay-panel-list">(none)</p>`
+  return html`
+    <ul class="relay-panel-list">
+      ${relays.map(
+        (r) => html`
+          <li>
+            ${r.connected
+              ? html`<span class="relay-dot ok">●</span>`
+              : html`<span class="relay-dot down">○</span>`}
+            <code>${r.url}</code>
+          </li>
+        `,
+      )}
+    </ul>
+  `
+}
+
+export function outboxPanelPayload(args: {
+  bootstrap: RelayStatus[]
+  outbox: RelayStatus[]
+  outboxResolved: boolean
+}): { html: string } {
+  return { html: renderOutboxPanel(args).value }
+}
+
+export function connectionRelayPayload(
+  connectionId: number,
+  relays: RelayStatus[],
+): { connectionId: number; summaryHtml: string; detailHtml: string } {
   return {
-    summaryHtml: renderRelaySummary(relays).value,
+    connectionId,
+    summaryHtml: renderRelayBadge(relays).value,
     detailHtml: renderRelayDetail(relays).value,
   }
 }

@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { loadConfig, type Config } from '../../src/config'
+import { NWC_RELAYS_FALLBACK } from '../../src/defaults'
 import { openDatabase } from '../../src/db'
 import { loadAccount } from '../../src/account'
 import { initArkWallet } from '../../src/wallet'
@@ -166,14 +167,16 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
     const db = openDatabase(cfg.dbPath)
     const { wallet } = await initArkWallet(cfg, privateKey)
     const { swaps } = await initBoltz({ db, wallet })
-    const nostr = await startNostrService({ cfg, db, wallet, swaps })
+    const sharedPool = new SimplePool({ enableReconnect: true })
+    const nostr = await startNostrService({ cfg, db, wallet, swaps, pool: sharedPool })
+    const testRelays = [...NWC_RELAYS_FALLBACK]
 
     // Mint a temporary connection. revoke happens in afterAll regardless.
     const clientSecret = generateSecretKey()
     const clientPubkey = getPublicKey(clientSecret)
     const created = createConnection(db, {
       label: 'live-test',
-      relays: cfg.nwcRelays,
+      relays: testRelays,
     })
     // The default createConnection generates its own client key — override
     // it for this test so we control the secret on the client side too.
@@ -198,7 +201,7 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
       servicePubkey: created.connection.servicePubkeyHex,
       connectionId: created.connection.id,
       pool,
-      relays: cfg.nwcRelays,
+      relays: testRelays,
     }
 
     // Hold the db handle on harness via closure — we close it on shutdown.

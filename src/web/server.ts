@@ -13,9 +13,14 @@ import {
   revokeConnection,
 } from '../nostr/connections'
 import type { NostrService } from '../nostr/service'
+import type { OutboxWatcher } from '../nostr/outbox'
 import type { SseHub } from '../lib/sse'
 import type { AsyncCache } from '../lib/cache'
-import { relayStatusPayload } from '../lib/relay_status'
+import {
+  connectionRelayPayload,
+  outboxPanelPayload,
+  type RelayStatus,
+} from '../lib/relay_status'
 import type { TransactionRow } from '../lib/transaction'
 import { dashboardView } from './views/dashboard'
 import { connectionsListView } from './views/connections'
@@ -56,6 +61,7 @@ export interface WebServerDeps {
   db: Database
   state: AppStateRef
   sseHub: SseHub
+  outbox: OutboxWatcher
   /**
    * Brings up wallet → boltz → nostr inside the same process. Called from
    * POST /setup after the account row is written. Throws if wiring up the
@@ -71,7 +77,7 @@ export interface WebServer {
 }
 
 export function startWebServer(deps: WebServerDeps): WebServer {
-  const { cfg, db, state, sseHub, bootReady } = deps
+  const { cfg, db, state, sseHub, outbox, bootReady } = deps
 
   const redirectToSetup = (): Response => Response.redirect('/setup', 303)
 
@@ -186,11 +192,20 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const r = requireReady()
           if (!r.ok) return r.response
           const { active, revoked } = listAllConnections(db)
+          const connectionStatuses = new Map<number, RelayStatus[]>()
+          for (const c of active) {
+            connectionStatuses.set(c.id, r.ready.nostr.getRelayStatus(c.relays))
+          }
           return htmlResponse(
             connectionsListView({
               active,
               revoked,
-              relays: r.ready.nostr.getRelayStatus(),
+              connectionStatuses,
+              outboxPanel: {
+                bootstrap: outbox.getBootstrapRelayStatus(),
+                outbox: outbox.getOutboxRelayStatus(),
+                outboxResolved: outbox.isResolved(),
+              },
             }),
           )
         },
@@ -230,7 +245,10 @@ export function startWebServer(deps: WebServerDeps): WebServer {
 
           const { connection, uri } = createConnection(db, {
             label,
-            relays: cfg.nwcRelays,
+            // Snapshot the outbox at this moment — the URI baking it
+            // in is what NWC clients will use forever, even if the
+            // outbox list changes later.
+            relays: outbox.getOutboxRelays(),
             budgetMsat,
           })
           // Publish the info event and start listening for requests
@@ -265,7 +283,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             connectionDetailView({
               conn,
               transactions,
-              relays: r.ready.nostr.getRelayStatus(),
+              relays: r.ready.nostr.getRelayStatus(conn.relays),
             }),
           )
         },
@@ -306,31 +324,45 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // Server-Sent Events feed for live UI updates. Open one per
           // browser tab; nostr-side and (later) wallet-side state changes
           // get fanned out through sseHub.broadcast.
-          let active: ReadableStreamDefaultController<Uint8Array> | null = null
+          let activeCtl: ReadableStreamDefaultController<Uint8Array> | null = null
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
-              active = controller
+              activeCtl = controller
               sseHub.add(controller)
+              // Initial snapshots so a freshly-opened tab has current
+              // state without waiting for the next change event.
+              sseHub.sendTo(
+                controller,
+                'outbox-update',
+                outboxPanelPayload({
+                  bootstrap: outbox.getBootstrapRelayStatus(),
+                  outbox: outbox.getOutboxRelayStatus(),
+                  outboxResolved: outbox.isResolved(),
+                }),
+              )
               if (state.current.mode === 'ready') {
-                sseHub.sendTo(
-                  controller,
-                  'relay-status',
-                  relayStatusPayload(state.current.nostr.getRelayStatus()),
-                )
+                const ready = state.current
+                for (const c of listAllConnections(db).active) {
+                  sseHub.sendTo(
+                    controller,
+                    'connection-update',
+                    connectionRelayPayload(c.id, ready.nostr.getRelayStatus(c.relays)),
+                  )
+                }
               }
             },
             cancel() {
-              if (active) sseHub.remove(active)
+              if (activeCtl) sseHub.remove(activeCtl)
             },
           })
           // req.signal aborts on client disconnect; without this the
           // controller leaks into sseHub forever and every broadcast
           // tries to enqueue into a dead stream.
           req.signal.addEventListener('abort', () => {
-            if (active) {
-              sseHub.remove(active)
+            if (activeCtl) {
+              sseHub.remove(activeCtl)
               try {
-                active.close()
+                activeCtl.close()
               } catch {
                 // already closed
               }

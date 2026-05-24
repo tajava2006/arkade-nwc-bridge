@@ -1,14 +1,27 @@
 import './polyfills'
+import { SimplePool } from 'nostr-tools/pool'
+
 import { loadConfig } from './config'
+import {
+  NWC_RELAYS_FALLBACK,
+  OUTBOX_BOOTSTRAP_RELAYS,
+  OUTBOX_DISCOVERY_PUBKEY,
+  OUTBOX_INITIAL_TIMEOUT_MS,
+} from './defaults'
 import { openDatabase } from './db'
 import { loadAccount } from './account'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
+import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
+import { listActiveConnections } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
 import { SseHub } from './lib/sse'
 import { AsyncCache } from './lib/cache'
-import { relayStatusPayload } from './lib/relay_status'
+import {
+  connectionRelayPayload,
+  outboxPanelPayload,
+} from './lib/relay_status'
 import { renderBalanceFragment } from './web/views/dashboard'
 import { renderHistoryFragment } from './web/views/history'
 
@@ -18,7 +31,6 @@ async function main(): Promise<void> {
   console.log('arkade-nwc-bridge starting')
   console.log(`  network        ${cfg.network}`)
   console.log(`  ark server     ${cfg.arkServerUrl}`)
-  console.log(`  nwc relays     ${cfg.nwcRelays.join(', ')}`)
   console.log(`  http           http://${cfg.httpBind}:${cfg.httpPort}`)
   console.log(`  sqlite         ${cfg.dbPath}`)
 
@@ -30,6 +42,101 @@ async function main(): Promise<void> {
 
   const appState: AppStateRef = { current: { mode: 'setup' } }
   const sseHub = new SseHub()
+
+  // Single shared pool for the whole bridge. Outbox watcher uses it for
+  // bootstrap subs + outbox-relay ensureRelay; nostr service uses it
+  // for per-connection NWC subs. listConnectionStatus from this pool is
+  // the single source of truth — the outbox panel and connection rows
+  // can't disagree on a relay's state because they're reading the same
+  // socket.
+  //
+  // enableReconnect handles "relay was up, dropped briefly" with an
+  // internal backoff. But if a reconnect attempt *also* fails (relay
+  // still down), nostr-tools sets skipReconnection=true and drops the
+  // relay from the pool entirely — after that, it never tries again
+  // until something explicitly ensureRelay's the URL. That's exactly
+  // what the watchdog below does. enablePing keeps healthy sockets
+  // from going stale behind NAT/idle timeouts.
+  const pool = new SimplePool({ enableReconnect: true, enablePing: true })
+
+  // Resolve the outbox before the wallet/nostr bring-up so the
+  // resolved relay list is available the first time the operator
+  // opens /connections/new. Watcher keeps running afterward; later
+  // 10002 updates change new-connection defaults but don't touch
+  // existing connections.
+  const outbox = await startOutboxWatcher({
+    pool,
+    pubkey: OUTBOX_DISCOVERY_PUBKEY,
+    bootstrapRelays: OUTBOX_BOOTSTRAP_RELAYS,
+    fallback: NWC_RELAYS_FALLBACK,
+    initialTimeoutMs: OUTBOX_INITIAL_TIMEOUT_MS,
+  })
+  console.log(
+    `  outbox         ${outbox.isResolved() ? 'resolved' : 'unresolved (using fallback)'} — ${outbox.getOutboxRelays().length} relays`,
+  )
+
+  // Pool-level callbacks are single fields, not events; index.ts is the
+  // one place that listens, then fans out to the subsystems' SSE
+  // broadcasts. Both up- and down-edge fire the same dispatch. Wired
+  // *after* startOutboxWatcher so the closure can safely reference
+  // `outbox` — the watcher's own ensureRelay calls during startup fire
+  // these callbacks before `outbox` is initialized, and that would TDZ
+  // otherwise.
+  const broadcastOutboxPanel = (): void => {
+    sseHub.broadcast(
+      'outbox-update',
+      outboxPanelPayload({
+        bootstrap: outbox.getBootstrapRelayStatus(),
+        outbox: outbox.getOutboxRelayStatus(),
+        outboxResolved: outbox.isResolved(),
+      }),
+    )
+  }
+  const dispatchRelayChange = (url: string): void => {
+    // Outbox/bootstrap panels read the same URL set we just touched —
+    // re-render unconditionally rather than figure out membership.
+    // Cost is a few KB of HTML, gain is no missed updates.
+    broadcastOutboxPanel()
+    // Per-connection rows: fan out to every active connection that
+    // lists this URL. Off-app connections (revoked, never created)
+    // are filtered out by listActiveConnections.
+    for (const conn of listActiveConnections(db)) {
+      if (!conn.relays.includes(url)) continue
+      sseHub.broadcast(
+        'connection-update',
+        connectionRelayPayload(conn.id, snapshotConnectionRelays(pool, conn.relays)),
+      )
+    }
+  }
+  pool.onRelayConnectionSuccess = dispatchRelayChange
+  pool.onRelayConnectionFailure = dispatchRelayChange
+  outbox.onOutboxChange(() => broadcastOutboxPanel())
+
+  // Watchdog: every few seconds, re-ensureRelay every URL the bridge
+  // currently cares about. ensureRelay is a no-op when the socket is
+  // already connected, but resurrects relays that the pool gave up on
+  // — see the long comment on `new SimplePool` above. Without this, a
+  // relay that goes down for longer than the internal backoff
+  // permanently stays "offline" in our UI even after it comes back.
+  const RELAY_WATCHDOG_INTERVAL_MS = 5000
+  const knownRelayUrls = (): Set<string> => {
+    const urls = new Set<string>()
+    for (const url of OUTBOX_BOOTSTRAP_RELAYS) urls.add(normalizeRelayUrl(url))
+    for (const url of outbox.getOutboxRelays()) urls.add(url)
+    for (const conn of listActiveConnections(db)) {
+      for (const url of conn.relays) urls.add(url)
+    }
+    return urls
+  }
+  const watchdog = setInterval(() => {
+    for (const url of knownRelayUrls()) {
+      pool.ensureRelay(url).catch(() => {
+        // ensureRelay rejects on connect failure. The pool also fires
+        // onRelayConnectionFailure separately, which is the path our
+        // UI updates flow through — nothing for us to do here.
+      })
+    }
+  }, RELAY_WATCHDOG_INTERVAL_MS)
 
   // Lift the wallet/boltz/nostr bring-up into a function so it can run
   // either at boot (if an account row exists) or post-setup from the web
@@ -50,15 +157,7 @@ async function main(): Promise<void> {
       `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
     )
 
-    const nostr = await startNostrService({
-      cfg,
-      db,
-      wallet,
-      swaps,
-      onRelayStatusChange: (status) => {
-        sseHub.broadcast('relay-status', relayStatusPayload(status))
-      },
-    })
+    const nostr = await startNostrService({ cfg, db, wallet, swaps, pool })
 
     // SWR caches for the slow ark-side reads. minIntervalMs keeps
     // back-to-back page visits from hammering the upstream — opening
@@ -100,11 +199,12 @@ async function main(): Promise<void> {
     console.log('  account        none — open /setup to create or import one')
   }
 
-  const web = startWebServer({ cfg, db, state: appState, sseHub, bootReady })
+  const web = startWebServer({ cfg, db, state: appState, sseHub, outbox, bootReady })
   console.log(`  web ui         ${web.url}`)
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n${signal} received, shutting down`)
+    clearInterval(watchdog)
     sseHub.closeAll()
     await web.stop()
     if (appState.current.mode === 'ready') {
@@ -115,6 +215,9 @@ async function main(): Promise<void> {
       // Ark server sees a clean disconnect rather than a half-open socket.
       await appState.current.wallet.dispose()
     }
+    await outbox.stop()
+    // Close every relay the shared pool ever touched, in one shot.
+    pool.close([...pool.listConnectionStatus().keys()])
     db.close()
     process.exit(0)
   }
@@ -130,6 +233,14 @@ async function main(): Promise<void> {
       process.exit(1)
     })
   })
+}
+
+function snapshotConnectionRelays(
+  pool: SimplePool,
+  urls: readonly string[],
+): { url: string; connected: boolean }[] {
+  const live = pool.listConnectionStatus()
+  return urls.map((url) => ({ url, connected: live.get(url) === true }))
 }
 
 main().catch((err) => {

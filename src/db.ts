@@ -100,6 +100,20 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 4,
+    description: 'connections.relays_json — per-connection relay list from outbox at create time',
+    // Each NWC client is pinned to whatever relays the outbox watcher
+    // resolved when its connection was created. Storing them here lets
+    // the bridge keep listening on each connection's original relays
+    // even after the outbox list changes, so existing clients keep
+    // working without a revoke+reissue dance. New rows always get a
+    // non-empty list via createConnection; the empty-array default is
+    // only for the column shape and won't apply to live rows.
+    sql: `
+      ALTER TABLE connections ADD COLUMN relays_json TEXT NOT NULL DEFAULT '[]';
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {
