@@ -47,9 +47,15 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 ┌──────────────────────────────────────────────────────┐
 │  Operator Web UI  (Bun.serve, server-rendered HTML)  │
 │  /, /connections (list/new/:id/revoke), /history     │
+│  /events: SSE feed for outbox / connection / balance │
+│          / history fragments (no client framework)   │
 ├──────────────────────────────────────────────────────┤
-│  Nostr Service  (SimplePool, kinds 13194/23194/23195)│
-│  One subscription per connection (Map of SubClosers) │
+│  Outbox Watcher  (NIP-65 kind 10002)                 │
+│  Bootstrap relays → discovery pubkey's relay list →  │
+│  default for new-connection URIs                     │
+├──────────────────────────────────────────────────────┤
+│  Nostr Service  (per-connection subs on conn.relays) │
+│  kinds 13194 / 23194 / 23195 over the shared pool    │
 ├──────────────────────────────────────────────────────┤
 │  Handlers                                            │
 │  get_info / get_balance / make_invoice / pay_invoice │
@@ -61,6 +67,13 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 ├──────────────────────────────────────────────────────┤
 │  Storage Layer  (bun:sqlite + WAL)                   │
 └──────────────────────────────────────────────────────┘
+
+           shared SimplePool ◄── owned by src/index.ts
+                  │
+                  └─ subscribed by: outbox watcher (kind 10002 on
+                     bootstrap relays) + nostr service (per-conn
+                     filters). Pool callbacks fire in index.ts and
+                     fan out through SseHub to the browser.
 ```
 
 All outbound:
@@ -72,17 +85,37 @@ No inbound except local HTTP on loopback.
 
 ### Dependency direction
 
-`web` → `nostr.NostrService` (narrow interface) + DB. `web` doesn't
-know about pool internals, handler internals, or SimplePool. Mutating
-a connection (`createConnection` / `revokeConnection`) calls
-`nostr.registerConnection` / `unregisterConnection` so subscriptions
-and info events update live without a bridge restart.
+`web` → `nostr.NostrService` (narrow interface) + DB + `OutboxWatcher`
+(read-only for the new-connection URI and the outbox-panel render).
+`web` doesn't know about pool internals, handler internals, or
+SimplePool. Mutating a connection (`createConnection` /
+`revokeConnection`) calls `nostr.registerConnection` /
+`unregisterConnection` so subscriptions and info events update live
+without a bridge restart.
 
-`nostr` → DB + handlers + boltz SDK. Doesn't know about web.
+`nostr.outbox` → shared pool + DB (none). Subscribes on bootstrap
+relays, emits an outbox-change callback on every distinct 10002.
+
+`nostr.service` → shared pool + DB + handlers + boltz SDK. Takes the
+pool as a constructor parameter; doesn't construct its own.
 
 `handlers` → DB + boltz SDK. Don't know about nostr/web.
 
 `boltz` → DB (for the SwapRepository).
+
+`index.ts` is the only place that owns the shared SimplePool. It
+wires `pool.onRelayConnectionSuccess/Failure` once, then dispatches
+into:
+- `SseHub.broadcast('outbox-update', …)` — re-renders the outbox
+  panel on the connections page
+- `SseHub.broadcast('connection-update', …)` — re-renders the per-
+  connection relay badge / detail table for each connection whose
+  relays include the changed URL
+
+It also runs a 5-second `ensureRelay` watchdog over the union of
+bootstrap + current outbox + every active connection's relays, to
+work around nostr-tools' habit of dropping relays from the pool
+once `enableReconnect`'s backoff gives up (see §9).
 
 ## 4. SQLite schema
 
@@ -105,12 +138,18 @@ accounts (
 
 -- One row per NWC connection. Each gets a fresh service keypair;
 -- the client secret from the URI is NOT stored (NIP-47 guidance).
+-- `relays_json` is a JSON-encoded string[] of the outbox snapshot
+-- at create time — the bridge subscribes to *these exact relays*
+-- for the connection's whole lifetime, so an outbox list change
+-- later doesn't silently break clients that baked the old set
+-- into their URI.
 connections (
   id                  INTEGER PRIMARY KEY,
   label               TEXT,
   service_secret_hex  TEXT    NOT NULL,
   service_pubkey_hex  TEXT    NOT NULL UNIQUE,
   client_pubkey_hex   TEXT    NOT NULL,
+  relays_json         TEXT    NOT NULL DEFAULT '[]',
   budget_msat         INTEGER,                    -- null = unlimited
   spent_msat          INTEGER NOT NULL DEFAULT 0,
   expires_at          INTEGER,
@@ -277,11 +316,25 @@ Defenses, in order of importance:
 ## 8. Configuration
 
 There is no `.env` and no environment-variable surface. Static
-defaults (network, ASP URL, relays, bind/port, db path) live as
-TypeScript constants in [`src/defaults.ts`](src/defaults.ts); edit
-the source to deviate. The identity (`nsec`) is captured at runtime
-through the `/setup` flow and persisted in the `accounts` sqlite
-table — see §2 *Identity input*.
+defaults live as TypeScript constants in [`src/defaults.ts`](src/defaults.ts);
+edit the source to deviate. They are:
+
+- `NETWORK` / `ARK_SERVER_URL` / `HTTP_BIND` / `HTTP_PORT` /
+  `DB_PATH` — boring single values.
+- `OUTBOX_DISCOVERY_PUBKEY` — the operator's nostr pubkey, whose
+  NIP-65 (kind 10002) outbox list is the source of truth for which
+  relays new NWC connections will use.
+- `OUTBOX_BOOTSTRAP_RELAYS` — small set of well-known indexer
+  relays the outbox watcher subscribes on to fetch that 10002.
+  Only purpose: discovery. Not used for NWC traffic.
+- `NWC_RELAYS_FALLBACK` — the relay list a new connection gets if
+  the outbox watcher couldn't resolve anything within
+  `OUTBOX_INITIAL_TIMEOUT_MS` at boot. Keeps the bridge usable
+  even with every bootstrap relay down.
+
+The identity (`nsec`) is *not* a constant — it's captured at
+runtime through the `/setup` flow and persisted in the `accounts`
+sqlite table; see §2 *Identity input*.
 
 The Boltz endpoint is intentionally not configurable — SDK default
 is the right answer (§2).
@@ -331,10 +384,34 @@ skips wallet/boltz/nostr disposal (nothing to dispose yet).
   Bun throws `require() async module ... unsupported` for that
   dep; retrying boots cleanly. Looks like a transient ESM/CJS
   interop issue; haven't pinned down the trigger.
-- **No live updates to active subscriptions**: connection
-  registration/unregistration touches subscriptions, but if the
-  `NWC_RELAYS` list itself changes, that only takes effect on
-  restart.
+- **Outbox updates affect *new* connections only**: an existing
+  connection's relay set is baked into its URI and persisted in
+  `connections.relays_json` at creation time. The bridge keeps
+  subscribing on that exact set for the rest of the connection's
+  life. If the outbox watcher learns a new 10002 mid-process, the
+  next connection picks up the new defaults; old connections do
+  not — even on restart. If a customer's connection stops working
+  because every relay it baked in died, the operator has to
+  revoke + reissue. No auto-migration.
+- **nostr-tools `enableReconnect` gives up**: after a transient
+  disconnect, nostr-tools retries with backoff (10s, 10s, 10s,
+  20s, 20s, 30s, 60s) — but if a retry attempt *also* fails
+  (relay still down), it sets `skipReconnection=true` and
+  removes the relay from `pool.relays` entirely, after which
+  `listConnectionStatus` no longer reports the URL at all. The
+  5-second `ensureRelay` watchdog in [`src/index.ts`](src/index.ts)
+  exists to resurrect these — it iterates the bridge's
+  bootstrap ∪ current outbox ∪ active-connection relays union and
+  calls `pool.ensureRelay(url)` on each. ensureRelay is a free
+  no-op for connected relays; for removed ones it re-adds and
+  retries. Without that loop, a relay that drops for longer than
+  the internal backoff stays "offline" in the UI forever.
+- **Relay URL canonicalization**: `SimplePool` parses URLs through
+  WHATWG URL (`wss://nos.lol` → `wss://nos.lol/`) and pool
+  callbacks emit the canonical form. Constants in
+  [`src/defaults.ts`](src/defaults.ts) are unnormalized for
+  legibility; [`src/nostr/outbox.ts`](src/nostr/outbox.ts) exports
+  `normalizeRelayUrl` to keep comparisons honest.
 
 ## 10. Reference repos
 

@@ -65,8 +65,10 @@ migrations, and waits for an identity. Open
 existing `nsec1…` or click *Generate* to mint a fresh one. The nsec
 is stored in the local sqlite file and never leaves the machine.
 
-No `.env` file, no env vars to set. Static defaults (network,
-relays, ASP, bind address, port, db path) live in
+No `.env` file, no env vars to set. Static defaults (network, ASP,
+bind address, port, db path, plus the bootstrap relay list and the
+pubkey whose [NIP-65 outbox](https://github.com/nostr-protocol/nips/blob/master/65.md)
+supplies the relay list for new NWC connections) live in
 [`src/defaults.ts`](src/defaults.ts) — edit there if you need
 something other than mainnet defaults. Don't change `HTTP_BIND` away
 from `127.0.0.1` — there is no auth.
@@ -83,9 +85,17 @@ from `127.0.0.1` — there is no auth.
 ### Why per-connection?
 
 Each connection gets its own service keypair (NIP-47 SHOULD), its
-own subscription, its own budget. Revoking a connection from
-`/connections` stops listening on that pubkey — the URI is dead.
-Other connections are unaffected.
+own subscription, its own budget, and its own relay set baked into
+the URI at creation time. Revoking a connection from `/connections`
+stops listening on that pubkey — the URI is dead. Other connections
+are unaffected.
+
+The relay set for each new URI comes from the operator's NIP-65
+outbox (the pubkey hardcoded in [`src/defaults.ts`](src/defaults.ts));
+existing connections keep their original relay set for life. If you
+update your outbox list later, only *future* connections pick up
+the new relays — existing clients keep working on whatever relays
+they baked in. If a client's relays all die, revoke + reissue.
 
 ## What the bridge supports
 
@@ -106,10 +116,14 @@ The web UI surfaces these views:
 | Page | What's there |
 |---|---|
 | `/setup` | First-run identity flow (paste or generate nsec). Shown automatically until an account exists; redirects to `/` once configured. |
-| `/` | Balance, Ark address, active-connection count, settled-transaction count. |
-| `/connections` | Active and revoked connections; create / revoke from here. |
-| `/connections/:id` | Per-connection NWC log (every `make_invoice` / `pay_invoice` made through that connection). |
-| `/history` | Raw Ark wallet history — every onchain/offchain movement the wallet sees, regardless of NWC. |
+| `/` | Balance, Ark address, active-connection count, settled-transaction count. Balance refreshes in place over SSE — first visit may briefly show the last cached value before the live one lands. |
+| `/connections` | Active and revoked connections; create / revoke from here. Top panel shows the bootstrap relays and the current outbox set (what new connections will use); each connection row has a live `N/M ●` relay badge that updates in place as relays come and go. |
+| `/connections/:id` | Per-connection NWC log (every `make_invoice` / `pay_invoice` made through that connection) plus a per-relay status table for that connection's baked-in relay set. |
+| `/history` | Raw Ark wallet history — every onchain/offchain movement the wallet sees, regardless of NWC. Same stale-while-revalidate behavior as the dashboard. |
+
+The pages are still server-rendered HTML; the live updates come
+through a single SSE stream at `/events` that swaps `innerHTML` on
+small marker slots. No client framework, no build step.
 
 ## Operational notes
 
