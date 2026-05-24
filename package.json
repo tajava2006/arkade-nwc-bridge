@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test test/unit test/nostr test/integration",
     "test:live": "RUN_LIVE_TESTS=1 bun test test/live",
-    "upgrade": "bun update @arkade-os/sdk @arkade-os/boltz-swap nostr-tools light-bolt11-decoder qr eventsource --latest && bun run typecheck && bun run test"
+    "upgrade": "bun update @arkade-os/sdk @arkade-os/boltz-swap nostr-tools light-bolt11-decoder qr eventsource --latest && bun run typecheck && bun run test",
+    "update-refs": "for d in nips nostr-tools arkd wallet ts-sdk; do echo \"=== $d ===\" && git -C \"$d\" pull --ff-only || exit 1; done"
   },
   "devDependencies": {
     "@types/bun": "latest"
