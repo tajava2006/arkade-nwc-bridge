@@ -7,7 +7,7 @@ export type Network = 'bitcoin' | 'signet' | 'mutinynet' | 'regtest'
 
 export const NETWORK: Network = 'bitcoin'
 
-export const ARK_SERVER_URL = 'https://arkade.computer'
+export const ARK_SERVER_URL = 'https://ark.hoppe-relay.it.com'
 
 // Fallback relay set handed to new NWC connections when the outbox
 // watcher can't resolve the operator's NIP-65 list — e.g. all bootstrap
