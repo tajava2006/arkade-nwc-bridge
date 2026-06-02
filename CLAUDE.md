@@ -140,8 +140,8 @@ row exists. Logs go to stdout; when running in background pipe to
   exists) or waits for POST `/setup` to call it. Don't reorder this
   to "wallet first" — there's no nsec to hand the wallet until setup
   completes. AppState lives in [`src/web/server.ts`](src/web/server.ts).
-- **Reference dirs** (`nips/`, `nostr-tools/`, `ts-sdk/`, `wallet/`,
-  `arkd/`) are gitignored convenience clones. Don't link to them
+- **Reference dirs** (`nips/`, `luds/`, `nostr-tools/`, `ts-sdk/`,
+  `wallet/`, `arkd/`) are gitignored convenience clones. Don't link to them
   from anything that gets committed — public links will 404.
   External URLs are in [DESIGN.md §10](DESIGN.md).
 - **Boltz endpoint is *not* `api.ark.boltz.exchange`.** The d.ts
