@@ -134,7 +134,12 @@ row exists. Logs go to stdout; when running in background pipe to
 - **No env vars.** Static defaults live in [`src/defaults.ts`](src/defaults.ts);
   the nsec lives in the `accounts` sqlite table (created via `/setup`).
   Don't reintroduce `.env` parsing — it was deliberately removed so the
-  bridge is "clone + `bun run dev`" with no setup ritual.
+  bridge is "clone + `bun run dev`" with no setup ritual. The one
+  opt-in override is `./data/config.json` (loaded by
+  [`src/config.ts`](src/config.ts)) for the docker deployment case —
+  any `Config` field present overrides the matching default, missing
+  fields fall through. The file is intentionally absent from a fresh
+  clone; don't add it to defaults or examples checked into the repo.
 - **Two-phase boot.** [`src/index.ts`](src/index.ts) starts the web
   server first, then either calls `bootReady` immediately (account
   exists) or waits for POST `/setup` to call it. Don't reorder this

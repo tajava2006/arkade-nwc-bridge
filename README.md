@@ -71,7 +71,54 @@ pubkey whose [NIP-65 outbox](https://github.com/nostr-protocol/nips/blob/master/
 supplies the relay list for new NWC connections) live in
 [`src/defaults.ts`](src/defaults.ts) — edit there if you need
 something other than mainnet defaults. Don't change `HTTP_BIND` away
-from `127.0.0.1` — there is no auth.
+from `127.0.0.1` — there is no auth. (The Docker setup below is the
+one exception: it binds `0.0.0.0` inside the container, with the
+docker port mapping enforcing loopback at the host.)
+
+### Running in Docker
+
+Use this if you want the bridge inside an existing self-hosted stack
+(e.g. alongside a personal Ark server / Boltz instance running in the
+same compose network).
+
+```bash
+docker build -t arkade-nwc-bridge .
+```
+
+Add to your compose:
+
+```yaml
+services:
+  bridge:
+    build: ./arkade-nwc-bridge   # or `image: arkade-nwc-bridge`
+    volumes:
+      - ./bridge-data:/app/data
+    ports:
+      - "127.0.0.1:4282:4282"
+    restart: unless-stopped
+```
+
+The `./bridge-data` volume persists sqlite + WAL across restarts.
+The `127.0.0.1:4282:4282` mapping keeps the web UI on the host's
+loopback only.
+
+To point the in-container bridge at a different ASP (or rebind the
+HTTP listener), drop a JSON file into the data volume **before first
+boot**:
+
+```jsonc
+// ./bridge-data/config.json
+{
+  "arkServerUrl": "http://arkd:7070",
+  "httpBind": "0.0.0.0"
+}
+```
+
+Any field of `Config` (`network`, `arkServerUrl`, `httpBind`,
+`httpPort`, `dbPath`) can be overridden; missing fields fall through
+to the static defaults in [`src/defaults.ts`](src/defaults.ts). The
+file is read once at boot. Outside of docker the file simply isn't
+there and the bridge stays zero-config.
 
 ## Connecting a nostr client
 

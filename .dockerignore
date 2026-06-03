@@ -1,0 +1,30 @@
+.git
+.gitignore
+.idea
+.vscode
+.claude
+
+node_modules
+data
+*.log
+*.tsbuildinfo
+
+# tests / scratch
+test
+spike-*.ts
+PLAN.md
+
+# docs (not needed inside the runtime image)
+*.md
+
+# reference repos (gitignored convenience clones)
+nips
+luds
+lightning-address
+nostr-tools
+arkd
+wallet
+ts-sdk
+
+Dockerfile
+.dockerignore
