@@ -9,6 +9,12 @@ export const NETWORK: Network = 'bitcoin'
 
 export const ARK_SERVER_URL = 'https://ark.hoppe-relay.it.com'
 
+// Boltz API endpoint used for submarine / reverse swaps. Pinning our own
+// instance instead of falling back to the SDK default keeps the swap path
+// under operator control (uptime, fee policy, referral) and avoids the
+// SDK's network-derived default flipping under us across version bumps.
+export const BOLTZ_API_URL = 'https://boltz.hoppe-relay.it.com'
+
 // Fallback relay set handed to new NWC connections when the outbox
 // watcher can't resolve the operator's NIP-65 list — e.g. all bootstrap
 // relays unreachable at boot, or the pubkey hasn't published 10002 yet.

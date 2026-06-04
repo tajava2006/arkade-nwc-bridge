@@ -1,5 +1,6 @@
 import {
   ArkadeSwaps,
+  BoltzSwapProvider,
   isPendingReverseSwap,
   isPendingSubmarineSwap,
   isReverseFinalStatus,
@@ -11,6 +12,7 @@ import {
 import type { Wallet } from '@arkade-os/sdk'
 import type { Database } from 'bun:sqlite'
 import { SqliteSwapRepository } from './boltz_repository'
+import { BOLTZ_API_URL, NETWORK } from './defaults'
 
 export interface BoltzContext {
   swaps: ArkadeSwaps
@@ -20,14 +22,9 @@ export async function initBoltz(deps: {
   db: Database
   wallet: Wallet
 }): Promise<BoltzContext> {
-  // No swapProvider — let ArkadeSwaps.create pick the SDK's built-in default
-  // (api.boltz.exchange for bitcoin), which is the same endpoint the
-  // arkade.money production wallet ships with and gives lower submarine fees
-  // (0.1% vs 0.25%) than the ark-specific endpoint that the d.ts docstring
-  // incorrectly claims is the default. If we ever need to point at a
-  // different Boltz instance, add it back behind an opt-in env var.
   const swaps = await ArkadeSwaps.create({
     wallet: deps.wallet,
+    swapProvider: new BoltzSwapProvider({ apiUrl: BOLTZ_API_URL, network: NETWORK }),
     swapRepository: new SqliteSwapRepository(deps.db),
     swapManager: {
       autoStart: true,
