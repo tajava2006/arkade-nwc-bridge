@@ -41,8 +41,6 @@ export const OUTBOX_DISCOVERY_PUBKEY =
 export const OUTBOX_BOOTSTRAP_RELAYS: readonly string[] = [
   'wss://purplepag.es',
   'wss://nostr.land',
-  'wss://relay.nostr.pub',
-  'wss://relay.nostr.band',
   'wss://nos.lol',
 ]
 export const OUTBOX_INITIAL_TIMEOUT_MS = 10_000
