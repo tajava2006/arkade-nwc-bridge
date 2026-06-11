@@ -16,6 +16,7 @@ import {
   type Connection,
 } from './connections'
 import { decryptContent, encryptContent, pickRequestScheme, type EncryptionScheme } from './crypto'
+import { openPersistentSub, type PersistentSub } from './persistent_sub'
 import { handleGetInfo } from '../handlers/get_info'
 import { handleGetBalance } from '../handlers/get_balance'
 import { handleMakeInvoice } from '../handlers/make_invoice'
@@ -74,11 +75,16 @@ export interface NostrService {
 export async function startNostrService(deps: NostrServiceDeps): Promise<NostrService> {
   const { db, pool } = deps
 
-  // One SubCloser per connection. A single multi-pubkey filter would also
-  // work, but keeping subs per-connection means we can close just one on
-  // revoke without rebuilding the others — no race window where a request
-  // arrives while we're between unsubscribe and resubscribe.
-  const subs = new Map<string, ReturnType<SimplePool['subscribeMany']>>()
+  // One PersistentSub per connection (internally one sub per relay).
+  // A single multi-pubkey filter would also work, but keeping subs
+  // per-connection means we can close just one on revoke without
+  // rebuilding the others — no race window where a request arrives
+  // while we're between unsubscribe and resubscribe. PersistentSub
+  // handles re-subscribing after nostr-tools permanently kills a
+  // relay's subscriptions (failed reconnect → skipReconnection) —
+  // without it the watchdog-resurrected socket carries no REQ and the
+  // connection goes silently deaf. See persistent_sub.ts.
+  const subs = new Map<string, PersistentSub>()
 
   const subscribeOne = (conn: Connection): void => {
     if (subs.has(conn.servicePubkeyHex)) return
@@ -86,25 +92,26 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
       console.warn(`nostr: conn #${conn.id} has no relays — skipping subscribe`)
       return
     }
-    const sub = pool.subscribeMany(
-      conn.relays,
-      {
+    const sub = openPersistentSub({
+      pool,
+      relays: conn.relays,
+      label: `nwc-${conn.id}`,
+      filter: {
         kinds: [NWCWalletRequest],
         '#p': [conn.servicePubkeyHex],
-        // Only events newer than the moment we subscribed. For the boot
-        // path that's start-of-service; for registerConnection that's
-        // creation time. Either way, anything older is either a stale
-        // replay (handled by processed_events) or expired by now.
-        since: Math.floor(Date.now() / 1000),
       },
-      {
-        onevent: (event) => {
-          handleEvent(deps, pool, event).catch((err) => {
-            console.error('nostr: handler crashed:', err)
-          })
-        },
+      // First subscribe: only events newer than now — anything older is
+      // either a stale replay (handled by processed_events) or expired.
+      // Re-subscribe after a relay death resumes from the death time so
+      // requests that landed on the relay while our socket was down are
+      // still served.
+      resumeSince: true,
+      onevent: (event) => {
+        handleEvent(deps, pool, event).catch((err) => {
+          console.error('nostr: handler crashed:', err)
+        })
       },
-    )
+    })
     subs.set(conn.servicePubkeyHex, sub)
   }
 

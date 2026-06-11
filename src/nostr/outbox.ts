@@ -2,6 +2,7 @@ import type { SimplePool } from 'nostr-tools/pool'
 import type { NostrEvent } from 'nostr-tools/pure'
 
 import type { RelayStatus } from '../lib/relay_status'
+import { openPersistentSub } from './persistent_sub'
 
 // NIP-65 "relay list metadata" — replaceable, one per author. The 'r'
 // tags carry relay URLs, optionally suffixed with "read" / "write"
@@ -119,9 +120,16 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
   ensureConnections(bootstrap)
   ensureConnections(fallback)
 
-  const sub = pool.subscribeMany(
-    bootstrap,
-    {
+  // PersistentSub so a bootstrap relay that nostr-tools gives up on
+  // (failed reconnect → subscriptions permanently closed) gets its
+  // 10002 sub re-issued once the socket is back. No resumeSince: on
+  // re-attach we want the latest stored replaceable event regardless
+  // of age — handle() dedupes by created_at.
+  const sub = openPersistentSub({
+    pool,
+    relays: bootstrap,
+    label: 'outbox',
+    filter: {
       kinds: [OUTBOX_KIND],
       authors: [cfg.pubkey],
       // Replaceable-event semantics: limit:1 asks the relay for the
@@ -130,8 +138,8 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
       // still be streamed live, which is exactly what we want.
       limit: 1,
     },
-    { onevent: handle },
-  )
+    onevent: handle,
+  })
 
   await Promise.race([
     firstEvent,

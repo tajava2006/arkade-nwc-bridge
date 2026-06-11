@@ -52,11 +52,15 @@ async function main(): Promise<void> {
   //
   // enableReconnect handles "relay was up, dropped briefly" with an
   // internal backoff. But if a reconnect attempt *also* fails (relay
-  // still down), nostr-tools sets skipReconnection=true and drops the
-  // relay from the pool entirely — after that, it never tries again
-  // until something explicitly ensureRelay's the URL. That's exactly
-  // what the watchdog below does. enablePing keeps healthy sockets
-  // from going stale behind NAT/idle timeouts.
+  // still down), nostr-tools sets skipReconnection=true, permanently
+  // closes every subscription on that socket, and drops the relay
+  // from the pool entirely — after that, it never tries again until
+  // something explicitly ensureRelay's the URL. The watchdog below
+  // resurrects the *socket*; re-issuing the REQs on the fresh socket
+  // is persistent_sub.ts's job (the watchdog can't — a resurrected
+  // AbstractRelay starts with zero subscriptions). enablePing keeps
+  // healthy sockets from going stale behind NAT/idle timeouts; in Bun
+  // it takes the dummy-REQ fallback (no ws.once), which works fine.
   const pool = new SimplePool({ enableReconnect: true, enablePing: true })
 
   // Resolve the outbox before the wallet/nostr bring-up so the
@@ -118,6 +122,8 @@ async function main(): Promise<void> {
   // — see the long comment on `new SimplePool` above. Without this, a
   // relay that goes down for longer than the internal backoff
   // permanently stays "offline" in our UI even after it comes back.
+  // This loop is socket-level only; subscription recovery on those
+  // resurrected sockets is handled by persistent_sub.ts.
   const RELAY_WATCHDOG_INTERVAL_MS = 5000
   const knownRelayUrls = (): Set<string> => {
     const urls = new Set<string>()

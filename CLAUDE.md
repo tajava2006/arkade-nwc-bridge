@@ -39,6 +39,11 @@ src/
                                on OUTBOX_BOOTSTRAP_RELAYS for the discovery
                                pubkey, exposes current outbox + bootstrap /
                                outbox relay status snapshots
+    persistent_sub.ts        — self-healing subscription wrapper: one
+                               sub per relay, re-issues the REQ after
+                               nostr-tools permanently kills a socket's
+                               subs (failed reconnect); cross-relay
+                               event dedupe via alreadyHaveEvent
     service.ts               — takes the shared SimplePool, one SubCloser
                                per connection over conn.relays;
                                registerConnection/unregisterConnection for
@@ -170,15 +175,21 @@ row exists. Logs go to stdout; when running in background pipe to
   no race. Outbox updates affect *new* connections only — existing
   ones keep their relays for life, even if the operator's NIP-65
   list changes underneath. `cfg.nwcRelays` doesn't exist.
-- **`enableReconnect` gives up.** A failed reconnect after a
-  transient drop sets `skipReconnection=true` inside nostr-tools,
-  after which the relay is *removed from the pool* and
+- **`enableReconnect` gives up — and takes the subs with it.** A
+  failed reconnect after a transient drop sets `skipReconnection=true`
+  inside nostr-tools, which *permanently closes every subscription
+  on that socket* and removes the relay from the pool, so
   `listConnectionStatus` forgets about it. The 5s `ensureRelay`
   watchdog in `index.ts` resurrects entries (bootstrap ∪ current
   outbox ∪ active connections' relays) so a relay coming back
-  online recovers within one tick. Without that loop, a relay
-  that drops for longer than the internal backoff stays "offline"
-  forever.
+  online recovers within one tick — but a resurrected relay starts
+  with zero subscriptions, so the socket alone is deaf. Subscription
+  recovery is [`src/nostr/persistent_sub.ts`](src/nostr/persistent_sub.ts)'s
+  job: one sub per (connection, relay), `onclose` marks it dead, a
+  5s retry re-issues the REQ (`since` resumed from the death time,
+  capped). Long-lived subs MUST go through `openPersistentSub`,
+  never raw `pool.subscribeMany` — a raw sub dies forever on the
+  first failed reconnect.
 - **URL canonicalization.** `SimplePool` parses relay URLs via
   WHATWG URL (`wss://nos.lol` → `wss://nos.lol/`), and pool
   callbacks emit the canonical form. Use `normalizeRelayUrl` from
