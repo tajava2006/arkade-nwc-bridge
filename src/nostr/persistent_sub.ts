@@ -120,7 +120,12 @@ export function openPersistentSub(opts: PersistentSubOptions): PersistentSub {
         // not mark the current sub dead.
         if (!cur || cur.serial !== mySerial) return
         cur.alive = false
-        cur.deadSinceMs ??= Date.now()
+        // Log only the first death of a cycle — retry attaches that fail
+        // again land here too, and one line per 5s tick would be spam.
+        if (cur.deadSinceMs === null) {
+          cur.deadSinceMs = Date.now()
+          console.warn(`nostr: sub '${opts.label}' died on ${url} — will resubscribe`)
+        }
       },
     })
   }
@@ -135,6 +140,10 @@ export function openPersistentSub(opts: PersistentSubOptions): PersistentSub {
         // Survived a full tick since (re)attach — treat as recovered so
         // the *next* death opens a fresh resume window instead of
         // dragging the old timestamp along.
+        if (entry.deadSinceMs !== null) {
+          const deadForSec = Math.round((Date.now() - entry.deadSinceMs) / 1000)
+          console.log(`nostr: sub '${opts.label}' resubscribed on ${url} after ${deadForSec}s dead`)
+        }
         entry.deadSinceMs = null
       }
     }
