@@ -31,6 +31,7 @@ async function main(): Promise<void> {
   console.log('arkade-nwc-bridge starting')
   console.log(`  network        ${cfg.network}`)
   console.log(`  ark server     ${cfg.arkServerUrl}`)
+  console.log(`  boltz          ${cfg.boltzApiUrl}`)
   console.log(`  http           http://${cfg.httpBind}:${cfg.httpPort}`)
   console.log(`  sqlite         ${cfg.dbPath}`)
 
@@ -157,7 +158,7 @@ async function main(): Promise<void> {
       `  balance        total=${balance.total} available=${balance.available} settled=${balance.settled} boarding=${balance.boarding.total}`,
     )
 
-    const { swaps } = await initBoltz({ db, wallet })
+    const { swaps } = await initBoltz({ db, wallet, cfg })
     const fees = await swaps.getFees()
     console.log(
       `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,

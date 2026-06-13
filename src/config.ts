@@ -6,6 +6,7 @@ export type { Network } from './defaults'
 export interface Config {
   network: defaults.Network
   arkServerUrl: string
+  boltzApiUrl: string
   httpBind: string
   httpPort: number
   dbPath: string
@@ -22,6 +23,7 @@ export function loadConfig(): Config {
   return {
     network: overrides.network ?? defaults.NETWORK,
     arkServerUrl: overrides.arkServerUrl ?? defaults.ARK_SERVER_URL,
+    boltzApiUrl: overrides.boltzApiUrl ?? defaults.BOLTZ_API_URL,
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,
     dbPath: overrides.dbPath ?? defaults.DB_PATH,

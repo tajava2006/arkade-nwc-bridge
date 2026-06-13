@@ -12,7 +12,7 @@ import {
 import type { Wallet } from '@arkade-os/sdk'
 import type { Database } from 'bun:sqlite'
 import { SqliteSwapRepository } from './boltz_repository'
-import { BOLTZ_API_URL, NETWORK } from './defaults'
+import type { Config } from './config'
 
 export interface BoltzContext {
   swaps: ArkadeSwaps
@@ -21,10 +21,14 @@ export interface BoltzContext {
 export async function initBoltz(deps: {
   db: Database
   wallet: Wallet
+  cfg: Config
 }): Promise<BoltzContext> {
   const swaps = await ArkadeSwaps.create({
     wallet: deps.wallet,
-    swapProvider: new BoltzSwapProvider({ apiUrl: BOLTZ_API_URL, network: NETWORK }),
+    swapProvider: new BoltzSwapProvider({
+      apiUrl: deps.cfg.boltzApiUrl,
+      network: deps.cfg.network,
+    }),
     swapRepository: new SqliteSwapRepository(deps.db),
     swapManager: {
       autoStart: true,
