@@ -20,6 +20,7 @@ import {
 const CFG = {
   network: 'bitcoin',
   arkServerUrl: '',
+  boltzApiUrl: '',
   nwcRelays: ['wss://r'],
   httpBind: '127.0.0.1',
   httpPort: 0,

@@ -166,7 +166,7 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
 
     const db = openDatabase(cfg.dbPath)
     const { wallet } = await initArkWallet(cfg, privateKey)
-    const { swaps } = await initBoltz({ db, wallet })
+    const { swaps } = await initBoltz({ db, wallet, cfg })
     const sharedPool = new SimplePool({ enableReconnect: true })
     const nostr = await startNostrService({ cfg, db, wallet, swaps, pool: sharedPool })
     const testRelays = [...NWC_RELAYS_FALLBACK]

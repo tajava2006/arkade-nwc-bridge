@@ -29,6 +29,7 @@ const STUB_OUTBOX: OutboxWatcher = {
 const CFG: Config = {
   network: 'bitcoin',
   arkServerUrl: 'https://stub',
+  boltzApiUrl: 'https://stub',
   httpBind: '127.0.0.1',
   httpPort: 0,
   dbPath: '',
