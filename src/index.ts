@@ -10,6 +10,7 @@ import {
 } from './defaults'
 import { openDatabase } from './db'
 import { loadAccount } from './account'
+import { RestArkProvider } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
@@ -195,7 +196,19 @@ async function main(): Promise<void> {
     // one and there's no boot-time consumer that already has the data.
     caches.balance.seed(balance)
 
-    appState.current = { mode: 'ready', wallet, swaps, nostr, caches, arkAddress: address }
+    // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
+    // Stateless REST; the wallet keeps its own internal one for signing.
+    const arkProvider = new RestArkProvider(cfg.arkServerUrl)
+
+    appState.current = {
+      mode: 'ready',
+      wallet,
+      swaps,
+      nostr,
+      caches,
+      arkAddress: address,
+      arkProvider,
+    }
     console.log('ready — waiting for NWC requests')
   }
 

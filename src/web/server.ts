@@ -1,11 +1,11 @@
 import type { Database } from 'bun:sqlite'
-import type { Wallet, WalletBalance, ArkTransaction } from '@arkade-os/sdk'
+import type { Wallet, WalletBalance, ArkTransaction, RestArkProvider } from '@arkade-os/sdk'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import type { Config } from '../config'
 import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
 import { nip19 } from 'nostr-tools'
-import { htmlResponse } from '../lib/html'
+import { html, htmlResponse } from '../lib/html'
 import {
   createConnection,
   findConnectionById,
@@ -28,7 +28,21 @@ import { newConnectionForm, newConnectionResultView } from './views/new_connecti
 import { walletHistoryView } from './views/history'
 import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
+import { sendView, sendResultView, submittedView, renderOffboardsFragment } from './views/send'
 import { qrSvg } from './qr'
+import { Ramps } from '@arkade-os/sdk'
+import {
+  classifyDestination,
+  classifyVtxos,
+  offboardFeeSat,
+  offboardMaxSat,
+} from '../send'
+import {
+  createOffboard,
+  listRecentOffboards,
+  markOffboardFailed,
+  markOffboardSettled,
+} from '../offboards'
 
 export interface SwrCaches {
   balance: AsyncCache<WalletBalance>
@@ -44,6 +58,10 @@ export type AppState =
       nostr: NostrService
       caches: SwrCaches
       arkAddress: string
+      // Used by /send to read ArkInfo (dust + intent-fee programs) for the
+      // VTXO breakdown and offboard fee preview. A second RestArkProvider
+      // alongside the wallet's internal one is fine — it's stateless REST.
+      arkProvider: RestArkProvider
     }
 
 /**
@@ -80,6 +98,24 @@ export function startWebServer(deps: WebServerDeps): WebServer {
   const { cfg, db, state, sseHub, outbox, bootReady } = deps
 
   const redirectToSetup = (): Response => Response.redirect('/setup', 303)
+
+  const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+  // Parse a positive-integer sats amount from form input. null = invalid.
+  const parseSats = (raw: string): number | null => {
+    const s = raw.trim()
+    const n = Number.parseInt(s, 10)
+    if (!Number.isFinite(n) || n <= 0 || String(n) !== s) return null
+    return n
+  }
+
+  // Re-render the offboards fragment to every open tab. Called after a row is
+  // inserted (pending) and again when its background promise settles/fails.
+  const broadcastOffboards = (): void => {
+    sseHub.broadcast('offboards-update', {
+      html: renderOffboardsFragment(listRecentOffboards(db)).value,
+    })
+  }
 
   // All non-/setup routes funnel through this guard. If we're in setup
   // mode, bounce to /setup; otherwise hand back the ready-mode handles so
@@ -317,6 +353,205 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const { value: txs } = r.ready.caches.history.snapshot()
           void r.ready.caches.history.refresh()
           return htmlResponse(walletHistoryView(txs))
+        },
+      },
+      '/send': {
+        GET: async () => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const arkInfo = await r.ready.arkProvider.getInfo()
+          const vtxos = await r.ready.wallet.getVtxos({ withRecoverable: true })
+          const buckets = classifyVtxos(vtxos, arkInfo.dust)
+          return htmlResponse(
+            sendView({
+              buckets,
+              arkSendMaxSat: buckets.spendableSat,
+              offboardMaxSat: offboardMaxSat(arkInfo, buckets),
+              offboards: listRecentOffboards(db),
+            }),
+          )
+        },
+        POST: async (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const ready = r.ready
+          const form = await req.formData()
+          const destination = (form.get('destination') ?? '').toString().trim()
+          const amountRaw = (form.get('amount') ?? '').toString()
+          const isMax = (form.get('max') ?? '').toString() === '1'
+
+          const rail = classifyDestination(destination)
+          if (!rail) {
+            return htmlResponse(
+              sendResultView({ label: 'send', ok: false, detail: 'destination is required' }),
+              { status: 400 },
+            )
+          }
+
+          // Lightning: same one-shot submarine-swap path NWC pay_invoice uses.
+          // Seconds, not minutes — block and render the result. Amount comes
+          // from the invoice; the amount field is ignored.
+          if (rail === 'lightning') {
+            try {
+              const res = await ready.swaps.sendLightningPayment({ invoice: destination })
+              void ready.caches.balance.refresh()
+              void ready.caches.history.refresh()
+              return htmlResponse(
+                sendResultView({
+                  label: 'lightning',
+                  ok: true,
+                  detail: `paid ${res.amount} sats\npreimage ${res.preimage}\narkTxid ${res.txid}`,
+                }),
+              )
+            } catch (err) {
+              return htmlResponse(
+                sendResultView({ label: 'lightning', ok: false, detail: errMsg(err) }),
+                { status: 500 },
+              )
+            }
+          }
+
+          // Ark offchain send: instant, free, single output. Block and render.
+          if (rail === 'ark') {
+            const amount = parseSats(amountRaw)
+            if (amount === null) {
+              return htmlResponse(
+                sendResultView({
+                  label: 'ark',
+                  ok: false,
+                  detail: 'amount must be a positive integer (sats)',
+                }),
+                { status: 400 },
+              )
+            }
+            try {
+              const txid = await ready.wallet.sendBitcoin({ address: destination, amount })
+              void ready.caches.balance.refresh()
+              void ready.caches.history.refresh()
+              return htmlResponse(
+                sendResultView({ label: 'ark', ok: true, detail: `arkTxid ${txid}` }),
+              )
+            } catch (err) {
+              return htmlResponse(
+                sendResultView({ label: 'ark', ok: false, detail: errMsg(err) }),
+                { status: 500 },
+              )
+            }
+          }
+
+          // Onchain: collaborative offboard. Fire-and-forget — a round can take
+          // >10 min, so record a pending row, kick off the settle without
+          // awaiting, and return immediately. The background promise flips the
+          // row to settled/failed and re-broadcasts.
+          const arkInfo = await ready.arkProvider.getInfo()
+          let amountArg: bigint | undefined
+          let recipientSat: number
+          let feeSat: number
+          if (isMax) {
+            // True drain: omit `amount` so offboard sweeps the lot. A numeric
+            // "max" would be treated as gross and leave a fee-sized change vtxo.
+            const buckets = classifyVtxos(
+              await ready.wallet.getVtxos({ withRecoverable: true }),
+              arkInfo.dust,
+            )
+            const max = offboardMaxSat(arkInfo, buckets)
+            if (max === null) {
+              return htmlResponse(
+                sendResultView({
+                  label: 'onchain',
+                  ok: false,
+                  detail: 'Total minus fee is below dust — cannot offboard.',
+                }),
+                { status: 400 },
+              )
+            }
+            amountArg = undefined
+            feeSat = offboardFeeSat(arkInfo, buckets.roundTotalSat)
+            recipientSat = max
+          } else {
+            const gross = parseSats(amountRaw)
+            if (gross === null) {
+              return htmlResponse(
+                sendResultView({
+                  label: 'onchain',
+                  ok: false,
+                  detail: 'amount must be a positive integer (sats)',
+                }),
+                { status: 400 },
+              )
+            }
+            feeSat = offboardFeeSat(arkInfo, gross)
+            if (feeSat >= gross) {
+              return htmlResponse(
+                sendResultView({
+                  label: 'onchain',
+                  ok: false,
+                  detail: 'amount does not cover the offboard fee',
+                }),
+                { status: 400 },
+              )
+            }
+            amountArg = BigInt(gross)
+            recipientSat = gross - feeSat
+          }
+
+          const row = createOffboard(db, {
+            address: destination,
+            amountSat: recipientSat,
+            feeSat,
+            isMax,
+          })
+          broadcastOffboards()
+          void (async () => {
+            try {
+              const txid = await new Ramps(ready.wallet).offboard(
+                destination,
+                arkInfo.fees,
+                amountArg,
+              )
+              markOffboardSettled(db, row.id, txid)
+            } catch (err) {
+              markOffboardFailed(db, row.id, errMsg(err))
+            }
+            broadcastOffboards()
+            void ready.caches.balance.refresh()
+            void ready.caches.history.refresh()
+          })()
+
+          return htmlResponse(
+            submittedView({
+              title: 'Offboard submitted',
+              lines: html`<p>Sending <strong>${recipientSat.toLocaleString()} sats</strong>${isMax ? ' (max)' : ''} to <code>${destination}</code> via a collaborative exit.</p>`,
+            }),
+          )
+        },
+      },
+      '/refresh': {
+        // Consolidate-all: wallet.settle() with no params folds every VTXO
+        // (incl. sub-dust + swept) + confirmed boarding into one fresh VTXO.
+        // Also a settlement round, so fire-and-forget like offboard. Not a
+        // money-out action, so no durable row — balance/history reflect the
+        // result over SSE and failures are logged.
+        POST: () => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const ready = r.ready
+          void (async () => {
+            try {
+              const txid = await ready.wallet.settle()
+              console.log(`refresh: consolidated — arkTxid ${txid}`)
+            } catch (err) {
+              console.error(`refresh failed: ${errMsg(err)}`)
+            }
+            void ready.caches.balance.refresh()
+            void ready.caches.history.refresh()
+          })()
+          return htmlResponse(
+            submittedView({
+              title: 'Refresh submitted',
+              lines: html`<p>Consolidating all VTXOs into one fresh VTXO.</p>`,
+            }),
+          )
         },
       },
       '/events': {

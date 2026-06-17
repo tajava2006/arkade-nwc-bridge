@@ -4,7 +4,14 @@
 // SDK upgrade changes one of the methods we *do* use, the cast surfaces the
 // drift at the call site rather than silently swallowing it.
 
-import type { Wallet, WalletBalance, ArkTransaction } from '@arkade-os/sdk'
+import type {
+  Wallet,
+  WalletBalance,
+  ArkTransaction,
+  ArkInfo,
+  ExtendedVirtualCoin,
+  RestArkProvider,
+} from '@arkade-os/sdk'
 import type {
   ArkadeSwaps,
   CreateLightningInvoiceRequest,
@@ -31,6 +38,7 @@ export interface WalletStubOptions {
   balance?: WalletBalance
   address?: string
   history?: ArkTransaction[]
+  vtxos?: ExtendedVirtualCoin[]
 }
 
 export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
@@ -44,7 +52,34 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
     async getTransactionHistory() {
       return opts.history ?? []
     },
+    async getVtxos() {
+      return opts.vtxos ?? []
+    },
+    async sendBitcoin() {
+      return 'arktxid-stub'
+    },
+    async settle() {
+      return 'settletxid-stub'
+    },
   } as unknown as Wallet
+}
+
+/**
+ * Minimal RestArkProvider stub — /send reads dust + intent-fee programs from
+ * getInfo(). Default: dust 330, empty fee programs (fee = 0, matching policy).
+ */
+export function makeArkProviderStub(
+  opts: { dust?: bigint; intentFee?: Record<string, string> } = {},
+): RestArkProvider {
+  const info = {
+    dust: opts.dust ?? 330n,
+    fees: { intentFee: opts.intentFee ?? {}, txFeeRate: '1' },
+  } as unknown as ArkInfo
+  return {
+    async getInfo() {
+      return info
+    },
+  } as unknown as RestArkProvider
 }
 
 /**

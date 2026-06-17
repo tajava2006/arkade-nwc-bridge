@@ -45,7 +45,7 @@ const STYLES = `
   .relay-dot.down { color: #888; }
 `
 
-type Nav = 'dashboard' | 'connections' | 'history' | 'setup'
+type Nav = 'dashboard' | 'send' | 'connections' | 'history' | 'setup'
 
 export function layout(args: {
   title: string
@@ -61,6 +61,7 @@ export function layout(args: {
       ? html``
       : html`<nav>
           ${tab('dashboard', '/', 'Dashboard')}
+          ${tab('send', '/send', 'Send')}
           ${tab('connections', '/connections', 'Connections')}
           ${tab('history', '/history', 'History')}
         </nav>`
@@ -111,5 +112,6 @@ const LIVE_SCRIPT = `<script>
   })
   on('balance-status', function (d) { swap('[data-balance]', d.html) })
   on('history-status', function (d) { swap('[data-history]', d.html) })
+  on('offboards-update', function (d) { swap('[data-offboards]', d.html) })
 })()
 </script>`

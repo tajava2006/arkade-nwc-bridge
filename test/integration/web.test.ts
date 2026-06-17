@@ -6,7 +6,13 @@ import type { OutboxWatcher } from '../../src/nostr/outbox'
 import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
-import { emptyBalance, makeSwapsStub, makeSwrCaches, makeWalletStub } from '../helpers/mocks'
+import {
+  emptyBalance,
+  makeArkProviderStub,
+  makeSwapsStub,
+  makeSwrCaches,
+  makeWalletStub,
+} from '../helpers/mocks'
 
 // Bun.serve binds to a real port. Use 0 to ask the OS for any free one so
 // concurrent test files don't collide.
@@ -48,6 +54,7 @@ function readyState(): AppStateRef {
       nostr: STUB_NOSTR,
       caches: makeSwrCaches(wallet, balance),
       arkAddress: 'tark1stubaddress',
+      arkProvider: makeArkProviderStub(),
     },
   }
 }
@@ -139,6 +146,58 @@ describe('web server', () => {
     const body = await res.text()
     expect(body).toContain('budget')
   })
+
+  test('GET /send renders the form + breakdown', async () => {
+    const res = await fetch(`${base}/send`)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Send')
+    expect(body).toContain('data-send-form')
+    expect(body).toContain('Balance breakdown')
+    expect(body).toContain('Refresh all')
+  })
+
+  test('POST /send with empty destination is 400', async () => {
+    const form = new FormData()
+    form.set('destination', '')
+    const res = await fetch(`${base}/send`, { method: 'POST', body: form })
+    expect(res.status).toBe(400)
+  })
+
+  test('POST /send onchain max with no funds is 400 (below dust)', async () => {
+    const form = new FormData()
+    form.set('destination', 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
+    form.set('max', '1')
+    const res = await fetch(`${base}/send`, { method: 'POST', body: form })
+    expect(res.status).toBe(400)
+    const body = await res.text()
+    expect(body.toLowerCase()).toContain('dust')
+  })
+
+  test('POST /send onchain with amount records a pending offboard and acks', async () => {
+    const form = new FormData()
+    form.set('destination', 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
+    form.set('amount', '5000')
+    const res = await fetch(`${base}/send`, { method: 'POST', body: form })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Offboard submitted')
+
+    const row = temp.db
+      .query<{ address: string; amount_sat: number }, []>(
+        `SELECT address, amount_sat FROM offboards ORDER BY id DESC LIMIT 1`,
+      )
+      .get()
+    expect(row?.address).toBe('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
+    expect(row?.amount_sat).toBe(5000) // fee 0 under empty intent-fee program
+  })
+
+  test('POST /refresh acks immediately (fire-and-forget)', async () => {
+    const res = await fetch(`${base}/refresh`, { method: 'POST' })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Refresh submitted')
+  })
 })
 
 describe('web server — setup mode', () => {
@@ -168,6 +227,7 @@ describe('web server — setup mode', () => {
           nostr: STUB_NOSTR,
           caches: makeSwrCaches(wallet, emptyBalance()),
           arkAddress: 'tark1stub',
+          arkProvider: makeArkProviderStub(),
         }
       },
     })

@@ -114,6 +114,34 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE connections ADD COLUMN relays_json TEXT NOT NULL DEFAULT '[]';
     `,
   },
+  {
+    version: 5,
+    description: 'offboards table — bridge-native collaborative-exit tracking',
+    // Onchain sends are the one rail that can take >10 min (they wait for a
+    // settlement round to commit), so the web POST fires the offboard and
+    // returns immediately rather than blocking. This table is the durable
+    // record of those in-flight/finished exits: wallet.getTransactionHistory()
+    // only surfaces an offboard once its commitment tx is final, so without
+    // this the pending window — and any round failure — would be invisible.
+    // Separate from `transactions` (that one is NWC/LN-shaped: connection_id
+    // NOT NULL, invoice/payment_hash NOT NULL); an offboard has none of those.
+    sql: `
+      CREATE TABLE offboards (
+        id           INTEGER PRIMARY KEY,
+        address      TEXT    NOT NULL,    -- destination onchain address
+        amount_sat   INTEGER NOT NULL,    -- sats landing at the destination (after intent fee)
+        fee_sat      INTEGER NOT NULL,    -- arkd onchain-output intent fee deducted
+        is_max       INTEGER NOT NULL,    -- 1 = full drain (amount omitted to the SDK)
+        state        TEXT    NOT NULL,    -- 'pending' | 'settled' | 'failed'
+        ark_txid     TEXT,                -- commitment txid once the round commits
+        error        TEXT,
+        created_at   INTEGER NOT NULL,
+        settled_at   INTEGER
+      );
+      CREATE INDEX idx_offboards_state ON offboards(state);
+      CREATE INDEX idx_offboards_created_at ON offboards(created_at);
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {
