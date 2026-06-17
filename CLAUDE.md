@@ -220,4 +220,7 @@ row exists. Logs go to stdout; when running in background pipe to
 - *adding an SWR-cached read* → [`src/lib/cache.ts`](src/lib/cache.ts)
   + wire `.seed()` / `.onUpdate()` in `index.ts`; the route reads
   `.snapshot()` and fires `.refresh()` without awaiting.
+- *bridge-native send (operator sends own funds: Ark / LN / onchain
+  offboard), consolidate-all refresh, fee/sweep & sub-dust semantics,
+  rail-aware VTXO breakdown* → [SEND_DESIGN.md](SEND_DESIGN.md).
 - *why a decision was made* → [DESIGN.md](DESIGN.md) §2 / §6 / §9.
