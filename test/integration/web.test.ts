@@ -157,14 +157,14 @@ describe('web server', () => {
     expect(body).toContain('Refresh all')
   })
 
-  test('POST /send with empty destination is 400', async () => {
+  test('POST /send (review) with empty destination is 400', async () => {
     const form = new FormData()
     form.set('destination', '')
     const res = await fetch(`${base}/send`, { method: 'POST', body: form })
     expect(res.status).toBe(400)
   })
 
-  test('POST /send onchain max with no funds is 400 (below dust)', async () => {
+  test('POST /send (review) onchain max with no funds is 400 (below dust)', async () => {
     const form = new FormData()
     form.set('destination', 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
     form.set('max', '1')
@@ -174,11 +174,41 @@ describe('web server', () => {
     expect(body.toLowerCase()).toContain('dust')
   })
 
-  test('POST /send onchain with amount records a pending offboard and acks', async () => {
+  test('POST /send (review) onchain with amount shows the breakdown, no row yet', async () => {
     const form = new FormData()
     form.set('destination', 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
     form.set('amount', '5000')
     const res = await fetch(`${base}/send`, { method: 'POST', body: form })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Recipient receives')
+    expect(body).toContain('Total leaving wallet')
+    expect(body).toContain('Confirm')
+    expect(body).toContain('/send/confirm')
+
+    // Review must not move funds: no offboard row written.
+    const count = temp.db.query<{ c: number }, []>(`SELECT COUNT(*) AS c FROM offboards`).get()
+    expect(count?.c).toBe(0)
+  })
+
+  test('POST /send (review) lightning shows amount + fee + total', async () => {
+    const invoice =
+      'lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp'
+    const form = new FormData()
+    form.set('destination', invoice)
+    const res = await fetch(`${base}/send`, { method: 'POST', body: form })
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Lightning payment')
+    expect(body).toContain('Swap fee')
+    expect(body).toContain('Total leaving wallet')
+  })
+
+  test('POST /send/confirm onchain records a pending offboard and acks', async () => {
+    const form = new FormData()
+    form.set('destination', 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
+    form.set('amount', '5000')
+    const res = await fetch(`${base}/send/confirm`, { method: 'POST', body: form })
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('Offboard submitted')
@@ -189,7 +219,7 @@ describe('web server', () => {
       )
       .get()
     expect(row?.address).toBe('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
-    expect(row?.amount_sat).toBe(5000) // fee 0 under empty intent-fee program
+    expect(row?.amount_sat).toBe(5000) // recipient-net; fee 0 under empty intent-fee program
   })
 
   test('POST /refresh acks immediately (fire-and-forget)', async () => {

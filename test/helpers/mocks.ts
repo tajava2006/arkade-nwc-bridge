@@ -121,6 +121,12 @@ export function makeSwapsStub(opts: SwapsStubOptions = {}): ArkadeSwaps {
       (async () => {
         throw new Error('sendLightningPayment not stubbed')
       }),
+    async getFees() {
+      return {
+        submarine: { percentage: 0.1, minerFees: 0 },
+        reverse: { percentage: 0.25, minerFees: { lockup: 0, claim: 0 } },
+      }
+    },
   } as unknown as ArkadeSwaps
 }
 

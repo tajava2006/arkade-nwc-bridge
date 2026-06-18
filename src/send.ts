@@ -9,7 +9,8 @@ import {
   type ArkInfo,
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
-import { decodeInvoice } from '@arkade-os/boltz-swap'
+import { decodeInvoice, type FeesResponse } from '@arkade-os/boltz-swap'
+import { decode as decodeBolt11 } from 'light-bolt11-decoder'
 
 // Pure send-side logic shared by the web routes and views: destination → rail
 // classification, VTXO bucketing (rail-aware availability), and the
@@ -66,10 +67,14 @@ export function classifyVtxos(vtxos: ExtendedVirtualCoin[], dust: bigint): VtxoB
 
   for (const v of vtxos) {
     if (!isSpendable(v)) continue
-    if (isRecoverable(v) || isExpired(v)) {
-      recoverable.push(v)
-    } else if (isSubdust(v, dust)) {
+    // Sub-dust label takes priority over swept/expired: a sub-dust vtxo is
+    // sub-dust regardless of its expiry, and that's the more useful thing to
+    // surface. Both buckets are round-only recoverable, so this only changes
+    // the display label, not behavior.
+    if (isSubdust(v, dust)) {
       subdust.push(v)
+    } else if (isRecoverable(v) || isExpired(v)) {
+      recoverable.push(v)
     } else {
       spendable.push(v)
     }
@@ -122,4 +127,54 @@ export function offboardMaxSat(arkInfo: ArkInfo, buckets: VtxoBuckets): number |
   const out = buckets.roundTotalSat - fee
   if (out < Number(arkInfo.dust)) return null
   return out
+}
+
+/**
+ * Boltz submarine-swap fee for paying a `amountSats` invoice. Deterministic:
+ * the LN routing cost is Boltz's (covered by its margin / our boltz.conf
+ * `swapInFee`), not charged to us per-route — we pay invoice + this fee up
+ * front and Boltz takes responsibility for delivery. Matches the PWA's
+ * calcSubmarineSwapFee. Ceil per Boltz's own rounding.
+ */
+export function submarineFeeSat(fees: FeesResponse, amountSats: number): number {
+  const { percentage, minerFees } = fees.submarine
+  return Math.ceil((amountSats * percentage) / 100 + minerFees)
+}
+
+export interface LnPreview {
+  amountSats: number
+  description: string
+  paymentHash: string
+  payee: string | undefined
+  feeSat: number
+  totalSat: number
+}
+
+/**
+ * Pre-send breakdown for a bolt11 invoice: what's billed (invoice amount),
+ * the Boltz swap fee, and the total that leaves the wallet. `decodeInvoice`
+ * gives the typed amount/description/hash; the payee node key isn't in that
+ * shape, so pull it best-effort from light-bolt11-decoder's raw sections.
+ */
+export function lightningPreview(invoice: string, fees: FeesResponse): LnPreview {
+  const decoded = decodeInvoice(invoice)
+  const feeSat = submarineFeeSat(fees, decoded.amountSats)
+  return {
+    amountSats: decoded.amountSats,
+    description: decoded.description,
+    paymentHash: decoded.paymentHash,
+    payee: payeeNodeKey(invoice),
+    feeSat,
+    totalSat: decoded.amountSats + feeSat,
+  }
+}
+
+function payeeNodeKey(invoice: string): string | undefined {
+  try {
+    const sections = decodeBolt11(invoice).sections as Array<{ name: string; value?: unknown }>
+    const payee = sections.find((s) => s.name === 'payee_node_key')
+    return typeof payee?.value === 'string' ? payee.value : undefined
+  } catch {
+    return undefined
+  }
 }

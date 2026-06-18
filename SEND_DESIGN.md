@@ -30,6 +30,12 @@ cross-refs the ASP-side `FEE_MODEL.md`.
   the only way to mobilize sub-dust / swept VTXOs back into offchain-spendable
   funds without going onchain.
 - **All UI copy is English** (warnings, labels, errors included).
+- **Two-step review → confirm.** `POST /send` parses + classifies + computes the
+  full breakdown and renders a confirm page; `POST /send/confirm` is the only
+  route that moves funds. No funds move on the review POST. This gives the LN
+  amount preview and the onchain "you'll send N, fee F, total out = N+F, ok?"
+  confirmation. The confirm re-classifies the destination (doesn't trust the
+  round-trip).
 
 ## 2. Destination → rail routing
 
@@ -89,6 +95,18 @@ wallets get wrong.
     no-op; never set via admin API). So today: onchain-output fee = 0, max =
     full sum, ASP eats 100% of miner fee. Fine for solo; set real values via
     `arkd fees intent --onchain-output` before real users.
+  - ⚠️ **CEL fee programs must return `double`.** The `Estimator` rejects an
+    int-literal program (`"1000"` → "expected return type double, got int").
+    Write `"1000.0"` for a flat fee, or an inherently-double expr like
+    `"amount * 0.001"`. (FEE_MODEL.md's `"10"` example is wrong on this point.)
+  - **UI amount = what the recipient receives** (net), not the gross. The fee is
+    added on top: total leaving the wallet = `amount + fee`, and we pass
+    `gross = amount + fee` to `Ramps.offboard` so the destination gets exactly
+    the entered amount. (offboard's own param is gross — recipient = gross − fee.
+    Exact for a flat fee; a tiny approximation under a proportional fee, which
+    the confirm step's numbers reflect. MAX still omits the amount for a true
+    drain, and the auto-filled MAX value is already the recipient net = total −
+    fee.)
 - **Lightning — exact drain is structurally impossible.** The invoice fixes the
   recipient's receive amount, and a swap fee must be paid from *somewhere*. You
   can't pay an external 8000-sat invoice with an 8000-sat balance.

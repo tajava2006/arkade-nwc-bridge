@@ -151,6 +151,43 @@ export function sendView(args: {
   })
 }
 
+/**
+ * Review/confirm step before any funds move. Shows the parsed destination,
+ * amount, fee, and total leaving the wallet; the confirm button re-posts the
+ * same params to /send/confirm where the rail actually executes.
+ */
+export function sendConfirmView(args: {
+  title: string
+  destination: string
+  amountField: string
+  isMax: boolean
+  rows: { label: string; value: string }[]
+  note?: string
+}): RawHtml {
+  return layout({
+    title: 'Confirm send',
+    current: 'send',
+    body: html`
+      <h2>${args.title}</h2>
+      <table>
+        ${args.rows.map(
+          (r) => html`<tr><th style="width:14em">${r.label}</th><td class="num">${r.value}</td></tr>`,
+        )}
+      </table>
+      ${args.note ? html`<p class="muted">${args.note}</p>` : ''}
+      <form method="post" action="/send/confirm">
+        <input type="hidden" name="destination" value="${args.destination}" />
+        <input type="hidden" name="amount" value="${args.amountField}" />
+        <input type="hidden" name="max" value="${args.isMax ? '1' : ''}" />
+        <p>
+          <button type="submit">Confirm &amp; send</button>
+          <a href="/send" style="margin-left:1em">Cancel</a>
+        </p>
+      </form>
+    `,
+  })
+}
+
 /** Blocking result for Ark / LN sends (instant–seconds). */
 export function sendResultView(args: {
   label: string

@@ -28,12 +28,19 @@ import { newConnectionForm, newConnectionResultView } from './views/new_connecti
 import { walletHistoryView } from './views/history'
 import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
-import { sendView, sendResultView, submittedView, renderOffboardsFragment } from './views/send'
+import {
+  sendView,
+  sendConfirmView,
+  sendResultView,
+  submittedView,
+  renderOffboardsFragment,
+} from './views/send'
 import { qrSvg } from './qr'
 import { Ramps } from '@arkade-os/sdk'
 import {
   classifyDestination,
   classifyVtxos,
+  lightningPreview,
   offboardFeeSat,
   offboardMaxSat,
 } from '../send'
@@ -100,6 +107,11 @@ export function startWebServer(deps: WebServerDeps): WebServer {
   const redirectToSetup = (): Response => Response.redirect('/setup', 303)
 
   const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+  const fmtSats = (n: number): string => `${n.toLocaleString()} sats`
+
+  const sendError = (label: string, detail: string): Response =>
+    htmlResponse(sendResultView({ label, ok: false, detail }), { status: 400 })
 
   // Parse a positive-integer sats amount from form input. null = invalid.
   const parseSats = (raw: string): number | null => {
@@ -371,6 +383,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }),
           )
         },
+        // Review step: parse + classify + compute the full breakdown (what's
+        // billed, the fee, and the total leaving the wallet), then render a
+        // confirm page. No funds move here — /send/confirm executes.
         POST: async (req) => {
           const r = requireReady()
           if (!r.ok) return r.response
@@ -381,16 +396,115 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const isMax = (form.get('max') ?? '').toString() === '1'
 
           const rail = classifyDestination(destination)
-          if (!rail) {
+          if (!rail) return sendError('send', 'destination is required')
+
+          if (rail === 'lightning') {
+            let preview
+            try {
+              preview = lightningPreview(destination, await ready.swaps.getFees())
+            } catch (err) {
+              return sendError('lightning', `invalid invoice: ${errMsg(err)}`)
+            }
+            if (!preview.amountSats || preview.amountSats <= 0) {
+              return sendError('lightning', '0-amount invoices are not supported')
+            }
             return htmlResponse(
-              sendResultView({ label: 'send', ok: false, detail: 'destination is required' }),
-              { status: 400 },
+              sendConfirmView({
+                title: 'Lightning payment',
+                destination,
+                amountField: '',
+                isMax: false,
+                rows: [
+                  { label: 'Payee', value: preview.payee ?? '—' },
+                  { label: 'Description', value: preview.description || '—' },
+                  { label: 'Invoice amount', value: fmtSats(preview.amountSats) },
+                  { label: 'Swap fee', value: fmtSats(preview.feeSat) },
+                  { label: 'Total leaving wallet', value: fmtSats(preview.totalSat) },
+                ],
+                note: 'LN routing is handled by Boltz out of this fee — the total above is what leaves your wallet.',
+              }),
             )
           }
 
-          // Lightning: same one-shot submarine-swap path NWC pay_invoice uses.
-          // Seconds, not minutes — block and render the result. Amount comes
-          // from the invoice; the amount field is ignored.
+          if (rail === 'ark') {
+            const amount = parseSats(amountRaw)
+            if (amount === null) return sendError('ark', 'amount must be a positive integer (sats)')
+            return htmlResponse(
+              sendConfirmView({
+                title: 'Ark offchain send',
+                destination,
+                amountField: String(amount),
+                isMax,
+                rows: [
+                  { label: 'Destination', value: destination },
+                  { label: 'Amount', value: fmtSats(amount) },
+                  { label: 'Fee', value: fmtSats(0) },
+                  { label: 'Total leaving wallet', value: fmtSats(amount) },
+                ],
+              }),
+            )
+          }
+
+          // Onchain offboard. The entered amount is what the RECIPIENT gets;
+          // the fee is added on top, so total out = amount + fee.
+          const arkInfo = await ready.arkProvider.getInfo()
+          let recipientSat: number
+          let feeSat: number
+          let totalOut: number
+          if (isMax) {
+            const buckets = classifyVtxos(
+              await ready.wallet.getVtxos({ withRecoverable: true }),
+              arkInfo.dust,
+            )
+            const max = offboardMaxSat(arkInfo, buckets)
+            if (max === null) {
+              return sendError('onchain', 'Total minus fee is below dust — cannot offboard.')
+            }
+            recipientSat = max
+            feeSat = offboardFeeSat(arkInfo, buckets.roundTotalSat)
+            totalOut = buckets.roundTotalSat
+          } else {
+            const recipient = parseSats(amountRaw)
+            if (recipient === null) {
+              return sendError('onchain', 'amount must be a positive integer (sats)')
+            }
+            recipientSat = recipient
+            feeSat = offboardFeeSat(arkInfo, recipient)
+            totalOut = recipient + feeSat
+          }
+          return htmlResponse(
+            sendConfirmView({
+              title: 'Onchain — collaborative offboard',
+              destination,
+              amountField: isMax ? String(recipientSat) : amountRaw.trim(),
+              isMax,
+              rows: [
+                { label: 'Destination', value: destination },
+                { label: 'Recipient receives', value: fmtSats(recipientSat) },
+                { label: 'Offboard fee', value: fmtSats(feeSat) },
+                { label: 'Total leaving wallet', value: fmtSats(totalOut) },
+              ],
+              note: 'Waits for a settlement round to commit (~minutes). Submitted in the background and tracked under "Onchain exits".',
+            }),
+          )
+        },
+      },
+      '/send/confirm': {
+        // Execute the reviewed send. Re-classify the destination (don't trust
+        // the round-trip) and run the rail: Ark/LN block (instant–seconds),
+        // onchain offboard is fire-and-forget (a round can take >10 min).
+        POST: async (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const ready = r.ready
+          const form = await req.formData()
+          const destination = (form.get('destination') ?? '').toString().trim()
+          const amountRaw = (form.get('amount') ?? '').toString()
+          const isMax = (form.get('max') ?? '').toString() === '1'
+
+          const rail = classifyDestination(destination)
+          if (!rail) return sendError('send', 'destination is required')
+
           if (rail === 'lightning') {
             try {
               const res = await ready.swaps.sendLightningPayment({ invoice: destination })
@@ -411,19 +525,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }
           }
 
-          // Ark offchain send: instant, free, single output. Block and render.
           if (rail === 'ark') {
             const amount = parseSats(amountRaw)
-            if (amount === null) {
-              return htmlResponse(
-                sendResultView({
-                  label: 'ark',
-                  ok: false,
-                  detail: 'amount must be a positive integer (sats)',
-                }),
-                { status: 400 },
-              )
-            }
+            if (amount === null) return sendError('ark', 'amount must be a positive integer (sats)')
             try {
               const txid = await ready.wallet.sendBitcoin({ address: destination, amount })
               void ready.caches.balance.refresh()
@@ -439,60 +543,34 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }
           }
 
-          // Onchain: collaborative offboard. Fire-and-forget — a round can take
-          // >10 min, so record a pending row, kick off the settle without
-          // awaiting, and return immediately. The background promise flips the
-          // row to settled/failed and re-broadcasts.
+          // Onchain: collaborative offboard, fire-and-forget. The entered amount
+          // is the recipient net; gross allocated = amount + fee so the
+          // destination receives exactly what was shown. Max omits the amount
+          // for a true drain (a numeric "max" would leave a fee-sized change).
           const arkInfo = await ready.arkProvider.getInfo()
           let amountArg: bigint | undefined
           let recipientSat: number
           let feeSat: number
           if (isMax) {
-            // True drain: omit `amount` so offboard sweeps the lot. A numeric
-            // "max" would be treated as gross and leave a fee-sized change vtxo.
             const buckets = classifyVtxos(
               await ready.wallet.getVtxos({ withRecoverable: true }),
               arkInfo.dust,
             )
             const max = offboardMaxSat(arkInfo, buckets)
             if (max === null) {
-              return htmlResponse(
-                sendResultView({
-                  label: 'onchain',
-                  ok: false,
-                  detail: 'Total minus fee is below dust — cannot offboard.',
-                }),
-                { status: 400 },
-              )
+              return sendError('onchain', 'Total minus fee is below dust — cannot offboard.')
             }
             amountArg = undefined
             feeSat = offboardFeeSat(arkInfo, buckets.roundTotalSat)
             recipientSat = max
           } else {
-            const gross = parseSats(amountRaw)
-            if (gross === null) {
-              return htmlResponse(
-                sendResultView({
-                  label: 'onchain',
-                  ok: false,
-                  detail: 'amount must be a positive integer (sats)',
-                }),
-                { status: 400 },
-              )
+            const recipient = parseSats(amountRaw)
+            if (recipient === null) {
+              return sendError('onchain', 'amount must be a positive integer (sats)')
             }
-            feeSat = offboardFeeSat(arkInfo, gross)
-            if (feeSat >= gross) {
-              return htmlResponse(
-                sendResultView({
-                  label: 'onchain',
-                  ok: false,
-                  detail: 'amount does not cover the offboard fee',
-                }),
-                { status: 400 },
-              )
-            }
-            amountArg = BigInt(gross)
-            recipientSat = gross - feeSat
+            feeSat = offboardFeeSat(arkInfo, recipient)
+            recipientSat = recipient
+            amountArg = BigInt(recipient + feeSat)
           }
 
           const row = createOffboard(db, {
