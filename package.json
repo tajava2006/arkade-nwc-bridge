@@ -18,8 +18,8 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@arkade-os/boltz-swap": "^0.3.41",
-    "@arkade-os/sdk": "^0.4.36",
+    "@arkade-os/boltz-swap": "^0.3.44",
+    "@arkade-os/sdk": "^0.4.39",
     "@scure/base": "^2.0.0",
     "eventsource": "^4.1.0",
     "light-bolt11-decoder": "^3.2.0",
