@@ -22,6 +22,12 @@ export async function initBoltz(deps: {
   db: Database
   wallet: Wallet
   cfg: Config
+  /**
+   * Fired (in addition to the DB sync) when a reverse swap settles. Nostr-
+   * neutral hook so clink/offers.ts can send its CLINK Payment Receipt
+   * without coupling this module to the nostr stack.
+   */
+  onReverseSettled?: (swap: BoltzReverseSwap) => void
 }): Promise<BoltzContext> {
   const swaps = await ArkadeSwaps.create({
     wallet: deps.wallet,
@@ -33,7 +39,10 @@ export async function initBoltz(deps: {
     swapManager: {
       autoStart: true,
       events: {
-        onSwapCompleted: (swap) => syncSwapToDb(deps.db, swap, 'settled'),
+        onSwapCompleted: (swap) => {
+          syncSwapToDb(deps.db, swap, 'settled')
+          if (deps.onReverseSettled && isPendingReverseSwap(swap)) deps.onReverseSettled(swap)
+        },
         onSwapFailed: (swap, error) => syncSwapToDb(deps.db, swap, 'failed', error.message),
       },
     },

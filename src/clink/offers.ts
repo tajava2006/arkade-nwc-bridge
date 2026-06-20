@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, getPublicKey, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
-import { NetworkError, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { NetworkError, type ArkadeSwaps, type BoltzReverseSwap } from '@arkade-os/boltz-swap'
 
 import { CLINK_OFFER_ID } from '../defaults'
 import { decryptContent, encryptContent } from '../nostr/crypto'
@@ -131,7 +131,7 @@ export function startOfferService(deps: OfferServiceDeps): OfferService {
       // case is an invoice nobody waits for — harmless, no funds move.
       resumeSince: true,
       onevent: (event) => {
-        handleOfferRequest({ pool, secretKey, swaps, relay: state.relay }, event).catch((err) => {
+        handleOfferRequest({ pool, db, secretKey, swaps, relay: state.relay }, event).catch((err) => {
           console.error('clink: offer handler crashed:', err)
         })
       },
@@ -162,6 +162,7 @@ export function startOfferService(deps: OfferServiceDeps): OfferService {
 
 interface HandlerCtx {
   pool: SimplePool
+  db: Database
   secretKey: Uint8Array
   swaps: ArkadeSwaps
   relay: string
@@ -202,12 +203,24 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     return
   }
 
+  // NIP-57 zap (payload.zap = a kind-9734 event) is intentionally NOT handled
+  // here: a real zap requires minting a descriptionHash invoice (so the 9735
+  // receipt verifies) and the @arkade-os/boltz-swap SDK doesn't pass
+  // descriptionHash through to Boltz (the backend supports it; the wrapper
+  // drops it). Until that lands upstream we don't advertise zap (offer id is
+  // not `zap_`-prefixed), so well-behaved payers won't send a zap payload; if
+  // one arrives we fall back to a plain spontaneous payment per the spec.
+  // TODO(clink-zap): on SDK descriptionHash support → validate the 9734
+  // (NIP-57 Appendix D), mint a descriptionHash invoice, publish kind 9735 on
+  // settlement, switch the offer id to `zap_default`.
+
   const description =
     typeof payload.description === 'string' && payload.description.length <= 100
       ? payload.description
       : undefined
 
   let invoice: string
+  let swapId: string
   try {
     // Same path as NWC make_invoice: Boltz reverse swap → on payment the
     // SwapManager (boltz.ts) auto-claims the VHTLC into the Ark wallet. The
@@ -215,6 +228,7 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     // transactions row; it just won't appear in NWC connection history.
     const result = await ctx.swaps.createLightningInvoice({ amount, description })
     invoice = result.invoice
+    swapId = result.pendingSwap.id
   } catch (err) {
     if (err instanceof NetworkError) {
       // Boltz rejected — usually amount outside reverse-swap limits. (Range
@@ -228,8 +242,63 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     return
   }
 
+  // Remember whom to ack once this swap settles (CLINK Payment Receipt).
+  // Keyed on swap id; the settlement hook (sendOfferReceipt) consumes it.
+  ctx.db
+    .query(
+      `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, created_at)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(swap_id) DO NOTHING`,
+    )
+    .run(swapId, event.pubkey, event.id, ctx.relay, Math.floor(Date.now() / 1000))
+
   await respond(ctx, event, { bolt11: invoice })
   console.log(`clink: issued invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`)
+}
+
+interface ReceiptRow {
+  payer_pubkey: string
+  request_id: string
+  relay: string
+}
+
+/**
+ * Publish the spec's optional CLINK Payment Receipt (kind 21001
+ * {res:'ok',preimage}) once an offer-originated reverse swap settles. Wired
+ * to boltz's onReverseSettled (see index.ts). Looks the swap up in
+ * clink_offer_receipts; if it's not one of ours (e.g. an NWC make_invoice
+ * swap) it's a no-op. Best-effort: a down relay means the ack is lost, which
+ * is fine — the payer's own wallet already confirmed the LN payment.
+ */
+export async function sendOfferReceipt(
+  deps: { pool: SimplePool; db: Database; secretKey: Uint8Array },
+  swap: BoltzReverseSwap,
+): Promise<void> {
+  const row = deps.db
+    .query<ReceiptRow, [string]>(
+      'SELECT payer_pubkey, request_id, relay FROM clink_offer_receipts WHERE swap_id = ?',
+    )
+    .get(swap.id)
+  if (!row) return // not an offer swap (or already acked)
+
+  const body = swap.preimage ? { res: 'ok', preimage: swap.preimage } : { res: 'ok' }
+  const ciphertext = encryptContent(SCHEME, deps.secretKey, row.payer_pubkey, JSON.stringify(body))
+  const template: EventTemplate = {
+    kind: OFFER_KIND,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ['p', row.payer_pubkey],
+      ['e', row.request_id],
+      ['clink_version', CLINK_VERSION],
+    ],
+    content: ciphertext,
+  }
+  const signed = finalizeEvent(template, deps.secretKey)
+  const [result] = await Promise.allSettled(deps.pool.publish([row.relay], signed))
+  if (result?.status === 'rejected') {
+    console.warn(`clink: receipt publish failed on ${row.relay}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`)
+  }
+  deps.db.query('DELETE FROM clink_offer_receipts WHERE swap_id = ?').run(swap.id)
+  console.log(`clink: sent payment receipt to ${row.payer_pubkey.slice(0, 8)}… for swap ${swap.id.slice(0, 8)}…`)
 }
 
 type OfferResponseBody = { bolt11: string } | { error: string; code: number; range?: { min: number; max: number } }

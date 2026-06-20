@@ -162,6 +162,29 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 7,
+    description: 'clink_offer_receipts — pending CLINK payment receipts per offer swap',
+    // To send the spec's optional CLINK Payment Receipt (kind 21001
+    // {res:ok,preimage}) we must, at invoice-issue time, remember who to
+    // ack and where — the payer pubkey, their request event id, and the
+    // relay the request arrived on (the payer listens for the reply there;
+    // it may differ from the *current* offer relay if the code was
+    // regenerated in between). Keyed on the reverse-swap id so the swap's
+    // onSwapCompleted callback can look the row up, publish the receipt, and
+    // delete it. Persisted (not in-memory) so a restart between pay and
+    // settle still lets us ack. No connection_id, no invoice — doesn't fit
+    // the NWC-shaped transactions table.
+    sql: `
+      CREATE TABLE clink_offer_receipts (
+        swap_id      TEXT PRIMARY KEY,
+        payer_pubkey TEXT    NOT NULL,
+        request_id   TEXT    NOT NULL,
+        relay        TEXT    NOT NULL,
+        created_at   INTEGER NOT NULL
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

@@ -14,7 +14,7 @@ import { RestArkProvider } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
-import { startOfferService } from './clink/offers'
+import { startOfferService, sendOfferReceipt } from './clink/offers'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { listActiveConnections } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
@@ -160,7 +160,18 @@ async function main(): Promise<void> {
       `  balance        total=${balance.total} available=${balance.available} settled=${balance.settled} boarding=${balance.boarding.total}`,
     )
 
-    const { swaps } = await initBoltz({ db, wallet, cfg })
+    const { swaps } = await initBoltz({
+      db,
+      wallet,
+      cfg,
+      // When an offer-originated reverse swap settles, ack the payer with a
+      // CLINK Payment Receipt. No-op for NWC make_invoice swaps.
+      onReverseSettled: (swap) => {
+        sendOfferReceipt({ pool, db, secretKey: privateKey }, swap).catch((err) =>
+          console.error('clink: receipt send failed:', err),
+        )
+      },
+    })
     const fees = await swaps.getFees()
     console.log(
       `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
