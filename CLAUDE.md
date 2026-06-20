@@ -150,11 +150,15 @@ row exists. Logs go to stdout; when running in background pipe to
   exists) or waits for POST `/setup` to call it. Don't reorder this
   to "wallet first" — there's no nsec to hand the wallet until setup
   completes. AppState lives in [`src/web/server.ts`](src/web/server.ts).
-- **Reference dirs** (`nips/`, `luds/`, `lightning-address/`,
-  `nostr-tools/`, `ts-sdk/`, `wallet/`, `arkd/`) are gitignored
-  convenience clones. Don't link to them
-  from anything that gets committed — public links will 404.
-  External URLs are in [DESIGN.md §10](DESIGN.md).
+- **Reference clones live one level up** in the operator workspace's
+  `reference/` (`../nips/`, `../luds/`, `../lightning-address/`,
+  `../nostr-tools/`, `../ts-sdk/`, `../wallet/`, `../arkd/`, …) — they
+  were consolidated there so they're not duplicated per-app. They're
+  gitignored convenience clones for reading source only; nothing here
+  imports from them (the `nostr-tools/...` imports are the npm package).
+  Don't link to them from anything that gets committed — public links
+  will 404. External URLs are in [DESIGN.md §10](DESIGN.md). Refresh
+  them via the workspace's `update-refs.sh`, not a bridge npm script.
 - **Boltz endpoint is *not* `api.ark.boltz.exchange`.** The d.ts
   docstring lies; the real SDK default is `api.boltz.exchange` and
   that's what the production wallet uses. Don't pass `swapProvider`
