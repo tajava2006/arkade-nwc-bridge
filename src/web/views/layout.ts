@@ -19,6 +19,8 @@ const STYLES = `
   input { padding: 0.5em; font-size: 1em; border: 1px solid #ccc; border-radius: 4px; }
   pre { background: #f6f6f6; padding: 1em; overflow-x: auto; white-space: pre-wrap; word-break: break-all; border-radius: 4px; }
   .muted { color: #888; font-size: 0.9em; }
+  .ok { color: #155724; font-weight: 600; }
+  .bad { color: #c00; font-weight: 600; }
   .stat { display: inline-block; margin-right: 2.5em; vertical-align: top; }
   .stat-value { font-size: 1.6em; font-weight: 600; }
   .stat-label { color: #888; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em; }

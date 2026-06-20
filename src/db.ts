@@ -142,6 +142,26 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_offboards_created_at ON offboards(created_at);
     `,
   },
+  {
+    version: 6,
+    description: 'clink_offer — single-row store for the static noffer receive code',
+    // The dashboard's static CLINK noffer code. We persist the *encoded
+    // string* (not its parts): it's the exact value people may have saved,
+    // and we decode it on boot to recover the relay to listen on — so the
+    // listen relay is frozen at mint time, immune to the operator's NIP-65
+    // outbox drifting underneath (mirrors connections.relays_json). A noffer
+    // carries only ONE relay (spec TLV 1 is singular), so there's nothing to
+    // listen on but that one; if it dies the operator regenerates by hand.
+    // Exactly one row (id=1, upserted) — a static handle, replaced not
+    // accumulated.
+    sql: `
+      CREATE TABLE clink_offer (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        noffer     TEXT    NOT NULL,   -- the noffer1… bech32 string
+        created_at INTEGER NOT NULL
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

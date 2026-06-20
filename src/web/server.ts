@@ -13,6 +13,7 @@ import {
   revokeConnection,
 } from '../nostr/connections'
 import type { NostrService } from '../nostr/service'
+import type { OfferService } from '../clink/offers'
 import type { OutboxWatcher } from '../nostr/outbox'
 import type { SseHub } from '../lib/sse'
 import type { AsyncCache } from '../lib/cache'
@@ -63,6 +64,7 @@ export type AppState =
       wallet: Wallet
       swaps: ArkadeSwaps
       nostr: NostrService
+      offers: OfferService
       caches: SwrCaches
       arkAddress: string
       // Used by /send to read ArkInfo (dust + intent-fee programs) for the
@@ -229,6 +231,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             dashboardView({
               balance,
               arkAddress: r.ready.arkAddress,
+              noffer: r.ready.offers.snapshot().noffer,
+              offerRelay: r.ready.offers.getRelayStatus(),
               activeConnections: active.length,
               totalTxCount: txCountRow?.c ?? 0,
             }),
@@ -352,6 +356,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           revokeConnection(db, id)
           if (conn) r.ready.nostr.unregisterConnection(conn.servicePubkeyHex)
           return Response.redirect('/connections', 303)
+        },
+      },
+      '/noffer/regenerate': {
+        // Operator-initiated: mint a fresh noffer from the current outbox
+        // relay (e.g. after swapping a flaky relay out of the NIP-65 list)
+        // and move the subscription to it. Invalidates previously shared
+        // copies of the old code — that's the point.
+        POST: () => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          r.ready.offers.regenerate()
+          return Response.redirect('/', 303)
         },
       },
       '/history': {

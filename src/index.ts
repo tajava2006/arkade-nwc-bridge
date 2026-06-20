@@ -14,6 +14,7 @@ import { RestArkProvider } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
+import { startOfferService } from './clink/offers'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { listActiveConnections } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
@@ -167,6 +168,13 @@ async function main(): Promise<void> {
 
     const nostr = await startNostrService({ cfg, db, wallet, swaps, pool })
 
+    // CLINK Offers: serve the static noffer receive code under the account
+    // key (same key as the Ark wallet). Minted from the current outbox relay
+    // and persisted; on boot it listens on the relay frozen into the stored
+    // code (see clink/offers.ts). Operator regenerates by hand if it dies.
+    const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps })
+    console.log(`  noffer         ${offers.snapshot().noffer}`)
+
     // SWR caches for the slow ark-side reads. minIntervalMs keeps
     // back-to-back page visits from hammering the upstream — opening
     // dashboard, history, dashboard within a few seconds only refetches
@@ -205,6 +213,7 @@ async function main(): Promise<void> {
       wallet,
       swaps,
       nostr,
+      offers,
       caches,
       arkAddress: address,
       arkProvider,
@@ -228,6 +237,7 @@ async function main(): Promise<void> {
     sseHub.closeAll()
     await web.stop()
     if (appState.current.mode === 'ready') {
+      appState.current.offers.stop()
       await appState.current.nostr.stop()
       await appState.current.swaps.dispose()
       // Wallet.dispose tears down the VtxoManager poll loop, ContractWatcher's

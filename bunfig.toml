@@ -1,0 +1,4 @@
+[test]
+# Warm @noble/curves (async ESM) before any test file's CJS require of it —
+# see test/setup.ts for the why.
+preload = ["./test/setup.ts"]

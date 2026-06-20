@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { Config } from '../../src/config'
 import { startWebServer, type AppStateRef, type WebServer } from '../../src/web/server'
 import type { NostrService } from '../../src/nostr/service'
+import type { OfferService } from '../../src/clink/offers'
 import type { OutboxWatcher } from '../../src/nostr/outbox'
 import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
@@ -21,6 +22,13 @@ const STUB_NOSTR: NostrService = {
   unregisterConnection: () => {},
   getRelayStatus: (urls) => urls.map((url) => ({ url, connected: false })),
   stop: async () => {},
+}
+
+const STUB_OFFERS: OfferService = {
+  snapshot: () => ({ noffer: 'noffer1stub', relay: 'wss://r' }),
+  getRelayStatus: () => ({ url: 'wss://r', connected: false }),
+  regenerate: () => {},
+  stop: () => {},
 }
 
 const STUB_OUTBOX: OutboxWatcher = {
@@ -52,6 +60,7 @@ function readyState(): AppStateRef {
       wallet,
       swaps: makeSwapsStub() as ArkadeSwaps,
       nostr: STUB_NOSTR,
+      offers: STUB_OFFERS,
       caches: makeSwrCaches(wallet, balance),
       arkAddress: 'tark1stubaddress',
       arkProvider: makeArkProviderStub(),
@@ -255,6 +264,7 @@ describe('web server — setup mode', () => {
           wallet,
           swaps: makeSwapsStub() as ArkadeSwaps,
           nostr: STUB_NOSTR,
+          offers: STUB_OFFERS,
           caches: makeSwrCaches(wallet, emptyBalance()),
           arkAddress: 'tark1stub',
           arkProvider: makeArkProviderStub(),
