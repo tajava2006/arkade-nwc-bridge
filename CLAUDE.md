@@ -227,4 +227,8 @@ row exists. Logs go to stdout; when running in background pipe to
 - *bridge-native send (operator sends own funds: Ark / LN / onchain
   offboard), consolidate-all refresh, fee/sweep & sub-dust semantics,
   rail-aware VTXO breakdown* → [SEND_DESIGN.md](SEND_DESIGN.md).
+- *bridge-native receive (dashboard handles: Ark address / CLINK noffer /
+  onchain boarding), CLINK offers + NIP-57 zap plan, native onboarding vs
+  Boltz chain swap, why a fixed boarding address is safe (relative CSV
+  timelock), send↔receive ramp symmetry* → [RECEIVE_DESIGN.md](RECEIVE_DESIGN.md).
 - *why a decision was made* → [DESIGN.md](DESIGN.md) §2 / §6 / §9.
