@@ -67,6 +67,11 @@ export type AppState =
       offers: OfferService
       caches: SwrCaches
       arkAddress: string
+      // Onchain (boarding) receive handle + the ASP onboarding intent-fee
+      // program (onchain-input CEL string), snapshotted at boot for the
+      // dashboard's receive section.
+      boardingAddress: string
+      onboardingFeeProgram?: string
       // Used by /send to read ArkInfo (dust + intent-fee programs) for the
       // VTXO breakdown and offboard fee preview. A second RestArkProvider
       // alongside the wallet's internal one is fine — it's stateless REST.
@@ -231,6 +236,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             dashboardView({
               balance,
               arkAddress: r.ready.arkAddress,
+              boardingAddress: r.ready.boardingAddress,
+              onboardingFeeProgram: r.ready.onboardingFeeProgram,
               noffer: r.ready.offers.snapshot().noffer,
               offerRelay: r.ready.offers.getRelayStatus(),
               activeConnections: active.length,

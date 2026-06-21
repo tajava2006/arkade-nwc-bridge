@@ -26,6 +26,11 @@ const STYLES = `
   .stat-label { color: #888; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em; }
   .qr-box { max-width: 280px; background: white; padding: 0.5em; border: 1px solid #ddd; border-radius: 4px; }
   .qr-box svg { width: 100%; height: auto; }
+  .receive-grid { display: flex; flex-wrap: wrap; gap: 1.5em; align-items: flex-start; }
+  .receive-card { flex: 1 1 240px; min-width: 240px; max-width: 320px; }
+  .receive-card h3 { margin: 0 0 0.5em; font-size: 1em; }
+  .receive-card .qr-box { max-width: 100%; }
+  .receive-card pre { font-size: 0.72em; }
   .pill { display: inline-block; padding: 0.1em 0.5em; border-radius: 999px; font-size: 0.8em; }
   .pill.settled { background: #d4edda; color: #155724; }
   .pill.pending { background: #fff3cd; color: #856404; }

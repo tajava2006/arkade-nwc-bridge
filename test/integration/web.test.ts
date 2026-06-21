@@ -63,6 +63,8 @@ function readyState(): AppStateRef {
       offers: STUB_OFFERS,
       caches: makeSwrCaches(wallet, balance),
       arkAddress: 'tark1stubaddress',
+      boardingAddress: 'bc1qstubboarding',
+      onboardingFeeProgram: '1000.0',
       arkProvider: makeArkProviderStub(),
     },
   }
@@ -267,6 +269,8 @@ describe('web server — setup mode', () => {
           offers: STUB_OFFERS,
           caches: makeSwrCaches(wallet, emptyBalance()),
           arkAddress: 'tark1stub',
+          boardingAddress: 'bc1qstubboarding',
+          onboardingFeeProgram: '1000.0',
           arkProvider: makeArkProviderStub(),
         }
       },

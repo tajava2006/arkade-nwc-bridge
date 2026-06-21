@@ -219,6 +219,21 @@ async function main(): Promise<void> {
     // Stateless REST; the wallet keeps its own internal one for signing.
     const arkProvider = new RestArkProvider(cfg.arkServerUrl)
 
+    // Onchain (boarding) receive handle + the ASP onboarding fee. Both are
+    // effectively static (boarding address is deterministic for our SingleKey;
+    // the intent-fee program rarely changes), so snapshot them once at boot
+    // and let the dashboard read from AppState — no per-page-load round-trip.
+    const boardingAddress = await wallet.getBoardingAddress()
+    const arkInfo = await arkProvider.getInfo().catch((err) => {
+      console.warn(
+        `boot: arkProvider.getInfo failed, onboarding fee unknown: ${err instanceof Error ? err.message : err}`,
+      )
+      return null
+    })
+    // CEL program string for the onchain-input intent fee (onboarding). Flat
+    // configs look like "1000.0"; the dashboard renders it best-effort.
+    const onboardingFeeProgram = arkInfo?.fees?.intentFee?.onchainInput
+
     appState.current = {
       mode: 'ready',
       wallet,
@@ -227,6 +242,8 @@ async function main(): Promise<void> {
       offers,
       caches,
       arkAddress: address,
+      boardingAddress,
+      onboardingFeeProgram,
       arkProvider,
     }
     console.log('ready — waiting for NWC requests')
