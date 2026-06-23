@@ -24,6 +24,10 @@ const STUB_NOSTR: NostrService = {
   stop: async () => {},
 }
 
+// Shared pool isn't exercised by these web tests (only /send's CLINK resolve
+// uses it). A bare cast is enough to satisfy the ready-state shape.
+const STUB_POOL = {} as unknown as import('nostr-tools/pool').SimplePool
+
 const STUB_OFFERS: OfferService = {
   snapshot: () => ({ noffer: 'noffer1stub', relay: 'wss://r' }),
   getRelayStatus: () => ({ url: 'wss://r', connected: false }),
@@ -61,6 +65,7 @@ function readyState(): AppStateRef {
       swaps: makeSwapsStub() as ArkadeSwaps,
       nostr: STUB_NOSTR,
       offers: STUB_OFFERS,
+      pool: STUB_POOL,
       caches: makeSwrCaches(wallet, balance),
       arkAddress: 'tark1stubaddress',
       boardingAddress: 'bc1qstubboarding',
@@ -267,6 +272,7 @@ describe('web server — setup mode', () => {
           swaps: makeSwapsStub() as ArkadeSwaps,
           nostr: STUB_NOSTR,
           offers: STUB_OFFERS,
+          pool: STUB_POOL,
           caches: makeSwrCaches(wallet, emptyBalance()),
           arkAddress: 'tark1stub',
           boardingAddress: 'bc1qstubboarding',

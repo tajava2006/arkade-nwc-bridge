@@ -249,3 +249,90 @@ money without going onchain.
   sub-dust recovery.
 - Stuck case unchanged: if total recoverable < dust, no round can form a valid
   output → genuinely stuck (差별화 #2 top-up territory).
+
+## 9. CLINK noffer send (pay a noffer)
+
+The receive side ships a CLINK noffer ([RECEIVE_DESIGN.md](RECEIVE_DESIGN.md));
+this is the matching send side. Key framing: **a noffer is not a new payment
+rail — it's a deferred bolt11 source.** Resolve it to an invoice, then fold into
+the existing Lightning path. Spec: reference/CLINK/specs/clink-offers.md.
+
+### Model: resolve-at-review, then fold into LN
+
+- `/send` (review) classifies a `noffer1…` destination, does the kind-21001
+  request/response round-trip to fetch a bolt11, and renders the confirm page
+  with the *resolved invoice*. `/send/confirm` pays that bolt11 via the existing
+  `sendLightningPayment` path — no new payment-layer code.
+- **Stateless.** The resolve is a transient round-trip inside one HTTP request;
+  unlike the receiver, no DB table. The payment is the existing LN result/history.
+
+### Classification
+
+- Add `noffer1` prefix → rail `'clink'` to `classifyDestination`, ahead of
+  bolt11/ark/onchain (unambiguous prefix).
+
+### Resolve round-trip (our own sender loop — no ClinkSDK dep)
+
+Mirror of the receiver, requester direction (decoder already vendored as
+`nofferDecode` in [`clink/nip19_offer.ts`](src/clink/nip19_offer.ts)):
+1. `nofferDecode(noffer)` → `{ pubkey, relay, offer, priceType, price? }`.
+2. Generate an **ephemeral key** per request (spec MAY; keeps operator payments
+   unlinkable to a stable identity).
+3. nip44-encrypt `{ offer, amount_sats? }` (ephemeral ↔ pubkey) → kind 21001
+   `tags:[['p',pubkey],['clink_version','1']]` → publish to the noffer's single
+   relay.
+4. Subscribe on that relay for the response (kind 21001, `#p`=ephemeralPub,
+   `#e`=requestId), **timeout ~15–20s**. One-shot, so `pool.subscribeMany`
+   directly — not `openPersistentSub`.
+5. Result: `{ bolt11 }` | `{ error, code, range?, latest? }` | timeout.
+
+### priceType → amount UX
+
+Spec: `amount_sats` is **required for spontaneous(2)/variable(1)**, optional
+otherwise. Decode gives priceType + optional price (TLV 4):
+
+| priceType | amount input | request | note |
+|---|---|---|---|
+| Fixed (0) | hidden/disabled | no `amount_sats` | returns the fixed invoice (no error); show TLV4 price if present, else "amount set by payee" |
+| Variable (1) | required | `amount_sats` | service prices it; confirm shows the *returned* invoice amount |
+| Spontaneous (2) | required | `amount_sats` | payer sets it (our own noffer is this) |
+
+Confirm always shows the **bolt11's actual amount** (source of truth), not the
+requested one — so a variable-priced quote is seen before paying.
+
+### Response / error UX (the hard part)
+
+- **Success** → confirm page (payee = noffer truncated, amount from invoice,
+  Boltz swap fee, total) → confirm pays the bolt11.
+- **code 1 Invalid Offer** → "offer no longer valid".
+- **code 2 Temporary Failure** → "payee service temporarily unavailable, retry".
+- **code 3 Expired/Moved** → if `latest` present, auto-retry once with the new
+  noffer (spec SHOULD); else "offer expired".
+- **code 4 Unsupported Feature** → "offer doesn't support this request".
+- **code 5 Invalid Amount** → show the response `range{min,max}`.
+- **relay unreachable / timeout** (single relay, no fallback) → explicit error:
+  "couldn't reach the offer's relay — the code may be stale; ask the payee to
+  regenerate." ← the main UX state to get right.
+
+### amount/MAX, fire-and-forget
+
+- **No MAX** — like LN, amount-specified; drain-to-zero is structurally
+  impossible over a swap (§4).
+- **Not fire-and-forget** — resolve is a synchronous await (+timeout) inside the
+  review POST; payment is the existing LN async/SSE result. No new state machine.
+  A dead relay stalls review until timeout (success is ~1–3s); acceptable for an
+  operator tool, SSE progress is optional polish.
+
+### Integration points
+
+- New `clink/send.ts`: `requestNofferInvoice(pool, { noffer, amountSats? })`.
+- `/send` review: on `'clink'`, resolve → on success promote to the LN confirm
+  path carrying the bolt11 (hidden field); `/send/confirm` unchanged.
+- ⚠️ resolve needs the shared `SimplePool`, which the web routes don't hold today
+  (`offers`/`nostr` own it) — expose it on ready-mode AppState (one-line wiring).
+
+### Non-goals (now)
+
+- **Sending a zap** (embedding a 9734) — paired with the receive-side zap, which
+  is blocked on the SDK descriptionHash gap (ts-sdk#576). Phase 2.
+- `payer_data` / `expires_in_seconds` — optional fields, skipped in MVP.

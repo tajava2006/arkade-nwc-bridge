@@ -114,10 +114,10 @@ export function sendView(args: {
             data-offboard-max="${offboardMaxAttr}">
         <label>
           Destination
-          <input type="text" name="destination" placeholder="bolt11 invoice · Ark address · onchain address"
+          <input type="text" name="destination" placeholder="bolt11 · noffer · Ark address · onchain address"
                  autocomplete="off" required data-destination />
         </label>
-        <p class="muted" data-rail-hint>Paste an invoice, Ark address, or onchain address.</p>
+        <p class="muted" data-rail-hint>Paste an invoice, noffer, Ark address, or onchain address.</p>
         <label data-amount-row>
           Amount (sats)
           <input type="number" name="amount" min="1" step="1" inputmode="numeric" data-amount />
@@ -244,6 +244,7 @@ const SEND_SCRIPT = `<script>
   function rail(v) {
     var s = (v || '').trim().toLowerCase();
     if (!s) return null;
+    if (s.indexOf('noffer1') === 0) return 'clink';
     if (s.indexOf('ln') === 0) return 'lightning';
     if (s.indexOf('ark1') === 0 || s.indexOf('tark1') === 0) return 'ark';
     return 'onchain';
@@ -255,6 +256,15 @@ const SEND_SCRIPT = `<script>
       amount.required = false;
       maxBtn.style.display = 'none';
       railHint.textContent = 'Lightning — amount is taken from the invoice. No max (drain not possible over LN).';
+      feeHint.textContent = '';
+      return;
+    }
+    if (r === 'clink') {
+      amountRow.style.display = '';
+      // Fixed-price offers need no amount; the server requires it otherwise.
+      amount.required = false;
+      maxBtn.style.display = 'none';
+      railHint.textContent = 'CLINK offer (noffer) — enter an amount (required unless the offer is fixed-price). Resolved to a Lightning invoice.';
       feeHint.textContent = '';
       return;
     }
@@ -272,7 +282,7 @@ const SEND_SCRIPT = `<script>
       feeHint.textContent = offboardMax > 0 ? 'Max sweeps everything minus the intent fee.' : 'Total minus fee is below dust — cannot offboard.';
     } else {
       maxBtn.style.display = 'none';
-      railHint.textContent = 'Paste an invoice, Ark address, or onchain address.';
+      railHint.textContent = 'Paste an invoice, noffer, Ark address, or onchain address.';
       feeHint.textContent = '';
     }
   }

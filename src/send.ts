@@ -18,17 +18,21 @@ import { decode as decodeBolt11 } from 'light-bolt11-decoder'
 // swaps.sendLightningPayment / Ramps.offboard) live in the route handlers —
 // see SEND_DESIGN.md for the why behind the three rails.
 
-export type Rail = 'lightning' | 'ark' | 'onchain'
+// 'clink' is a noffer (CLINK Offers): not a payment rail of its own, but a
+// deferred bolt11 source — the review step resolves it to an invoice and then
+// pays it over Lightning. See SEND_DESIGN.md §9.
+export type Rail = 'lightning' | 'ark' | 'onchain' | 'clink'
 
 /**
- * Classify a pasted destination. Order matters: bolt11 first (an invoice is
- * unambiguous), then Ark address, else assume onchain — the offboard path
- * validates the onchain address when it decodes it, so we don't re-implement
- * BTC address parsing here just for routing.
+ * Classify a pasted destination. Order matters: noffer first (unambiguous
+ * `noffer1` prefix), then bolt11 (an invoice is unambiguous), then Ark address,
+ * else assume onchain — the offboard path validates the onchain address when it
+ * decodes it, so we don't re-implement BTC address parsing here just for routing.
  */
 export function classifyDestination(raw: string): Rail | null {
   const dest = raw.trim()
   if (!dest) return null
+  if (dest.toLowerCase().startsWith('noffer1')) return 'clink'
   try {
     const decoded = decodeInvoice(dest)
     if (decoded) return 'lightning'

@@ -241,6 +241,7 @@ async function main(): Promise<void> {
       nostr,
       offers,
       caches,
+      pool,
       arkAddress: address,
       boardingAddress,
       onboardingFeeProgram,

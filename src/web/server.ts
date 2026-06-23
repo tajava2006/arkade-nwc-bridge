@@ -5,6 +5,7 @@ import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { Config } from '../config'
 import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
 import { nip19 } from 'nostr-tools'
+import type { SimplePool } from 'nostr-tools/pool'
 import { html, htmlResponse } from '../lib/html'
 import {
   createConnection,
@@ -14,6 +15,8 @@ import {
 } from '../nostr/connections'
 import type { NostrService } from '../nostr/service'
 import type { OfferService } from '../clink/offers'
+import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
+import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
 import type { OutboxWatcher } from '../nostr/outbox'
 import type { SseHub } from '../lib/sse'
 import type { AsyncCache } from '../lib/cache'
@@ -66,6 +69,9 @@ export type AppState =
       nostr: NostrService
       offers: OfferService
       caches: SwrCaches
+      // Shared SimplePool (same instance the nostr/offer subsystems use) —
+      // /send needs it to resolve a CLINK noffer to an invoice (SEND_DESIGN §9).
+      pool: SimplePool
       arkAddress: string
       // Onchain (boarding) receive handle + the ASP onboarding intent-fee
       // program (onchain-input CEL string), snapshotted at boot for the
@@ -420,6 +426,56 @@ export function startWebServer(deps: WebServerDeps): WebServer {
 
           const rail = classifyDestination(destination)
           if (!rail) return sendError('send', 'destination is required')
+
+          if (rail === 'clink') {
+            // Resolve the noffer to a bolt11, then fold into the LN confirm
+            // path (SEND_DESIGN §9). Amount is required unless the offer is
+            // fixed-price; we decode to learn that.
+            let pointer
+            try {
+              pointer = nofferDecode(destination)
+            } catch (err) {
+              return sendError('clink', `invalid noffer: ${errMsg(err)}`)
+            }
+            let amountSats: number | undefined
+            if (pointer.priceType !== OfferPriceType.Fixed) {
+              const a = parseSats(amountRaw)
+              if (a === null) return sendError('clink', 'amount is required for this offer (sats)')
+              amountSats = a
+            }
+            let result = await requestNofferInvoice({ pool: ready.pool, noffer: destination, amountSats })
+            // code 3 (expired/moved) with a forwarding `latest` → retry once.
+            if (!result.ok && result.kind === 'error' && result.code === 3 && result.latest) {
+              result = await requestNofferInvoice({ pool: ready.pool, noffer: result.latest, amountSats })
+            }
+            if (!result.ok) return sendError('clink', clinkErrorMessage(result))
+
+            let clinkPreview
+            try {
+              clinkPreview = lightningPreview(result.bolt11, await ready.swaps.getFees())
+            } catch (err) {
+              return sendError('clink', `offer returned an invalid invoice: ${errMsg(err)}`)
+            }
+            if (!clinkPreview.amountSats || clinkPreview.amountSats <= 0) {
+              return sendError('clink', 'offer returned a 0-amount invoice')
+            }
+            return htmlResponse(
+              sendConfirmView({
+                title: 'CLINK offer (Lightning)',
+                destination: result.bolt11, // confirm pays the resolved invoice
+                amountField: '',
+                isMax: false,
+                rows: [
+                  { label: 'Payee', value: clinkPreview.payee ?? '—' },
+                  { label: 'Description', value: clinkPreview.description || '—' },
+                  { label: 'Invoice amount', value: fmtSats(clinkPreview.amountSats) },
+                  { label: 'Swap fee', value: fmtSats(clinkPreview.feeSat) },
+                  { label: 'Total leaving wallet', value: fmtSats(clinkPreview.totalSat) },
+                ],
+                note: 'Resolved from a CLINK noffer to a Lightning invoice. Confirm pays the invoice; LN routing is handled by Boltz out of the swap fee.',
+              }),
+            )
+          }
 
           if (rail === 'lightning') {
             let preview
