@@ -26,6 +26,7 @@ import {
 } from './lib/relay_status'
 import { renderBalanceFragment } from './web/views/dashboard'
 import { renderHistoryFragment } from './web/views/history'
+import { renderBreakdownFragment } from './web/views/send'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -186,6 +187,10 @@ async function main(): Promise<void> {
     const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps })
     console.log(`  noffer         ${offers.snapshot().noffer}`)
 
+    // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
+    // Stateless REST; the wallet keeps its own internal one for signing.
+    const arkProvider = new RestArkProvider(cfg.arkServerUrl)
+
     // SWR caches for the slow ark-side reads. minIntervalMs keeps
     // back-to-back page visits from hammering the upstream — opening
     // dashboard, history, dashboard within a few seconds only refetches
@@ -202,6 +207,21 @@ async function main(): Promise<void> {
         fetcher: () => wallet.getTransactionHistory(),
         minIntervalMs: 2000,
       }),
+      // /send's breakdown needs ArkInfo (dust + fee programs) and the full
+      // VTXO set together — fetched in parallel so the page renders from a
+      // snapshot instead of blocking on two sequential round-trips. The set
+      // churns, but we push the whole table fragment over SSE (no diffing).
+      sendData: new AsyncCache({
+        label: 'send-data',
+        fetcher: async () => {
+          const [arkInfo, vtxos] = await Promise.all([
+            arkProvider.getInfo(),
+            wallet.getVtxos({ withRecoverable: true }),
+          ])
+          return { arkInfo, vtxos }
+        },
+        minIntervalMs: 2000,
+      }),
     }
     caches.balance.onUpdate(({ value }) => {
       sseHub.broadcast('balance-status', { html: renderBalanceFragment(value).value })
@@ -209,30 +229,35 @@ async function main(): Promise<void> {
     caches.history.onUpdate(({ value }) => {
       sseHub.broadcast('history-status', { html: renderHistoryFragment(value).value })
     })
+    caches.sendData.onUpdate(({ value }) => {
+      sseHub.broadcast('send-breakdown', { html: renderBreakdownFragment(value).value })
+    })
     // Seed the balance cache with the snapshot we already fetched above
     // so the first dashboard visit doesn't pay the round-trip again.
     // Skipping equivalent seeding for history — that read is the slow
     // one and there's no boot-time consumer that already has the data.
     caches.balance.seed(balance)
 
-    // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
-    // Stateless REST; the wallet keeps its own internal one for signing.
-    const arkProvider = new RestArkProvider(cfg.arkServerUrl)
-
-    // Onchain (boarding) receive handle + the ASP onboarding fee. Both are
-    // effectively static (boarding address is deterministic for our SingleKey;
-    // the intent-fee program rarely changes), so snapshot them once at boot
-    // and let the dashboard read from AppState — no per-page-load round-trip.
+    // Boarding receive handle (deterministic for our SingleKey). Plus a boot
+    // prefetch of ArkInfo + VTXOs: seeds the /send breakdown cache (so the
+    // first /send visit is instant) and gives the dashboard the onboarding
+    // intent-fee program. Best-effort — on failure both lazy-load on first use.
     const boardingAddress = await wallet.getBoardingAddress()
-    const arkInfo = await arkProvider.getInfo().catch((err) => {
+    let onboardingFeeProgram: string | undefined
+    try {
+      const [arkInfo, vtxos] = await Promise.all([
+        arkProvider.getInfo(),
+        wallet.getVtxos({ withRecoverable: true }),
+      ])
+      // CEL program for the onchain-input intent fee (onboarding); flat
+      // configs look like "1000.0", rendered best-effort on the dashboard.
+      onboardingFeeProgram = arkInfo.fees?.intentFee?.onchainInput
+      caches.sendData.seed({ arkInfo, vtxos })
+    } catch (err) {
       console.warn(
-        `boot: arkProvider.getInfo failed, onboarding fee unknown: ${err instanceof Error ? err.message : err}`,
+        `boot: send-data prefetch failed (onboarding fee + /send breakdown lazy-load): ${err instanceof Error ? err.message : err}`,
       )
-      return null
-    })
-    // CEL program string for the onchain-input intent fee (onboarding). Flat
-    // configs look like "1000.0"; the dashboard renders it best-effort.
-    const onboardingFeeProgram = arkInfo?.fees?.intentFee?.onchainInput
+    }
 
     appState.current = {
       mode: 'ready',

@@ -2,7 +2,7 @@ import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import type { OffboardRow } from '../../offboards'
-import { isExpiringSoon, type VtxoBuckets } from '../../send'
+import { classifyVtxos, isExpiringSoon, offboardMaxSat, type SendData, type VtxoBuckets } from '../../send'
 
 function fmtSats(n: number): string {
   return `${n.toLocaleString()} sats`
@@ -95,14 +95,26 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
     </table>`
 }
 
+/**
+ * Inner content of the [data-breakdown] slot. Rendered from the SWR snapshot
+ * at page load and swapped in via SSE when the send-data cache refreshes — the
+ * whole table is replaced (no diffing the VTXO set). `null` = first load before
+ * the cache is warm.
+ */
+export function renderBreakdownFragment(value: SendData | null): RawHtml {
+  if (!value) return html`<p class="muted">Loading…</p>`
+  return breakdownTable(classifyVtxos(value.vtxos, value.arkInfo.dust))
+}
+
 export function sendView(args: {
-  buckets: VtxoBuckets
-  arkSendMaxSat: number
-  offboardMaxSat: number | null
+  value: SendData | null
   offboards: OffboardRow[]
   error?: string
 }): RawHtml {
-  const offboardMaxAttr = args.offboardMaxSat ?? 0
+  const buckets = args.value ? classifyVtxos(args.value.vtxos, args.value.arkInfo.dust) : null
+  const arkSendMaxSat = buckets ? buckets.spendableSat : 0
+  const offboardMax = args.value && buckets ? offboardMaxSat(args.value.arkInfo, buckets) : null
+  const offboardMaxAttr = offboardMax ?? 0
   return layout({
     title: 'Send',
     current: 'send',
@@ -110,7 +122,7 @@ export function sendView(args: {
       ${args.error ? html`<p class="pill failed" style="display:inline-block">${args.error}</p>` : ''}
 
       <form method="post" action="/send" data-send-form
-            data-ark-max="${args.arkSendMaxSat}"
+            data-ark-max="${arkSendMaxSat}"
             data-offboard-max="${offboardMaxAttr}">
         <label>
           Destination
@@ -141,7 +153,7 @@ export function sendView(args: {
       </form>
 
       <h2>Balance breakdown</h2>
-      ${breakdownTable(args.buckets)}
+      <div data-breakdown>${renderBreakdownFragment(args.value)}</div>
 
       <h2>Onchain exits</h2>
       <div data-offboards>${renderOffboardsFragment(args.offboards)}</div>

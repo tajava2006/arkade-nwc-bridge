@@ -43,6 +43,12 @@ export function classifyDestination(raw: string): Rail | null {
   return 'onchain'
 }
 
+/** The two ark-side reads the /send breakdown needs, fetched together. */
+export interface SendData {
+  arkInfo: ArkInfo
+  vtxos: ExtendedVirtualCoin[]
+}
+
 export interface VtxoBuckets {
   /** Offchain-spendable: usable on Ark send / LN / offboard. */
   spendable: ExtendedVirtualCoin[]

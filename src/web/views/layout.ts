@@ -119,6 +119,7 @@ const LIVE_SCRIPT = `<script>
   })
   on('balance-status', function (d) { swap('[data-balance]', d.html) })
   on('history-status', function (d) { swap('[data-history]', d.html) })
+  on('send-breakdown', function (d) { swap('[data-breakdown]', d.html) })
   on('offboards-update', function (d) { swap('[data-offboards]', d.html) })
 })()
 </script>`

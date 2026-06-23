@@ -21,6 +21,7 @@ import type {
 } from '@arkade-os/boltz-swap'
 import { AsyncCache } from '../../src/lib/cache'
 import type { SwrCaches } from '../../src/web/server'
+import type { SendData } from '../../src/send'
 
 export function emptyBalance(overrides: Partial<WalletBalance> = {}): WalletBalance {
   return {
@@ -94,6 +95,10 @@ export function makeSwrCaches(wallet: Wallet, balance: WalletBalance): SwrCaches
     history: new AsyncCache({
       label: 'test-history',
       fetcher: () => wallet.getTransactionHistory(),
+    }),
+    sendData: new AsyncCache<SendData>({
+      label: 'test-send-data',
+      fetcher: async () => ({ arkInfo: {} as never, vtxos: [] }),
     }),
   }
   caches.balance.seed(balance)

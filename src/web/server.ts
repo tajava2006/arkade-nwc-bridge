@@ -47,6 +47,7 @@ import {
   lightningPreview,
   offboardFeeSat,
   offboardMaxSat,
+  type SendData,
 } from '../send'
 import {
   createOffboard,
@@ -58,6 +59,8 @@ import {
 export interface SwrCaches {
   balance: AsyncCache<WalletBalance>
   history: AsyncCache<ArkTransaction[]>
+  // ArkInfo + VTXOs for the /send breakdown, fetched together (SEND_DESIGN §7).
+  sendData: AsyncCache<SendData>
 }
 
 export type AppState =
@@ -400,14 +403,14 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         GET: async () => {
           const r = requireReady()
           if (!r.ok) return r.response
-          const arkInfo = await r.ready.arkProvider.getInfo()
-          const vtxos = await r.ready.wallet.getVtxos({ withRecoverable: true })
-          const buckets = classifyVtxos(vtxos, arkInfo.dust)
+          // SWR: render from the cached snapshot instantly (or a loading
+          // placeholder on a cold cache), then refresh in the background and
+          // push the fresh breakdown over SSE. Same pattern as dashboard.
+          const { value } = r.ready.caches.sendData.snapshot()
+          void r.ready.caches.sendData.refresh()
           return htmlResponse(
             sendView({
-              buckets,
-              arkSendMaxSat: buckets.spendableSat,
-              offboardMaxSat: offboardMaxSat(arkInfo, buckets),
+              value,
               offboards: listRecentOffboards(db),
             }),
           )
@@ -589,6 +592,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               const res = await ready.swaps.sendLightningPayment({ invoice: destination })
               void ready.caches.balance.refresh()
               void ready.caches.history.refresh()
+              void ready.caches.sendData.refresh()
               return htmlResponse(
                 sendResultView({
                   label: 'lightning',
@@ -611,6 +615,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               const txid = await ready.wallet.sendBitcoin({ address: destination, amount })
               void ready.caches.balance.refresh()
               void ready.caches.history.refresh()
+              void ready.caches.sendData.refresh()
               return htmlResponse(
                 sendResultView({ label: 'ark', ok: true, detail: `arkTxid ${txid}` }),
               )
@@ -673,6 +678,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             broadcastOffboards()
             void ready.caches.balance.refresh()
             void ready.caches.history.refresh()
+            void ready.caches.sendData.refresh()
           })()
 
           return htmlResponse(
@@ -702,6 +708,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }
             void ready.caches.balance.refresh()
             void ready.caches.history.refresh()
+            void ready.caches.sendData.refresh()
           })()
           return htmlResponse(
             submittedView({
