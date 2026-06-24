@@ -3,8 +3,9 @@ import type { Wallet, WalletBalance, ArkTransaction, RestArkProvider } from '@ar
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import type { Config } from '../config'
-import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
+import { createAccount, generatePrivateKey, loadAccount, parseNsecInput } from '../account'
 import { nip19 } from 'nostr-tools'
+import { getPublicKey } from 'nostr-tools/pure'
 import type { SimplePool } from 'nostr-tools/pool'
 import { html, htmlResponse } from '../lib/html'
 import {
@@ -32,6 +33,7 @@ import { newConnectionForm, newConnectionResultView } from './views/new_connecti
 import { walletHistoryView } from './views/history'
 import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
+import { settingsView } from './views/settings'
 import {
   sendView,
   sendConfirmView,
@@ -397,6 +399,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const { value: txs } = r.ready.caches.history.snapshot()
           void r.ready.caches.history.refresh()
           return htmlResponse(walletHistoryView(txs))
+        },
+      },
+      '/settings': {
+        GET: () => {
+          // Gated on ready: the nsec only exists once the account row
+          // does, which is also when the bridge leaves setup mode.
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const account = loadAccount(db)
+          if (!account) return redirectToSetup()
+          const npub = nip19.npubEncode(getPublicKey(account.privateKey))
+          return htmlResponse(settingsView({ nsec: account.nsec, npub }))
         },
       },
       '/send': {
