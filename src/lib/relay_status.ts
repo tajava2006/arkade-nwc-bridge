@@ -1,4 +1,5 @@
 import { html, type RawHtml } from './html'
+import type { OutboxSource } from '../nostr/outbox'
 
 export interface RelayStatus {
   url: string
@@ -50,13 +51,15 @@ export function renderRelayDetail(relays: RelayStatus[]): RawHtml {
  *   - Bootstrap relays (informational — only used to discover the
  *     outbox; here so the operator can see when the hardcoded list
  *     needs refreshing)
- *   - Outbox relays (the default relays new connections will get)
+ *   - Outbox relays (the default relays new connections will get),
+ *     labelled with where they came from (the account key's own 10002,
+ *     the operator's, or the static last-resort set)
  * Each row is one relay with status.
  */
 export function renderOutboxPanel(args: {
   bootstrap: RelayStatus[]
   outbox: RelayStatus[]
-  outboxResolved: boolean
+  outboxSource: OutboxSource
 }): RawHtml {
   const bootstrapBadge = renderRelayBadge(args.bootstrap)
   const outboxBadge = renderRelayBadge(args.outbox)
@@ -72,15 +75,25 @@ export function renderOutboxPanel(args: {
       ${renderRelayList(args.bootstrap)}
       <div class="relay-panel-row">
         <span class="relay-panel-label">
-          ${args.outboxResolved
-            ? html`New connections will use`
-            : html`Outbox unresolved — using fallback`}
+          New connections will use
+          <span class="muted">(${outboxSourceLabel(args.outboxSource)})</span>
         </span>
         ${outboxBadge}
       </div>
       ${renderRelayList(args.outbox)}
     </div>
   `
+}
+
+function outboxSourceLabel(source: OutboxSource): string {
+  switch (source) {
+    case 'user':
+      return 'your relays'
+    case 'operator':
+      return 'operator relays'
+    case 'fallback':
+      return 'unresolved — default fallback'
+  }
 }
 
 function renderRelayList(relays: RelayStatus[]): RawHtml {
@@ -104,7 +117,7 @@ function renderRelayList(relays: RelayStatus[]): RawHtml {
 export function outboxPanelPayload(args: {
   bootstrap: RelayStatus[]
   outbox: RelayStatus[]
-  outboxResolved: boolean
+  outboxSource: OutboxSource
 }): { html: string } {
   return { html: renderOutboxPanel(args).value }
 }

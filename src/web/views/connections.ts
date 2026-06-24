@@ -6,6 +6,7 @@ import {
   renderRelayBadge,
   type RelayStatus,
 } from '../../lib/relay_status'
+import type { OutboxSource } from '../../nostr/outbox'
 
 function formatBudget(c: Connection): string {
   if (c.budgetMsat === null) return '∞'
@@ -30,7 +31,7 @@ export function connectionsListView(args: {
   outboxPanel: {
     bootstrap: RelayStatus[]
     outbox: RelayStatus[]
-    outboxResolved: boolean
+    outboxSource: OutboxSource
   }
 }): RawHtml {
   const renderActive = (c: Connection) => {

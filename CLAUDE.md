@@ -11,7 +11,7 @@ schema rationale, footguns); this file is just the orientation.
 ```
 src/
   defaults.ts                — static config (network, ASP, http bind/port,
-                               db path) + OUTBOX_DISCOVERY_PUBKEY,
+                               db path) + OUTBOX_FALLBACK_PUBKEY,
                                OUTBOX_BOOTSTRAP_RELAYS, NWC_RELAYS_FALLBACK.
                                No env vars
   config.ts                  — thin wrapper over defaults (no relay list —
@@ -35,10 +35,13 @@ src/
                                Connection.relays persisted per row
     crypto.ts                — nip44_v2 / nip04 (request encryption tag
                                picks; default nip04 per NIP-47 legacy rule)
-    outbox.ts                — NIP-65 watcher: subscribes to kind 10002
-                               on OUTBOX_BOOTSTRAP_RELAYS for the discovery
-                               pubkey, exposes current outbox + bootstrap /
-                               outbox relay status snapshots
+    outbox.ts                — NIP-65 watcher: over OUTBOX_BOOTSTRAP_RELAYS,
+                               two separate kind-10002 subs — the account
+                               key (primary, via setPrimaryPubkey once it
+                               exists) and OUTBOX_FALLBACK_PUBKEY (operator).
+                               Active set = user > operator > NWC_RELAYS_FALLBACK
+                               (getOutboxSource reports which); exposes that +
+                               bootstrap / outbox relay status snapshots
     persistent_sub.ts        — self-healing subscription wrapper: one
                                sub per relay, re-issues the REQ after
                                nostr-tools permanently kills a socket's

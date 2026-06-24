@@ -272,7 +272,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               outboxPanel: {
                 bootstrap: outbox.getBootstrapRelayStatus(),
                 outbox: outbox.getOutboxRelayStatus(),
-                outboxResolved: outbox.isResolved(),
+                outboxSource: outbox.getOutboxSource(),
               },
             }),
           )
@@ -736,7 +736,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 outboxPanelPayload({
                   bootstrap: outbox.getBootstrapRelayStatus(),
                   outbox: outbox.getOutboxRelayStatus(),
-                  outboxResolved: outbox.isResolved(),
+                  outboxSource: outbox.getOutboxSource(),
                 }),
               )
               if (state.current.mode === 'ready') {

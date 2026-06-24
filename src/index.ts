@@ -5,9 +5,10 @@ import { loadConfig } from './config'
 import {
   NWC_RELAYS_FALLBACK,
   OUTBOX_BOOTSTRAP_RELAYS,
-  OUTBOX_DISCOVERY_PUBKEY,
+  OUTBOX_FALLBACK_PUBKEY,
   OUTBOX_INITIAL_TIMEOUT_MS,
 } from './defaults'
+import { getPublicKey } from 'nostr-tools/pure'
 import { openDatabase } from './db'
 import { loadAccount } from './account'
 import { RestArkProvider } from '@arkade-os/sdk'
@@ -74,7 +75,7 @@ async function main(): Promise<void> {
   // existing connections.
   const outbox = await startOutboxWatcher({
     pool,
-    pubkey: OUTBOX_DISCOVERY_PUBKEY,
+    fallbackPubkey: OUTBOX_FALLBACK_PUBKEY,
     bootstrapRelays: OUTBOX_BOOTSTRAP_RELAYS,
     fallback: NWC_RELAYS_FALLBACK,
     initialTimeoutMs: OUTBOX_INITIAL_TIMEOUT_MS,
@@ -96,7 +97,7 @@ async function main(): Promise<void> {
       outboxPanelPayload({
         bootstrap: outbox.getBootstrapRelayStatus(),
         outbox: outbox.getOutboxRelayStatus(),
-        outboxResolved: outbox.isResolved(),
+        outboxSource: outbox.getOutboxSource(),
       }),
     )
   }
@@ -153,6 +154,13 @@ async function main(): Promise<void> {
   // handler (after the user submits /setup). Same path either way; mutates
   // appState in place so the web server's open closures see the new mode.
   const bootReady = async (privateKey: Uint8Array): Promise<void> => {
+    // The account key is the bridge's own nostr identity (noffer pubkey,
+    // NWC service pubkey). Make it the primary outbox target so relay
+    // discovery follows the same key everything else is published under;
+    // until it has its own 10002, the watcher stays on the operator's.
+    // Idempotent for the same key, so safe on both boot paths.
+    outbox.setPrimaryPubkey(getPublicKey(privateKey))
+
     const { wallet, address } = await initArkWallet(cfg, privateKey)
     console.log(`  ark address    ${address}`)
 

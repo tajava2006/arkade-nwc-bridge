@@ -37,7 +37,9 @@ const STUB_OFFERS: OfferService = {
 
 const STUB_OUTBOX: OutboxWatcher = {
   getOutboxRelays: () => ['wss://r'],
-  isResolved: () => false,
+  getOutboxSource: () => 'operator',
+  isResolved: () => true,
+  setPrimaryPubkey: () => {},
   getBootstrapRelayStatus: () => [],
   getOutboxRelayStatus: () => [{ url: 'wss://r', connected: false }],
   onOutboxChange: () => () => {},

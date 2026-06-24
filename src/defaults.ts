@@ -15,28 +15,33 @@ export const ARK_SERVER_URL = 'https://ark.hoppe-relay.it.com'
 // SDK's network-derived default flipping under us across version bumps.
 export const BOLTZ_API_URL = 'https://boltz.hoppe-relay.it.com'
 
-// Fallback relay set handed to new NWC connections when the outbox
-// watcher can't resolve the operator's NIP-65 list — e.g. all bootstrap
-// relays unreachable at boot, or the pubkey hasn't published 10002 yet.
-// Not used directly anywhere else; the bridge listens per-connection on
-// whatever relays each connection's URI baked in at creation.
+// Last-resort relay set, handed to new NWC connections only while
+// *neither* the account key's nor the operator's NIP-65 list has
+// resolved — e.g. all bootstrap relays unreachable at boot. Not used
+// directly anywhere else; the bridge listens per-connection on whatever
+// relays each connection's URI baked in at creation.
 export const NWC_RELAYS_FALLBACK: readonly string[] = [
   'wss://relay.getalby.com/v1',
   'wss://relay.damus.io',
 ]
 
-// Outbox-style relay discovery (NIP-65). At boot the bridge subscribes
-// to this pubkey's kind-10002 events via the bootstrap relays below;
-// whatever it lists becomes the active relay set for NWC subscriptions
-// and new connection URIs, replacing NWC_RELAYS. If no 10002 arrives
-// within OUTBOX_INITIAL_TIMEOUT_MS — bootstrap relays all down, or the
-// pubkey hasn't published recently — NWC_RELAYS stays as the fallback.
+// Outbox-style relay discovery (NIP-65). Two-tier, both fetched via the
+// bootstrap relays below:
+//   - the account key's own kind-10002 (primary) — a standalone user
+//     manages their relays from any nostr client; registered at runtime
+//     via OutboxWatcher.setPrimaryPubkey once the account exists.
+//   - OUTBOX_FALLBACK_PUBKEY's kind-10002 (this constant) — the
+//     operator's curated list, the default until the user publishes
+//     their own. If neither resolves within OUTBOX_INITIAL_TIMEOUT_MS,
+//     NWC_RELAYS_FALLBACK stands in.
+// Whatever wins becomes the active relay set for new NWC connection URIs
+// and noffer minting (existing connections keep their baked-in relays).
 //
 // The pubkey below is the operator's general-purpose nostr identity;
 // keeping the relay list there means changes propagate to the bridge
 // without code edits. The bootstrap set is "well-known indexer relays"
 // — any one of them succeeding is enough.
-export const OUTBOX_DISCOVERY_PUBKEY =
+export const OUTBOX_FALLBACK_PUBKEY =
   '658988350649280e43ebcdf83c20dd21273aeb4eeaa8eda7864b0fa9b57cb7a5'
 export const OUTBOX_BOOTSTRAP_RELAYS: readonly string[] = [
   'wss://purplepag.es',
