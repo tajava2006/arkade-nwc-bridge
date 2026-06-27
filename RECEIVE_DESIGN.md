@@ -123,7 +123,7 @@ incoming-vtxo arrival, or have the endpoint return the LN preimage (then a
 `{res:ok,preimage}` receipt). The receipt is optional per spec and the payer's
 own wallet already confirmed the LN payment, so it's a refinement, not a blocker.
 
-**Status: code complete, not yet end-to-end tested on mainnet.**
+**Status: verified end-to-end on mainnet (2026-06-27)** — noffer sub-dust zap → plain vtxo received.
 
 ## 4. Onchain onboarding: native boarding vs Boltz chain swap
 
