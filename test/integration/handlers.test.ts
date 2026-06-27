@@ -143,7 +143,7 @@ describe('handlers', () => {
 
     test('rejects missing/invalid invoice with OTHER', async () => {
       const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-d' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-d', wallet: makeWalletStub(), boltzApiUrl: '' }
       await expect(handlePayInvoice(deps, {})).rejects.toMatchObject({ code: 'OTHER' })
       await expect(handlePayInvoice(deps, { invoice: 'not-a-bolt11' })).rejects.toMatchObject({
         code: 'OTHER',
@@ -157,7 +157,7 @@ describe('handlers', () => {
         budgetMsat: 500_000, // 500 sat budget
       })
       const conn = r.connection
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-e' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-e', wallet: makeWalletStub(), boltzApiUrl: '' }
       // 2000 sat invoice > 500 sat budget
       await expect(
         handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
@@ -175,7 +175,7 @@ describe('handlers', () => {
         },
       })
       const r = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-f' },
+        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet: makeWalletStub(), boltzApiUrl: '' },
         { invoice: INVOICE_2000_SAT },
       )) as Record<string, unknown>
       expect(r.preimage).toBe('be'.repeat(32))
@@ -208,7 +208,7 @@ describe('handlers', () => {
       })
       await expect(
         handlePayInvoice(
-          { swaps, db: temp.db, conn, eventId: 'evt-g' },
+          { swaps, db: temp.db, conn, eventId: 'evt-g', wallet: makeWalletStub(), boltzApiUrl: '' },
           { invoice: INVOICE_2000_SAT },
         ),
       ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' })

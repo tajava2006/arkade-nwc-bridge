@@ -303,7 +303,14 @@ async function dispatch(
       )
     case 'pay_invoice':
       return handlePayInvoice(
-        { swaps: deps.swaps, db: deps.db, conn, eventId: event.id },
+        {
+          swaps: deps.swaps,
+          db: deps.db,
+          conn,
+          eventId: event.id,
+          wallet: deps.wallet,
+          boltzApiUrl: deps.cfg.boltzApiUrl,
+        },
         params,
       )
     case 'lookup_invoice':

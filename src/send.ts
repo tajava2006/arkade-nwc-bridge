@@ -14,7 +14,7 @@ import { decode as decodeBolt11 } from 'light-bolt11-decoder'
 
 // Pure send-side logic shared by the web routes and views: destination → rail
 // classification, VTXO bucketing (rail-aware availability), and the
-// onchain-output fee preview. The actual rail calls (wallet.sendBitcoin /
+// onchain-output fee preview. The actual rail calls (wallet.send /
 // swaps.sendLightningPayment / Ramps.offboard) live in the route handlers —
 // see SEND_DESIGN.md for the why behind the three rails.
 

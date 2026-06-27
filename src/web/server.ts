@@ -626,7 +626,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             const amount = parseSats(amountRaw)
             if (amount === null) return sendError('ark', 'amount must be a positive integer (sats)')
             try {
-              const txid = await ready.wallet.sendBitcoin({ address: destination, amount })
+              const txid = await ready.wallet.send({ address: destination, amount })
               void ready.caches.balance.refresh()
               void ready.caches.history.refresh()
               void ready.caches.sendData.refresh()
