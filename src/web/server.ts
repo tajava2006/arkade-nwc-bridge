@@ -3,6 +3,7 @@ import type { Wallet, WalletBalance, ArkTransaction, RestArkProvider } from '@ar
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import type { Config } from '../config'
+import { sendLightning } from '../ln_send'
 import { createAccount, generatePrivateKey, loadAccount, parseNsecInput } from '../account'
 import { nip19 } from 'nostr-tools'
 import { getPublicKey } from 'nostr-tools/pure'
@@ -603,7 +604,10 @@ export function startWebServer(deps: WebServerDeps): WebServer {
 
           if (rail === 'lightning') {
             try {
-              const res = await ready.swaps.sendLightningPayment({ invoice: destination })
+              const res = await sendLightning(
+                { swaps: ready.swaps, wallet: ready.wallet, boltzApiUrl: cfg.boltzApiUrl },
+                destination,
+              )
               void ready.caches.balance.refresh()
               void ready.caches.history.refresh()
               void ready.caches.sendData.refresh()
