@@ -139,7 +139,7 @@ export function sendView(args: {
           <button type="button" data-max-btn style="display:none">Max</button>
           <span class="muted" data-fee-hint></span>
         </p>
-        <button type="submit">Send</button>
+        <button type="submit">Review</button>
       </form>
 
       <h2>Refresh</h2>
@@ -261,13 +261,27 @@ const SEND_SCRIPT = `<script>
     if (s.indexOf('ark1') === 0 || s.indexOf('tark1') === 0) return 'ark';
     return 'onchain';
   }
+  // Parse the amount straight out of the bolt11 HRP so the operator sees what
+  // they're paying the moment they paste — the amount field is hidden for LN
+  // (it's fixed by the invoice), and we never want a blind "send". Authoritative
+  // amount/fee still come from the server's decode on the review step.
+  function bolt11Sats(v) {
+    var m = /^ln(?:bc|tb|bcrt|sb)([0-9]+)([munp]?)1/i.exec((v || '').trim());
+    if (!m) return null;
+    var mult = { m: 1e5, u: 1e2, n: 0.1, p: 1e-4 }[m[2].toLowerCase()];
+    if (mult === undefined) mult = 1e8; // no multiplier = whole BTC
+    return Math.round(parseInt(m[1], 10) * mult * 1000) / 1000;
+  }
   function update() {
     var r = rail(dest.value);
     if (r === 'lightning') {
       amountRow.style.display = 'none';
       amount.required = false;
       maxBtn.style.display = 'none';
-      railHint.textContent = 'Lightning — amount is taken from the invoice. No max (drain not possible over LN).';
+      var sats = bolt11Sats(dest.value);
+      railHint.textContent = sats != null
+        ? 'Lightning — paying ' + sats.toLocaleString() + ' sats (fixed by the invoice). You will review before sending.'
+        : 'Lightning — amount is taken from the invoice. You will review before sending.';
       feeHint.textContent = '';
       return;
     }
