@@ -192,7 +192,7 @@ async function main(): Promise<void> {
     // key (same key as the Ark wallet). Minted from the current outbox relay
     // and persisted; on boot it listens on the relay frozen into the stored
     // code (see clink/offers.ts). Operator regenerates by hand if it dies.
-    const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps })
+    const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: cfg.boltzApiUrl })
     console.log(`  noffer         ${offers.snapshot().noffer}`)
 
     // Second provider for /send's ArkInfo reads (dust + intent-fee programs).

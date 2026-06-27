@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
 import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, getPublicKey, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
 import { NetworkError, type ArkadeSwaps, type BoltzReverseSwap } from '@arkade-os/boltz-swap'
+import type { Wallet } from '@arkade-os/sdk'
 
 import { CLINK_OFFER_ID } from '../defaults'
 import { decryptContent, encryptContent } from '../nostr/crypto'
@@ -27,6 +28,12 @@ import { nofferEncode, nofferDecode, OfferPriceType } from './nip19_offer'
 
 const OFFER_KIND = 21001
 const CLINK_VERSION = '1'
+
+// Bitcoin P2TR standard dust. Below this a Boltz reverse swap can't settle: the
+// vHTLC lockup vtxo is sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the
+// claim's spend, so the swap strands. Sub-dust receives take the operator's
+// plain-invoice path instead (see handleOfferRequest + boltz-subdust-receive.patch).
+const DUST_SATS = 330
 
 // CLINK is NIP-44 only (unlike NWC, which also speaks legacy nip04).
 const SCHEME = 'nip44_v2' as const
@@ -68,6 +75,10 @@ export interface OfferServiceDeps {
   secretKey: Uint8Array
   outbox: OutboxWatcher
   swaps: ArkadeSwaps
+  /** Ark wallet — sub-dust receives are paid out to its address by Boltz. */
+  wallet: Wallet
+  /** Boltz REST base (no /v2 suffix); the sub-dust receive route lives there. */
+  boltzApiUrl: string
 }
 
 function loadStoredNoffer(db: Database): string | null {
@@ -95,7 +106,7 @@ function mint(secretKey: Uint8Array, outbox: OutboxWatcher): { noffer: string; r
 }
 
 export function startOfferService(deps: OfferServiceDeps): OfferService {
-  const { pool, db, secretKey, outbox, swaps } = deps
+  const { pool, db, secretKey, outbox, swaps, wallet, boltzApiUrl } = deps
   const pub = getPublicKey(secretKey)
 
   // Reuse the stored code iff it decodes and was minted under this account
@@ -131,7 +142,7 @@ export function startOfferService(deps: OfferServiceDeps): OfferService {
       // case is an invoice nobody waits for — harmless, no funds move.
       resumeSince: true,
       onevent: (event) => {
-        handleOfferRequest({ pool, db, secretKey, swaps, relay: state.relay }, event).catch((err) => {
+        handleOfferRequest({ pool, db, secretKey, swaps, wallet, boltzApiUrl, relay: state.relay }, event).catch((err) => {
           console.error('clink: offer handler crashed:', err)
         })
       },
@@ -165,7 +176,35 @@ interface HandlerCtx {
   db: Database
   secretKey: Uint8Array
   swaps: ArkadeSwaps
+  wallet: Wallet
+  boltzApiUrl: string
   relay: string
+}
+
+/**
+ * Sub-dust receive via Boltz's plain-invoice path (server side:
+ * patches/boltz-subdust-receive.patch). Boltz issues a plain invoice it
+ * collects and, on settlement, sends `amount` to `address` as a plain
+ * off-chain vtxo — 1:1, no swap, no swap fee.
+ *
+ * This drops the reverse swap's atomicity: the external payer settles a real
+ * invoice with no on-chain guarantee, trusting Boltz to deliver the vtxo
+ * afterward. The counterparty risk is the payer's; it does not depend on who
+ * runs the ASP/Boltz. Below dust there is no atomic alternative anyway (the
+ * vHTLC claim is impossible), and the amounts are tiny.
+ */
+async function requestSubdustInvoice(boltzApiUrl: string, amount: number, address: string): Promise<string> {
+  const res = await fetch(`${boltzApiUrl}/v2/subdust/receive`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ amount, address }),
+  })
+  if (!res.ok) {
+    throw new Error(`subdust/receive ${res.status}: ${await res.text().catch(() => '')}`)
+  }
+  const body = (await res.json()) as { invoice?: string }
+  if (!body.invoice) throw new Error('subdust/receive: response had no invoice')
+  return body.invoice
 }
 
 async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<void> {
@@ -218,6 +257,29 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     typeof payload.description === 'string' && payload.description.length <= 100
       ? payload.description
       : undefined
+
+  // Sub-dust receive: a Boltz reverse swap can't settle below dust (the vHTLC
+  // lockup vtxo is sub-dust → arkd VTXO_RECOVERABLE → claim strands). Fall back
+  // to Boltz's non-atomic plain-invoice path: the payer settles a real invoice
+  // with no on-chain guarantee, trusting Boltz to deliver the vtxo afterward. No
+  // swap, so no swap-keyed CLINK receipt is emitted.
+  // TODO(clink-ack): wire a settlement trigger for sub-dust (incoming-vtxo
+  //   watch, or have boltz return the LN preimage) to send the optional
+  //   kind-21001 Payment Receipt — with preimage if available, else {res:'ok'}.
+  if (amount < DUST_SATS) {
+    let invoice: string
+    try {
+      const address = await ctx.wallet.getAddress()
+      invoice = await requestSubdustInvoice(ctx.boltzApiUrl, amount, address)
+    } catch (err) {
+      await respond(ctx, event, { error: 'Temporary Failure', code: ERR_TEMPORARY })
+      console.error('clink: sub-dust receive failed:', err)
+      return
+    }
+    await respond(ctx, event, { bolt11: invoice })
+    console.log(`clink: issued sub-dust invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`)
+    return
+  }
 
   let invoice: string
   let swapId: string

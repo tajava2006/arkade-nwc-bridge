@@ -86,6 +86,45 @@ request)` so the kind-9735 receipt verifies (NIP-57 / nips/57.md). The chain:
   to the relays in the 9734 `relays` tag — distinct from our nip44-encrypted
   CLINK receipt on the noffer relay).
 
+### Sub-dust receive (< 330 sats) — non-atomic plain-invoice path
+
+A Boltz reverse swap can't settle below P2TR dust (330 sats): the vHTLC lockup
+vtxo is sub-dust, arkd marks it `VTXO_RECOVERABLE` and refuses to let the claim
+spend it, so the swap strands. This is the receive-side mirror of the send-side
+sub-dust problem (operator-workspace `SUBDUST_LN_PATCH.md`).
+`createLightningInvoice` would reject or strand it.
+
+So `handleOfferRequest` branches on `amount < 330` and instead calls an endpoint
+we added to Boltz (operator workspace `patches/boltz-subdust-receive.patch`,
+`POST /v2/subdust/receive {amount, address}`):
+
+1. Boltz issues a **plain** invoice it collects (no hold).
+2. We reply with that bolt11, same as the normal path.
+3. On settlement Boltz sends a plain vtxo of the same amount to our wallet
+   address — 1:1, **no swap fee** (the payer already paid routing; off-chain
+   transfers are free).
+
+This drops the reverse swap's atomicity. The trust sits on the **paying** side:
+the external third party settles a real invoice with no on-chain guarantee or
+refund, and only then does Boltz deliver the vtxo. The payer carries the
+counterparty risk — this does **not** depend on the ASP and Boltz being one
+operator (and the bridge is neither: it's the standalone user app). Below dust
+there's no atomic alternative anyway, and the amounts are tiny — this is what
+makes "21-sat zap receive" work where every other wallet refuses.
+
+The received vtxo lands sub-dust (the `recoverable` balance bucket): not
+spendable on its own until a settlement round folds it into a ≥dust vtxo (or a
+cooperative exit), like any sub-dust receive. Expected, not a bug.
+
+Not yet wired: the CLINK Payment Receipt. There's no Boltz swap to hook
+`onReverseSettled`, so the sub-dust branch emits no kind-21001 receipt.
+`TODO(clink-ack)` in [`offers.ts`](src/clink/offers.ts): trigger it off the
+incoming-vtxo arrival, or have the endpoint return the LN preimage (then a
+`{res:ok,preimage}` receipt). The receipt is optional per spec and the payer's
+own wallet already confirmed the LN payment, so it's a refinement, not a blocker.
+
+**Status: code complete, not yet end-to-end tested on mainnet.**
+
 ## 4. Onchain onboarding: native boarding vs Boltz chain swap
 
 Symmetric to send, two onchain→VTXO routes exist; we use **native boarding only**.
