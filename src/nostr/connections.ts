@@ -200,6 +200,18 @@ export function isEventProcessed(db: Database, eventId: string): boolean {
   return row !== null
 }
 
+/**
+ * Drop processed_events rows older than `ttlSec`. The table is only a replay
+ * backstop, and an event can't be redelivered once it's past the persistent_sub
+ * resume window (~6 min: MAX_RESUME_LOOKBACK + skew); subscriptions also start
+ * at "now" on boot. So anything older is dead weight — a generous TTL (>> the
+ * window) bounds the table without weakening dedup. Returns rows deleted.
+ */
+export function prunePersistedEvents(db: Database, ttlSec: number): number {
+  const cutoff = Math.floor(Date.now() / 1000) - ttlSec
+  return db.query('DELETE FROM processed_events WHERE processed_at < ?').run(cutoff).changes
+}
+
 export function serviceSecretBytes(conn: Connection): Uint8Array {
   return hexToBytes(conn.serviceSecretHex)
 }

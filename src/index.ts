@@ -17,7 +17,7 @@ import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
-import { listActiveConnections } from './nostr/connections'
+import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
 import { SseHub } from './lib/sse'
 import { AsyncCache } from './lib/cache'
@@ -152,6 +152,20 @@ async function main(): Promise<void> {
   // CLINK ack reconciler interval — assigned once bootReady runs (needs the
   // account key + swaps). Cleared on shutdown.
   let ackReconcilerInterval: ReturnType<typeof setInterval> | undefined
+
+  // Bound the processed_events replay-backstop table: rows past the redelivery
+  // window can't be replayed, so drop anything older than the TTL. Runs at boot
+  // (clears pre-existing bloat) + periodically. Only needs `db`, so it lives out
+  // here rather than in bootReady.
+  const PROCESSED_EVENT_TTL_SEC = 3600
+  prunePersistedEvents(db, PROCESSED_EVENT_TTL_SEC)
+  const eventPrune = setInterval(
+    () => {
+      const n = prunePersistedEvents(db, PROCESSED_EVENT_TTL_SEC)
+      if (n > 0) console.log(`pruned ${n} processed_events row(s)`)
+    },
+    10 * 60 * 1000,
+  )
 
   // Lift the wallet/boltz/nostr bring-up into a function so it can run
   // either at boot (if an account row exists) or post-setup from the web
@@ -308,6 +322,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n${signal} received, shutting down`)
     clearInterval(watchdog)
+    clearInterval(eventPrune)
     if (ackReconcilerInterval) clearInterval(ackReconcilerInterval)
     sseHub.closeAll()
     await web.stop()
