@@ -116,12 +116,14 @@ The received vtxo lands sub-dust (the `recoverable` balance bucket): not
 spendable on its own until a settlement round folds it into a ≥dust vtxo (or a
 cooperative exit), like any sub-dust receive. Expected, not a bug.
 
-Not yet wired: the CLINK Payment Receipt. There's no Boltz swap to hook
-`onReverseSettled`, so the sub-dust branch emits no kind-21001 receipt.
-`TODO(clink-ack)` in [`offers.ts`](src/clink/offers.ts): trigger it off the
-incoming-vtxo arrival, or have the endpoint return the LN preimage (then a
-`{res:ok,preimage}` receipt). The receipt is optional per spec and the payer's
-own wallet already confirmed the LN payment, so it's a refinement, not a blocker.
+CLINK Payment Receipt (kind 21001): there's no Boltz swap to hook
+`onReverseSettled`, so the sub-dust branch persists the ack info in
+`clink_subdust_receipts` (keyed on the invoice payment hash) and
+`reconcileClinkAcks` (boot + 30s, [`offers.ts`](src/clink/offers.ts)) asks boltz
+`GET /v2/subdust/receive/status` whether it settled — if so, publishes
+`{res:ok,preimage}` and deletes the row; a TTL drops never-paid rows. Same
+reconciler also makes the ≥dust ack restart-safe (catches swaps the live
+`onReverseSettled` missed while the bridge was down). Best-effort per spec.
 
 **Status: verified end-to-end on mainnet (2026-06-27)** — noffer sub-dust zap → plain vtxo received.
 

@@ -1,7 +1,15 @@
 import type { Database } from 'bun:sqlite'
 import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, getPublicKey, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
-import { NetworkError, type ArkadeSwaps, type BoltzReverseSwap } from '@arkade-os/boltz-swap'
+import {
+  NetworkError,
+  decodeInvoice,
+  isReverseFinalStatus,
+  isReverseSuccessStatus,
+  type ArkadeSwaps,
+  type BoltzReverseSwap,
+  type BoltzSwapStatus,
+} from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
 
 import { CLINK_OFFER_ID } from '../defaults'
@@ -261,11 +269,10 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
   // Sub-dust receive: a Boltz reverse swap can't settle below dust (the vHTLC
   // lockup vtxo is sub-dust → arkd VTXO_RECOVERABLE → claim strands). Fall back
   // to Boltz's non-atomic plain-invoice path: the payer settles a real invoice
-  // with no on-chain guarantee, trusting Boltz to deliver the vtxo afterward. No
-  // swap, so no swap-keyed CLINK receipt is emitted.
-  // TODO(clink-ack): wire a settlement trigger for sub-dust (incoming-vtxo
-  //   watch, or have boltz return the LN preimage) to send the optional
-  //   kind-21001 Payment Receipt — with preimage if available, else {res:'ok'}.
+  // with no on-chain guarantee, trusting Boltz to deliver the vtxo afterward.
+  // There's no swap, so we persist the ack info keyed on the invoice payment
+  // hash; reconcileClinkAcks later asks boltz whether it settled and sends the
+  // CLINK receipt (with preimage) — see below.
   if (amount < DUST_SATS) {
     let invoice: string
     try {
@@ -276,6 +283,13 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
       console.error('clink: sub-dust receive failed:', err)
       return
     }
+    const paymentHash = decodeInvoice(invoice).paymentHash
+    ctx.db
+      .query(
+        `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, created_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING`,
+      )
+      .run(paymentHash, event.pubkey, event.id, ctx.relay, Math.floor(Date.now() / 1000))
     await respond(ctx, event, { bolt11: invoice })
     console.log(`clink: issued sub-dust invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`)
     return
@@ -331,6 +345,36 @@ interface ReceiptRow {
  * swap) it's a no-op. Best-effort: a down relay means the ack is lost, which
  * is fine — the payer's own wallet already confirmed the LN payment.
  */
+/**
+ * Publish a CLINK Payment Receipt (kind 21001) to the payer on the relay their
+ * request arrived on. Best-effort: a down relay just drops the ack (the payer's
+ * own wallet already confirmed the LN payment). With a preimage it's the spec's
+ * LN-settled receipt; without, the {res:ok} "internal" form.
+ */
+async function publishReceipt(
+  deps: { pool: SimplePool; secretKey: Uint8Array },
+  to: { payer_pubkey: string; request_id: string; relay: string },
+  preimage?: string,
+): Promise<void> {
+  const body = preimage ? { res: 'ok', preimage } : { res: 'ok' }
+  const ciphertext = encryptContent(SCHEME, deps.secretKey, to.payer_pubkey, JSON.stringify(body))
+  const template: EventTemplate = {
+    kind: OFFER_KIND,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ['p', to.payer_pubkey],
+      ['e', to.request_id],
+      ['clink_version', CLINK_VERSION],
+    ],
+    content: ciphertext,
+  }
+  const signed = finalizeEvent(template, deps.secretKey)
+  const [result] = await Promise.allSettled(deps.pool.publish([to.relay], signed))
+  if (result?.status === 'rejected') {
+    console.warn(`clink: receipt publish failed on ${to.relay}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`)
+  }
+}
+
 export async function sendOfferReceipt(
   deps: { pool: SimplePool; db: Database; secretKey: Uint8Array },
   swap: BoltzReverseSwap,
@@ -342,25 +386,102 @@ export async function sendOfferReceipt(
     .get(swap.id)
   if (!row) return // not an offer swap (or already acked)
 
-  const body = swap.preimage ? { res: 'ok', preimage: swap.preimage } : { res: 'ok' }
-  const ciphertext = encryptContent(SCHEME, deps.secretKey, row.payer_pubkey, JSON.stringify(body))
-  const template: EventTemplate = {
-    kind: OFFER_KIND,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      ['p', row.payer_pubkey],
-      ['e', row.request_id],
-      ['clink_version', CLINK_VERSION],
-    ],
-    content: ciphertext,
-  }
-  const signed = finalizeEvent(template, deps.secretKey)
-  const [result] = await Promise.allSettled(deps.pool.publish([row.relay], signed))
-  if (result?.status === 'rejected') {
-    console.warn(`clink: receipt publish failed on ${row.relay}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`)
-  }
+  await publishReceipt(deps, row, swap.preimage)
   deps.db.query('DELETE FROM clink_offer_receipts WHERE swap_id = ?').run(swap.id)
   console.log(`clink: sent payment receipt to ${row.payer_pubkey.slice(0, 8)}… for swap ${swap.id.slice(0, 8)}…`)
+}
+
+interface SubdustReceiptRow {
+  payment_hash: string
+  payer_pubkey: string
+  request_id: string
+  relay: string
+  created_at: number
+}
+
+// Drop sub-dust pending acks the payer never paid (open invoices that expired or
+// were abandoned). The status endpoint only reports `settled`, so age is the
+// backstop. Generous so a still-payable invoice is never dropped early.
+const SUBDUST_ACK_TTL_SECONDS = 24 * 60 * 60
+
+async function subdustReceiveStatus(
+  boltzApiUrl: string,
+  paymentHash: string,
+): Promise<{ settled: boolean; preimage?: string }> {
+  const res = await fetch(`${boltzApiUrl}/v2/subdust/receive/status?paymentHash=${paymentHash}`)
+  if (!res.ok) throw new Error(`subdust status ${res.status}: ${await res.text().catch(() => '')}`)
+  return (await res.json()) as { settled: boolean; preimage?: string }
+}
+
+/**
+ * Boot + periodic CLINK ack reconciler — makes acks restart-safe for BOTH
+ * directions, since the SDK only fires onReverseSettled live (a swap that
+ * settles while the bridge is down never gets its ack otherwise).
+ *
+ *  - ≥dust (clink_offer_receipts): the swap is in the SDK's boltz_swaps mirror
+ *    (re-synced from boltz on boot). Terminal-success → sendOfferReceipt (which
+ *    publishes + deletes the row); terminal-failure → just drop the row.
+ *  - sub-dust (clink_subdust_receipts): no swap, so ask boltz
+ *    (/v2/subdust/receive/status). Settled → publish receipt (+ preimage) and
+ *    delete; past TTL → drop.
+ *
+ * Best-effort and idempotent: rows that the live path already acked are gone, so
+ * they're skipped; one row failing doesn't abort the rest.
+ */
+export async function reconcileClinkAcks(deps: {
+  pool: SimplePool
+  db: Database
+  secretKey: Uint8Array
+  boltzApiUrl: string
+}): Promise<void> {
+  // ≥dust: drive off the small receipts table, PK-lookup boltz_swaps per row.
+  const offerRows = deps.db
+    .query<{ swap_id: string }, []>('SELECT swap_id FROM clink_offer_receipts')
+    .all()
+  for (const { swap_id } of offerRows) {
+    try {
+      const sw = deps.db
+        .query<{ status: string; data: string }, [string]>(
+          'SELECT status, data FROM boltz_swaps WHERE id = ?',
+        )
+        .get(swap_id)
+      if (!sw || !isReverseFinalStatus(sw.status as BoltzSwapStatus)) continue
+      if (isReverseSuccessStatus(sw.status as BoltzSwapStatus)) {
+        await sendOfferReceipt(deps, JSON.parse(sw.data) as BoltzReverseSwap)
+      } else {
+        deps.db.query('DELETE FROM clink_offer_receipts WHERE swap_id = ?').run(swap_id)
+      }
+    } catch (err) {
+      console.warn(`clink: ack reconcile failed for swap ${swap_id.slice(0, 8)}…:`, err)
+    }
+  }
+
+  // sub-dust: ask boltz whether the invoice settled.
+  const now = Math.floor(Date.now() / 1000)
+  const subRows = deps.db
+    .query<SubdustReceiptRow, []>(
+      'SELECT payment_hash, payer_pubkey, request_id, relay, created_at FROM clink_subdust_receipts',
+    )
+    .all()
+  for (const row of subRows) {
+    try {
+      const status = await subdustReceiveStatus(deps.boltzApiUrl, row.payment_hash)
+      if (status.settled) {
+        await publishReceipt(deps, row, status.preimage)
+        deps.db
+          .query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?')
+          .run(row.payment_hash)
+        console.log(`clink: sent sub-dust payment receipt to ${row.payer_pubkey.slice(0, 8)}…`)
+      } else if (now - row.created_at > SUBDUST_ACK_TTL_SECONDS) {
+        deps.db
+          .query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?')
+          .run(row.payment_hash)
+      }
+    } catch (err) {
+      // transient (boltz down) — leave the row, retry next pass
+      console.warn(`clink: sub-dust ack reconcile failed for ${row.payment_hash.slice(0, 8)}…:`, err)
+    }
+  }
 }
 
 type OfferResponseBody = { bolt11: string } | { error: string; code: number; range?: { min: number; max: number } }

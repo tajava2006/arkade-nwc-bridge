@@ -185,6 +185,25 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 8,
+    description: 'clink_subdust_receipts — pending CLINK receipts for sub-dust receives',
+    // Sub-dust receives don't create a Boltz swap (no swap_id), so they can't
+    // ride clink_offer_receipts. Same payer/request/relay info, keyed on the
+    // invoice payment hash instead. The ack reconciler asks boltz
+    // (/v2/subdust/receive/status) whether the invoice settled and, if so,
+    // publishes the receipt and deletes the row. Persisted so a restart between
+    // issue and settle still acks; a TTL pass drops never-paid rows.
+    sql: `
+      CREATE TABLE clink_subdust_receipts (
+        payment_hash TEXT PRIMARY KEY,
+        payer_pubkey TEXT    NOT NULL,
+        request_id   TEXT    NOT NULL,
+        relay        TEXT    NOT NULL,
+        created_at   INTEGER NOT NULL
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

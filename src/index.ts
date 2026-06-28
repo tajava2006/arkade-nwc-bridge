@@ -15,7 +15,7 @@ import { RestArkProvider } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startNostrService } from './nostr/service'
-import { startOfferService, sendOfferReceipt } from './clink/offers'
+import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { listActiveConnections } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
@@ -149,6 +149,10 @@ async function main(): Promise<void> {
     }
   }, RELAY_WATCHDOG_INTERVAL_MS)
 
+  // CLINK ack reconciler interval — assigned once bootReady runs (needs the
+  // account key + swaps). Cleared on shutdown.
+  let ackReconcilerInterval: ReturnType<typeof setInterval> | undefined
+
   // Lift the wallet/boltz/nostr bring-up into a function so it can run
   // either at boot (if an account row exists) or post-setup from the web
   // handler (after the user submits /setup). Same path either way; mutates
@@ -194,6 +198,14 @@ async function main(): Promise<void> {
     // code (see clink/offers.ts). Operator regenerates by hand if it dies.
     const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: cfg.boltzApiUrl })
     console.log(`  noffer         ${offers.snapshot().noffer}`)
+
+    // Restart-safe CLINK acks: catch up on receipts the live onReverseSettled
+    // missed (swaps that settled while we were down) + drive sub-dust acks.
+    const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: cfg.boltzApiUrl }
+    void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile (boot) failed:', err))
+    ackReconcilerInterval = setInterval(() => {
+      void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
+    }, 30_000)
 
     // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
     // Stateless REST; the wallet keeps its own internal one for signing.
@@ -296,6 +308,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n${signal} received, shutting down`)
     clearInterval(watchdog)
+    if (ackReconcilerInterval) clearInterval(ackReconcilerInterval)
     sseHub.closeAll()
     await web.stop()
     if (appState.current.mode === 'ready') {
