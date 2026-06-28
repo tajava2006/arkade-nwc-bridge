@@ -298,10 +298,9 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
   let invoice: string
   let swapId: string
   try {
-    // Same path as NWC make_invoice: Boltz reverse swap → on payment the
-    // SwapManager (boltz.ts) auto-claims the VHTLC into the Ark wallet. The
-    // swap is tracked in the swap repo, so it settles without a bridge
-    // transactions row; it just won't appear in NWC connection history.
+    // ≥dust: a Boltz reverse swap → on payment the SwapManager (boltz.ts)
+    // auto-claims the VHTLC into the Ark wallet. Tracked in the swap repo
+    // (boltz_swaps), so the ack reconciler can look it up; no transactions row.
     const result = await ctx.swaps.createLightningInvoice({ amount, description })
     invoice = result.invoice
     swapId = result.pendingSwap.id

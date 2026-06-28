@@ -54,10 +54,12 @@ src/
   handlers/
     get_info.ts              — capabilities; no notifications advertised
     get_balance.ts           — (available + recoverable) × 1000 msat
-    make_invoice.ts          — reverse swap; amount_msat = on-Ark received
     pay_invoice.ts           — submarine swap one-shot; amount_msat = paid
+                               (+ sub-dust <330 → boltz plain-send, see ln_send.ts)
     lookup_invoice.ts        — connection-scoped SELECT
     list_transactions.ts     — connection-scoped, from/until/limit/offset
+    (make_invoice intentionally NOT supported — receive is CLINK-noffer only,
+     src/clink/; one receive path, less surface. make_invoice → NOT_IMPLEMENTED.)
   lib/
     cache.ts                 — AsyncCache: SWR with dedupe + debounce + listeners
     errors.ts                — NwcError + NIP-47 error code union

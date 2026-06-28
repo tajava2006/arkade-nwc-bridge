@@ -5,7 +5,6 @@ import { handleGetBalance } from '../../src/handlers/get_balance'
 import { handleGetInfo } from '../../src/handlers/get_info'
 import { handleListTransactions } from '../../src/handlers/list_transactions'
 import { handleLookupInvoice } from '../../src/handlers/lookup_invoice'
-import { handleMakeInvoice } from '../../src/handlers/make_invoice'
 import { handlePayInvoice } from '../../src/handlers/pay_invoice'
 import { createConnection, type Connection } from '../../src/nostr/connections'
 import { openTempDb, type TempDb } from '../helpers/db'
@@ -45,7 +44,7 @@ describe('handlers', () => {
       const r = handleGetInfo({ cfg: CFG }) as { network: string; methods: string[] }
       expect(r.network).toBe('mainnet')
       expect(r.methods).toContain('pay_invoice')
-      expect(r.methods).toContain('make_invoice')
+      expect(r.methods).not.toContain('make_invoice') // receive is CLINK-noffer only
     })
 
     test('mutinynet maps to "signet"', () => {
@@ -73,64 +72,6 @@ describe('handlers', () => {
       })
       const r = await handleGetBalance({ wallet })
       expect(r).toEqual({ balance: 200_000 })
-    })
-  })
-
-  describe('make_invoice', () => {
-    test('rejects non-positive amounts with OTHER', async () => {
-      const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-a' }
-      await expect(handleMakeInvoice(deps, { amount: -1 })).rejects.toMatchObject({
-        code: 'OTHER',
-      })
-      await expect(handleMakeInvoice(deps, {})).rejects.toMatchObject({ code: 'OTHER' })
-    })
-
-    test('rejects sub-sat amounts (non-multiple of 1000 msat) with OTHER', async () => {
-      const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b' }
-      await expect(handleMakeInvoice(deps, { amount: 1500 })).rejects.toMatchObject({
-        code: 'OTHER',
-      })
-    })
-
-    test('inserts a row and returns NIP-47 fields with wallet-movement amount', async () => {
-      const conn = newConn(temp)
-      // Client asks for 100 sat. Boltz takes 1 sat fee, 99 sat lands on Ark.
-      const swaps = makeSwapsStub({
-        createLightningInvoice: async (args) => {
-          expect(args.amount).toBe(100)
-          return fakeInvoiceResponse({
-            amount: 99,
-            invoice: 'lnbc1u',
-            paymentHash: 'aa'.repeat(32),
-          })
-        },
-      })
-      const r = (await handleMakeInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-c' },
-        { amount: 100_000, description: 'tea' },
-      )) as Record<string, unknown>
-
-      expect(r.type).toBe('incoming')
-      expect(r.state).toBe('pending')
-      expect(r.invoice).toBe('lnbc1u')
-      expect(r.amount).toBe(99_000) // on-Ark movement, not nominal
-      expect(r.fees_paid).toBe(1_000)
-      expect(r.description).toBe('tea')
-      expect(r.payment_hash).toBe('aa'.repeat(32))
-
-      const row = temp.db
-        .query<{ state: string; amount_msat: number; fees_paid_msat: number; description: string }, []>(
-          `SELECT state, amount_msat, fees_paid_msat, description FROM transactions`,
-        )
-        .get()
-      expect(row).toEqual({
-        state: 'pending',
-        amount_msat: 99_000,
-        fees_paid_msat: 1_000,
-        description: 'tea',
-      })
     })
   })
 

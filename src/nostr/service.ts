@@ -19,7 +19,6 @@ import { decryptContent, encryptContent, pickRequestScheme, type EncryptionSchem
 import { openPersistentSub, type PersistentSub } from './persistent_sub'
 import { handleGetInfo } from '../handlers/get_info'
 import { handleGetBalance } from '../handlers/get_balance'
-import { handleMakeInvoice } from '../handlers/make_invoice'
 import { handlePayInvoice } from '../handlers/pay_invoice'
 import { handleLookupInvoice } from '../handlers/lookup_invoice'
 import { handleListTransactions } from '../handlers/list_transactions'
@@ -296,11 +295,6 @@ async function dispatch(
       return handleGetInfo({ cfg: deps.cfg })
     case 'get_balance':
       return handleGetBalance({ wallet: deps.wallet })
-    case 'make_invoice':
-      return handleMakeInvoice(
-        { swaps: deps.swaps, db: deps.db, conn, eventId: event.id },
-        params,
-      )
     case 'pay_invoice':
       return handlePayInvoice(
         {

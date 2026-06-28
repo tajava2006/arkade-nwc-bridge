@@ -221,7 +221,13 @@ send), so reporting only `available` under-counts. The arkade.money
 UI collapses these two buckets in its main balance number for the
 same reason.
 
-### `make_invoice` (LN → Ark)
+### `make_invoice` (LN → Ark) — REMOVED (not supported)
+> Dropped: receiving is funneled through the CLINK noffer (a public static
+> receive code, `src/clink/`), so the bridge advertises one receive path, not
+> two. `make_invoice` now returns `NOT_IMPLEMENTED`. The flow below is kept for
+> historical context (the ≥dust mechanics still describe how CLINK-offer reverse
+> swaps work via `createLightningInvoice`).
+
 1. msat → sat; reject non-multiple-of-1000.
 2. `swaps.createLightningInvoice({ amount, description })` →
    BOLT11 + payment_hash + expiry. `result.amount` is the post-fee

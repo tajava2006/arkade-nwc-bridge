@@ -273,31 +273,5 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
     TIMEOUT_MS,
   )
 
-  test(
-    'make_invoice creates a real reverse swap (kept last; unpaid → free)',
-    async () => {
-      // Smallest amount that Boltz accepts — keeps the swap cheap to
-      // create and trivial to ignore. Don't pay it; it just expires.
-      const r = await nwcRequest(harness!, 'make_invoice', { amount: 1_000 })
-      expect(r.error).toBeFalsy()
-      const result = r.result as {
-        type: string
-        state: string
-        invoice: string
-        payment_hash: string
-        amount: number
-      }
-      expect(result.type).toBe('incoming')
-      expect(result.state).toBe('pending')
-      expect(result.invoice.startsWith('lnbc')).toBe(true)
-      expect(result.payment_hash).toMatch(/^[0-9a-f]{64}$/)
-      // Boltz reverse-swap fee can be more than the requested amount for
-      // very small invoices, in which case the on-Ark received amount
-      // could be 0 or negative. We don't assert the exact value — just
-      // that the field is a number and the row exists.
-      expect(typeof result.amount).toBe('number')
-    },
-    TIMEOUT_MS * 2,
-  )
 })
 
