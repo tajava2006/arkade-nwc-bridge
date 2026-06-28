@@ -66,11 +66,14 @@ async function sendSubdust(
   const { address } = await subdustFetch<{ address: string }>(
     `${deps.boltzApiUrl}/v2/subdust/address`,
   )
+  // Our own address — boltz plain-sends the funding back here if the LN payment
+  // fails terminally (refund-on-failure).
+  const refundAddress = await deps.wallet.getAddress()
   const txid = await deps.wallet.send({ address, amount: sendSats })
 
   const { preimage } = await subdustFetch<{ paid: boolean; preimage: string }>(
     `${deps.boltzApiUrl}/v2/subdust/send`,
-    { arkTxid: txid, invoice },
+    { arkTxid: txid, invoice, refundAddress },
   )
   return { amount: sendSats, preimage, txid }
 }
