@@ -2,8 +2,10 @@
 
 A self-hosted [NIP-47 Nostr Wallet Connect](https://github.com/nostr-protocol/nips/blob/master/47.md)
 wallet service that gives a nostr client (Amethyst, Damus, Primal,
-Alby, …) Lightning send/receive without needing to run a Lightning
-node. The Lightning side is handled via [Boltz](https://docs.boltz.exchange)
+Alby, …) Lightning payments without needing to run a Lightning node.
+Clients **send** over NWC (`pay_invoice`); **receiving** is over a
+static [CLINK noffer](RECEIVE_DESIGN.md), not per-client NWC invoices.
+The Lightning side is handled via [Boltz](https://docs.boltz.exchange)
 submarine/reverse swaps against an [Ark Protocol](https://arkadeos.com)
 wallet.
 
@@ -29,27 +31,23 @@ nostr client  ──┐
        ║   machine, 24/7)     ║
        ║                      ║      ┌────────────┐
        ║                      ║◄────►│ Ark server │
-       ╚══════════════════════╝      │ (arkade.   │
-                                     │  computer) │
-                                     └────────────┘
+       ╚══════════════════════╝      └────────────┘
 ```
 
 Funds live as VTXOs in your Ark wallet. Every Lightning send hands
 sats to Boltz over Ark in exchange for a Lightning payment; every
-Lightning receive does the reverse. The bridge runs the swap state
-machine for you and exposes the result over NWC.
+Lightning receive does the reverse. Sends arrive over NWC
+(`pay_invoice`); receives come through the CLINK noffer. The bridge
+runs the swap state machine for you either way.
 
 ## Setup
 
 ### Prerequisites
 
 - [Bun](https://bun.com/) ≥ 1.3
-- An Ark wallet identity. You can either:
-  - Restore your [arkade.money](https://arkade.money/) wallet with
-    delegation **disabled** in settings, and copy out the `nsec`
-    backup, **or**
-  - Let the bridge generate a fresh `nsec` and fund the resulting Ark
-    address.
+- An Ark wallet identity — either paste an existing `nsec1…` at
+  `/setup`, or let the bridge generate a fresh one and fund the
+  resulting Ark address.
 
 ### Install + run
 
@@ -150,7 +148,6 @@ NIP-47 methods implemented:
 
 - `get_info`
 - `get_balance`
-- `make_invoice` (Lightning → Ark via Boltz reverse swap)
 - `pay_invoice` (Ark → Lightning via Boltz submarine swap)
 - `lookup_invoice`
 - `list_transactions`
@@ -158,14 +155,35 @@ NIP-47 methods implemented:
 `notifications` (kind 23197) is intentionally not advertised —
 clients fall back to polling, which is fine for the zap use case.
 
+### Receiving
+
+There is no `make_invoice` — NWC clients **send** only. Receiving runs
+through a single static [CLINK noffer](RECEIVE_DESIGN.md) (Lightning),
+shown on the dashboard alongside the Ark address (offchain L2) and the
+onchain boarding address. A payer scans the noffer, names an amount, and
+the invoice settles onto Ark.
+
+Why one receive path instead of per-client NWC invoices: sub-dust
+send/receive needs custom Boltz config, so funneling every receive
+through one place means there's only one side to change and far less
+surface to get wrong. See [`RECEIVE_DESIGN.md`](RECEIVE_DESIGN.md) §3.
+
+### Sub-dust amounts
+
+Lightning works **both directions** below the ~330-sat dust limit
+(zap-sized sends and receives). Sub-dust swaps **give up atomicity** —
+there's no vHTLC to hang the swap on at those amounts — an acceptable
+trade for tiny sums. Mechanics in [`SEND_DESIGN.md`](SEND_DESIGN.md) and
+[`RECEIVE_DESIGN.md`](RECEIVE_DESIGN.md).
+
 The web UI surfaces these views:
 
 | Page | What's there |
 |---|---|
 | `/setup` | First-run identity flow (paste or generate nsec). Shown automatically until an account exists; redirects to `/` once configured. |
-| `/` | Balance, Ark address, active-connection count, settled-transaction count. Balance refreshes in place over SSE — first visit may briefly show the last cached value before the live one lands. |
+| `/` | Balance, the three receive handles (Ark address, CLINK noffer with live relay status, onchain boarding address), active-connection count, settled-transaction count. Balance refreshes in place over SSE — first visit may briefly show the last cached value before the live one lands. |
 | `/connections` | Active and revoked connections; create / revoke from here. Top panel shows the bootstrap relays and the current outbox set (what new connections will use); each connection row has a live `N/M ●` relay badge that updates in place as relays come and go. |
-| `/connections/:id` | Per-connection NWC log (every `make_invoice` / `pay_invoice` made through that connection) plus a per-relay status table for that connection's baked-in relay set. |
+| `/connections/:id` | Per-connection NWC log (every `pay_invoice` made through that connection) plus a per-relay status table for that connection's baked-in relay set. |
 | `/history` | Raw Ark wallet history — every onchain/offchain movement the wallet sees, regardless of NWC. Same stale-while-revalidate behavior as the dashboard. |
 
 The pages are still server-rendered HTML; the live updates come
@@ -208,9 +226,6 @@ small marker slots. No client framework, no build step.
 
 ## Related projects
 
-- [arkade-os/wallet](https://github.com/arkade-os/wallet) — the
-  reference Ark Wallet web app. Same Lightning plumbing under the
-  hood. Useful for managing the same identity outside NWC.
 - [arkade-os/ts-sdk](https://github.com/arkade-os/ts-sdk) — the Ark
   protocol TypeScript SDK this bridge builds on.
 - [Boltz Ark docs](https://docs.boltz.exchange) — the swap provider.
@@ -221,7 +236,3 @@ This is a personal hack; PRs welcome but expect them to sit while
 the author tests on mainnet with small amounts. See
 [`DESIGN.md`](DESIGN.md) for why things are the way they are and
 [`CLAUDE.md`](CLAUDE.md) for the file map and conventions.
-
-## License
-
-MIT.
