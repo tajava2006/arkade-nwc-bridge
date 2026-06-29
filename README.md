@@ -192,13 +192,21 @@ small marker slots. No client framework, no build step.
 
 ## Operational notes
 
-- **24/7 uptime expected.** The bridge auto-renews your VTXOs before
-  they expire (3-day threshold by default). Extended downtime means
-  VTXOs get swept by the Ark server — recoverable, but a hassle. If
-  you can't keep it up, this isn't the right tool.
-- **`recoverable` balance is normal.** Small change outputs that
-  aren't worth a unilateral exit on their own. They're still
-  spendable offchain; the balance you see already includes them.
+- **24/7 uptime expected.** The bridge auto-renews your VTXOs as they
+  near expiry. If it stays offline too long the Ark server sweeps them
+  — but there's nothing to recover by hand: the next settlement round
+  (run automatically once it's back up) folds them into fresh VTXOs.
+  The cost isn't manual work, it's trust — while swept you've given up
+  the unilateral-exit guarantee on those funds until the refresh
+  restores it. If you can't keep it up, this isn't the right tool.
+- **`recoverable` balance counts but isn't spendable as-is.** These are
+  swept VTXOs — they've lost their unilateral-exit backing (a batch
+  expired, or the amount is too small to exit on its own). The displayed
+  balance includes them, but the wallet keeps them out of ordinary
+  offchain sends: spending one would taint the exit path of whatever it
+  mixes with. A refresh re-mints them into clean, spendable VTXOs —
+  automatically over time, or at once via a consolidate-all refresh or a
+  cooperative (onchain) offboard.
 - **Boltz takes a fee** on every Lightning send (currently ~0.1%
   submarine, ~0.25% reverse). You'll see the gap as `fees_paid` in
   the per-connection history.
