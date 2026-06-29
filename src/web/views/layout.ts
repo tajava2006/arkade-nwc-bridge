@@ -102,6 +102,12 @@ const LIVE_SCRIPT = `<script>
 (function () {
   if (typeof EventSource === 'undefined') return
   var es = new EventSource('/events')
+  // Close the stream the instant we navigate away. Every full page load opens
+  // a fresh /events; an SSE response never completes, so a lingering one keeps
+  // its socket. Left open they pile up against the browser's 6-per-origin
+  // HTTP/1.1 cap and the 7th navigation stalls ~6s waiting for a slot. Closing
+  // on pagehide keeps it at one open stream at a time.
+  window.addEventListener('pagehide', function () { es.close() })
   function swap(selector, html) {
     document.querySelectorAll(selector).forEach(function (el) {
       el.innerHTML = html
