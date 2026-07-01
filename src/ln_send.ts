@@ -63,8 +63,11 @@ async function sendSubdust(
   const feeSats = Math.ceil((invoiceSats * fees.submarine.percentage) / 100)
   const sendSats = invoiceSats + feeSats
 
+  // Per-invoice funding address: Boltz derives it from this invoice's payment
+  // hash, so the funding we're about to make can only ever pay THIS invoice (a
+  // vtxo Boltz holds for any other reason won't match). See SubdustRouter.
   const { address } = await subdustFetch<{ address: string }>(
-    `${deps.boltzApiUrl}/v2/subdust/address`,
+    `${deps.boltzApiUrl}/v2/subdust/address?invoice=${encodeURIComponent(invoice)}`,
   )
   // Our own address — boltz plain-sends the funding back here if the LN payment
   // fails terminally (refund-on-failure).
