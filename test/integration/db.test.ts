@@ -24,6 +24,7 @@ describe('database migrations', () => {
       'boltz_swaps',
       'clink_offer',
       'clink_offer_receipts',
+      'clink_subdust_receipts',
       'connections',
       'offboards',
       'processed_events',
@@ -40,7 +41,7 @@ describe('database migrations', () => {
       .all()
     // Bumps here are intentional. If you added a migration without
     // realizing, this test surfaces it.
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
   })
 
   test('re-opening the same db is idempotent (no double-apply)', () => {
@@ -52,7 +53,7 @@ describe('database migrations', () => {
       const count = db2
         .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM schema_migrations')
         .get()
-      expect(count?.c).toBe(7)
+      expect(count?.c).toBe(9)
     } finally {
       db2.close()
     }

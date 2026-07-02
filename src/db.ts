@@ -204,6 +204,30 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 9,
+    description: 'zap columns on clink receipt tables — NIP-57 zap (9735) support',
+    // A CLINK offer request can carry a NIP-57 zap payload (a kind-9734 event
+    // in the `zap` field). When it does, we mint a descriptionHash invoice
+    // committing SHA256(the exact 9734 string) and, on settlement, publish a
+    // kind-9735 zap receipt to the relays named in the 9734. Both are needed at
+    // settle time and settle happens later (possibly after a restart), so we
+    // persist them alongside the existing receipt rows:
+    //   zap_request — the exact 9734 JSON string (byte-identical to what the
+    //                 descriptionHash was computed over, so it doubles as the
+    //                 9735 `description` tag: SHA256(it) == invoice hash).
+    //   zap_invoice — the BOLT11, needed for the 9735 `bolt11` tag (not
+    //                 reconstructable from the payment hash).
+    // Both NULL for non-zap (plain spontaneous) receives — those still only get
+    // the CLINK Payment Receipt, no 9735. Nullable ADD COLUMN, so pre-zap rows
+    // and the whole plain path are unaffected.
+    sql: `
+      ALTER TABLE clink_offer_receipts   ADD COLUMN zap_request TEXT;
+      ALTER TABLE clink_offer_receipts   ADD COLUMN zap_invoice TEXT;
+      ALTER TABLE clink_subdust_receipts ADD COLUMN zap_request TEXT;
+      ALTER TABLE clink_subdust_receipts ADD COLUMN zap_invoice TEXT;
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

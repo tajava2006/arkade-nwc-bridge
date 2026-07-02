@@ -18,6 +18,7 @@ import { openPersistentSub, type PersistentSub } from '../nostr/persistent_sub'
 import { normalizeRelayUrl, type OutboxWatcher } from '../nostr/outbox'
 import type { RelayStatus } from '../lib/relay_status'
 import { nofferEncode, nofferDecode, OfferPriceType } from './nip19_offer'
+import { validateZapRequest, zapDescriptionHash, publishZapReceipt } from './zap'
 
 // CLINK Offers (noffer) receiver — the *server* half the SDK doesn't ship.
 // One static spontaneous-price offer served under the account key: a payer
@@ -31,8 +32,10 @@ import { nofferEncode, nofferDecode, OfferPriceType } from './nip19_offer'
 // point of contact: if it dies the operator regenerates by hand (dashboard
 // shows its status). Spec: reference/CLINK/specs/clink-offers.md.
 //
-// Phase 2 (not here): NIP-57 zap payload (9734) + 9735 receipt on settlement,
-// and the optional post-payment receipt (kind 21001 {res:ok,preimage}).
+// NIP-57 zaps: a request may carry a kind-9734 in its `zap` field; we mint a
+// descriptionHash invoice for it and publish a 9735 receipt on settlement
+// (clink/zap.ts). The optional post-payment CLINK receipt (kind 21001
+// {res:ok,preimage}) is sent for every offer swap, zap or not.
 
 const OFFER_KIND = 21001
 const CLINK_VERSION = '1'
@@ -124,10 +127,14 @@ export function startOfferService(deps: OfferServiceDeps): OfferService {
   if (stored) {
     try {
       const dec = nofferDecode(stored)
-      if (dec.pubkey === pub) {
+      if (dec.pubkey === pub && dec.offer === CLINK_OFFER_ID) {
         current = { noffer: stored, relay: dec.relay }
-      } else {
+      } else if (dec.pubkey !== pub) {
         console.warn('clink: stored noffer pubkey != account key — regenerating')
+      } else {
+        // Offer id changed under us (e.g. the zap_ prefix switch). The served
+        // code must advertise the id the handler actually accepts, so re-mint.
+        console.warn(`clink: stored noffer id '${dec.offer}' != '${CLINK_OFFER_ID}' — regenerating`)
       }
     } catch (err) {
       console.warn('clink: stored noffer could not be decoded — regenerating:', err)
@@ -201,11 +208,18 @@ interface HandlerCtx {
  * runs the ASP/Boltz. Below dust there is no atomic alternative anyway (the
  * vHTLC claim is impossible), and the amounts are tiny.
  */
-async function requestSubdustInvoice(boltzApiUrl: string, amount: number, address: string): Promise<string> {
+async function requestSubdustInvoice(
+  boltzApiUrl: string,
+  amount: number,
+  address: string,
+  descriptionHash?: string,
+): Promise<string> {
   const res = await fetch(`${boltzApiUrl}/v2/subdust/receive`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ amount, address }),
+    // descriptionHash (hex) present iff this is a zap: Boltz mints a plain
+    // invoice committing it, so the 9735 we publish on settlement verifies.
+    body: JSON.stringify({ amount, address, ...(descriptionHash ? { descriptionHash } : {}) }),
   })
   if (!res.ok) {
     throw new Error(`subdust/receive ${res.status}: ${await res.text().catch(() => '')}`)
@@ -250,16 +264,22 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     return
   }
 
-  // NIP-57 zap (payload.zap = a kind-9734 event) is intentionally NOT handled
-  // here: a real zap requires minting a descriptionHash invoice (so the 9735
-  // receipt verifies) and the @arkade-os/boltz-swap SDK doesn't pass
-  // descriptionHash through to Boltz (the backend supports it; the wrapper
-  // drops it). Until that lands upstream we don't advertise zap (offer id is
-  // not `zap_`-prefixed), so well-behaved payers won't send a zap payload; if
-  // one arrives we fall back to a plain spontaneous payment per the spec.
-  // TODO(clink-zap): on SDK descriptionHash support → validate the 9734
-  // (NIP-57 Appendix D), mint a descriptionHash invoice, publish kind 9735 on
-  // settlement, switch the offer id to `zap_default`.
+  // NIP-57 zap: payload.zap is a stringified kind-9734. Validate it (Appendix
+  // D) and, if good, commit SHA256(the exact zap string) into the invoice as a
+  // descriptionHash so the kind-9735 receipt we publish on settlement verifies.
+  // A present-but-invalid zap is downgraded to a plain payment (logged), never
+  // rejected — completing the payment beats blocking it over a receipt. Same
+  // for a missing zap on this zap_-prefixed offer (spec: treat as spontaneous).
+  const servicePub = getPublicKey(ctx.secretKey)
+  let zap: { request: string; descriptionHash: string } | undefined
+  if (typeof payload.zap === 'string' && payload.zap.length > 0) {
+    const v = validateZapRequest(payload.zap, amount, servicePub)
+    if (v.ok) {
+      zap = { request: payload.zap, descriptionHash: zapDescriptionHash(payload.zap) }
+    } else {
+      console.warn(`clink: ignoring invalid zap from ${event.pubkey.slice(0, 8)}… (${v.reason}) — plain payment`)
+    }
+  }
 
   const description =
     typeof payload.description === 'string' && payload.description.length <= 100
@@ -277,7 +297,7 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     let invoice: string
     try {
       const address = await ctx.wallet.getAddress()
-      invoice = await requestSubdustInvoice(ctx.boltzApiUrl, amount, address)
+      invoice = await requestSubdustInvoice(ctx.boltzApiUrl, amount, address, zap?.descriptionHash)
     } catch (err) {
       await respond(ctx, event, { error: 'Temporary Failure', code: ERR_TEMPORARY })
       console.error('clink: sub-dust receive failed:', err)
@@ -286,10 +306,18 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     const paymentHash = decodeInvoice(invoice).paymentHash
     ctx.db
       .query(
-        `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, created_at)
-         VALUES (?, ?, ?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING`,
+        `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING`,
       )
-      .run(paymentHash, event.pubkey, event.id, ctx.relay, Math.floor(Date.now() / 1000))
+      .run(
+        paymentHash,
+        event.pubkey,
+        event.id,
+        ctx.relay,
+        zap?.request ?? null,
+        zap ? invoice : null,
+        Math.floor(Date.now() / 1000),
+      )
     await respond(ctx, event, { bolt11: invoice })
     console.log(`clink: issued sub-dust invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`)
     return
@@ -301,7 +329,7 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     // ≥dust: a Boltz reverse swap → on payment the SwapManager (boltz.ts)
     // auto-claims the VHTLC into the Ark wallet. Tracked in the swap repo
     // (boltz_swaps), so the ack reconciler can look it up; no transactions row.
-    const result = await ctx.swaps.createLightningInvoice({ amount, description })
+    const result = await ctx.swaps.createLightningInvoice({ amount, description, descriptionHash: zap?.descriptionHash })
     invoice = result.invoice
     swapId = result.pendingSwap.id
   } catch (err) {
@@ -321,10 +349,18 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
   // Keyed on swap id; the settlement hook (sendOfferReceipt) consumes it.
   ctx.db
     .query(
-      `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, created_at)
-       VALUES (?, ?, ?, ?, ?) ON CONFLICT(swap_id) DO NOTHING`,
+      `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(swap_id) DO NOTHING`,
     )
-    .run(swapId, event.pubkey, event.id, ctx.relay, Math.floor(Date.now() / 1000))
+    .run(
+      swapId,
+      event.pubkey,
+      event.id,
+      ctx.relay,
+      zap?.request ?? null,
+      zap ? invoice : null,
+      Math.floor(Date.now() / 1000),
+    )
 
   await respond(ctx, event, { bolt11: invoice })
   console.log(`clink: issued invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`)
@@ -334,6 +370,10 @@ interface ReceiptRow {
   payer_pubkey: string
   request_id: string
   relay: string
+  // Present only for zap requests: the exact 9734 string + the BOLT11 it was
+  // committed into, needed to publish the 9735 receipt on settlement.
+  zap_request: string | null
+  zap_invoice: string | null
 }
 
 /**
@@ -380,12 +420,15 @@ export async function sendOfferReceipt(
 ): Promise<void> {
   const row = deps.db
     .query<ReceiptRow, [string]>(
-      'SELECT payer_pubkey, request_id, relay FROM clink_offer_receipts WHERE swap_id = ?',
+      'SELECT payer_pubkey, request_id, relay, zap_request, zap_invoice FROM clink_offer_receipts WHERE swap_id = ?',
     )
     .get(swap.id)
   if (!row) return // not an offer swap (or already acked)
 
   await publishReceipt(deps, row, swap.preimage)
+  if (row.zap_request && row.zap_invoice) {
+    await publishZapReceipt(deps, row.zap_request, row.zap_invoice, swap.preimage)
+  }
   deps.db.query('DELETE FROM clink_offer_receipts WHERE swap_id = ?').run(swap.id)
   console.log(`clink: sent payment receipt to ${row.payer_pubkey.slice(0, 8)}… for swap ${swap.id.slice(0, 8)}…`)
 }
@@ -395,6 +438,8 @@ interface SubdustReceiptRow {
   payer_pubkey: string
   request_id: string
   relay: string
+  zap_request: string | null
+  zap_invoice: string | null
   created_at: number
 }
 
@@ -459,7 +504,7 @@ export async function reconcileClinkAcks(deps: {
   const now = Math.floor(Date.now() / 1000)
   const subRows = deps.db
     .query<SubdustReceiptRow, []>(
-      'SELECT payment_hash, payer_pubkey, request_id, relay, created_at FROM clink_subdust_receipts',
+      'SELECT payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at FROM clink_subdust_receipts',
     )
     .all()
   for (const row of subRows) {
@@ -467,6 +512,9 @@ export async function reconcileClinkAcks(deps: {
       const status = await subdustReceiveStatus(deps.boltzApiUrl, row.payment_hash)
       if (status.settled) {
         await publishReceipt(deps, row, status.preimage)
+        if (row.zap_request && row.zap_invoice) {
+          await publishZapReceipt(deps, row.zap_request, row.zap_invoice, status.preimage)
+        }
         deps.db
           .query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?')
           .run(row.payment_hash)

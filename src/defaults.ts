@@ -65,10 +65,16 @@ export const OUTBOX_INITIAL_TIMEOUT_MS = 10_000
 // TLV 1 a list so a static code can survive any one relay dying; until both
 // ends support it, multi-relay on our side buys nothing.
 //
-// Opaque offer id (noffer TLV 2). One spontaneous-price offer (payer names
-// the amount). Not `zap`-prefixed yet: NIP-57 zap (handle the 9734 payload +
-// publish the 9735 receipt on settlement) is a later phase — see offers.ts.
-export const CLINK_OFFER_ID = 'default'
+// Opaque offer id (noffer TLV 2). One spontaneous-price offer (payer names the
+// amount). `zap_`-prefixed per the CLINK spec (§NIP-57 Zaps) to signal that
+// this offer accepts a NIP-57 zap payload — payer wallets seeing the prefix
+// know they may include a kind-9734 in the `zap` field, which we commit into a
+// descriptionHash invoice and answer on settlement with a kind-9735 receipt
+// (see offers.ts / zap.ts). A request without a zap payload is still served as
+// a plain spontaneous payment. Changing this constant invalidates any
+// previously minted noffer (the id is baked into the code); startOfferService
+// re-mints on boot when the stored code's id no longer matches.
+export const CLINK_OFFER_ID = 'zap_default'
 
 export const HTTP_BIND = '127.0.0.1'
 export const HTTP_PORT = 4282
