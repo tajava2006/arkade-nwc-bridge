@@ -32,6 +32,7 @@ vtxo를 온체인까지 풀어내고(unroll), CSV 대기 후, 유저 단독 제�
 - degraded 부팅 모드(ASP 없이 뜨기)는 **선행 조건** 맞음.
 - 스텁 인덱서 만드는 방향 맞음. 단일 브랜치(하위작업 #08)로 충분하다고 판단 — 클래스 하나 + 테스트 크기.
 - esplora 의존 탈피(정확히는: 유저가 자기 mempool 인스턴스 URL을 지정할 수 있게) — **백로그**. #06에서 Config 필드로 설계해두면 코드는 사실상 공짜가 되고, 남는 건 문서화/설정 UI뿐.
+- **/exit 실행은 vtxo 단위 강제** (2026-07-04, #02 실측 후 확정): 탈출 비용이 vtxo마다 극단적으로 다르므로(660 sats vtxo는 dust 이상이어도 온체인 tx 두세 번 fee로 소멸; 반대로 깊은 체인의 큰 vtxo도 feerate에 따라 손해) 일괄 "전체 탈출" 실행은 두지 않는다. vtxo별로 **브로드캐스트할 tx 개수와 총 vByte를 그림과 숫자로** 보여 유저가 "이건 빼는 게 더 손해"를 가늠하게 한다.
 
 ## 2. 코드 검증 결과 (설계 근거 — 재검증 불필요하도록 기록)
 
@@ -150,12 +151,12 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ### Phase 0 — 검증 스파이크 (여기서 죽으면 플랜 수정이 제일 싸다)
 
-- ⬜ **#01 `exit/01-spike-package-broadcast`** (S)
+- ✅ **#01 `exit/01-spike-package-broadcast`** (S)
   `POST {esplora}/txs/package` 실지원 검증: `mempool.arkade.sh/api`, `mempool.space/api` probe(유효하지 않은 패키지로 404 vs 파싱에러 판별). 실제 1P1C 성공 확인은 docker 미가용으로 #15 드릴로 이월(스크립트 `--live` 모드로 준비).
   산출: `test/spike/package_broadcast.spike.ts` + §7 결정 기록(esplora 우선순위 리스트 확정, 전멸 시 bitcoind `submitpackage` 폴백을 #09 스코프에 추가).
   DoD: 결정 기록 작성됨.
 
-- ⬜ **#02 `exit/02-spike-offline-finalize`** (M)
+- ✅ **#02 `exit/02-spike-offline-finalize`** (M)
   핵심 디리스킹. 현재 mainnet vtxo로 chain+virtualTxs를 받아 로컬 JSON으로 덤프 → 인라인 스텁으로 `Session` 구성 → **`do()` 호출 없이** `next()` 드라이런: TREE `tapKeySig` finalize, ARK/CHECKPOINT `finalize()` 성공 확인. 페이지네이션 동작 확인. 증명 용량 실측. 타이밍 프로브: settle/send 직후 `getVirtualTxs`가 완비 PSBT를 주기까지 지연 측정 → ProofSync 백오프 파라미터.
   산출: `test/spike/offline_finalize.spike.ts` + §7 기록(용량 표, 타이밍, 라운드산/preconfirmed산 vtxo 각각 통과 여부). 덤프는 로컬 보관(mainnet txid가 지갑 역사를 드러내므로 **fixture 커밋 금지** — 커밋용 fixture는 #15 regtest에서 채취).
   DoD: vtxo 2종(라운드 산출, preconfirmed) 드라이런 통과.
@@ -208,15 +209,15 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 ### Phase 4 — /exit 탭 UI
 
 - ⬜ **#12 `exit/12-ui-tab`** (M)
-  nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · 예상 비용 · sub-dust 경제성 경고. 서버 렌더 우선(라이브는 #13).
+  nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · **탈출 견적 = 브로드캐스트할 tx/패키지 개수 + 총 vByte + 현재 feerate 기준 예상 sats + 가치 대비 %** · **경제성 판정("빼는 게 더 손해" 명시 — sub-dust만이 아니라 660 sats류 저액도, 깊은 체인의 고액도 feerate 따라 해당)**. 서버 렌더 우선(라이브는 #13).
   DoD: ready/degraded 양쪽에서 렌더.
 
 - ⬜ **#13 `exit/13-ui-stepper`** (M)
-  요구 10의 그림. vtxo별 수직 스테퍼: commitment(항상 온체인)→TREE…→CHECKPOINT/ARK→vtxo tx, 단계별 ✅컨펌/🕐멤풀/⬜대기 → `WAIT: CSV n/총` 카운트다운 → `SWEEP → 주소`. SSE 라이브 갱신(기존 data-슬롯 패턴).
+  요구 10의 그림. vtxo별 수직 스테퍼: commitment(항상 온체인)→TREE…→CHECKPOINT/ARK→vtxo tx, 단계별 ✅컨펌/🕐멤풀/⬜대기 + **단계별 vsize 표기(합계가 #12 견적과 일치)** → `WAIT: CSV n/총` 카운트다운 → `SWEEP → 주소`. SSE 라이브 갱신(기존 data-슬롯 패턴). 이 그림이 "몇 번을 브로드캐스트해야 하는지"의 시각 답이다.
   DoD: 진행 중 exit이 실시간으로 단계 이동.
 
 - ⬜ **#14 `exit/14-ui-controls`** (M)
-  실행 컨트롤: vtxo별 [탈출 시작] / [전체 탈출] / [Sweep] POST + 확인 다이얼로그(총비용·소요 단계·비가역 고지) + 재개 상태 표시. CPFP 펀딩 패널: nsec P2TR 주소 + QR(기존 qr.ts) + 잔액 + 견적 대비 부족 경고 — degraded에서도 동작.
+  실행 컨트롤: **실행은 반드시 vtxo 단위** — vtxo별 [탈출 시작]/[Sweep]만 두고 일괄 [전체 탈출] 버튼은 두지 않는다(§1 추가 확정: 경제성이 vtxo마다 달라 개별 판단 강제). 확인 다이얼로그(그 vtxo의 tx 개수·총 vB·예상 비용·비가역 고지) + 재개 상태 표시. Sweep은 unroll 완료된 vtxo들을 한 tx 배치 입력으로 묶는 것 유지(수수료 분담 — 탈출 실행 결정과 무관한 절약). CPFP 펀딩 패널: nsec P2TR 주소 + QR(기존 qr.ts) + 잔액 + 견적 대비 부족 경고 — degraded에서도 동작.
   DoD: regtest에서 버튼만으로 exit 1건 완주 가능한 상태.
 
 ### Phase 5 — 드릴 + 문서
