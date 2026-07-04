@@ -238,11 +238,12 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 - **만료 race.** expiry 임박 vtxo는 unroll해도 ASP sweep과 경쟁. UI는 카운트다운으로 "여유 있을 때 시작"을 유도하는 것까지가 인프라 몫.
 - **SDK 업그레이드 취약면.** `getVirtualTxs` 포맷/finalize 규칙 변경 시 vault의 옛 PSBT와 어긋날 수 있음 → #02 스파이크 스크립트를 `update-refs.sh` 후 회귀 체크로 상시 활용.
 - **fixture 프라이버시.** mainnet 덤프(txid·PSBT)는 지갑 역사 노출 → 커밋 금지, regtest 채취분만 커밋.
+- **체인 깊이 = 탈출 비용 (#02 실측).** preconfirmed 홉이 쌓일수록 unroll 패키지 수가 선형 증가(운영 지갑 실측: 53홉 → ~32,000vB). settle이 체인을 리셋하므로 "주기적 refresh는 탈출 보험료"라는 관계를 UI(#11/#12)가 표면화해야 하고, griefing 이슈로 꺼둔 consolidate-all Refresh의 재활성 검토(arkd #1136 해소 후)와도 엮인다.
 
 ## 7. 결정 기록 (스파이크가 채움)
 
 - [x] #01 (2026-07-04): **esplora 우선순위 = `["https://mempool.space/api", "https://mempool.arkade.sh/api"]`** — 프로브 결과 둘 다 `POST /txs/package` 지원, bitcoind `submitpackage` RPC 직결 확인(`[]` → RPC -8 count 에러 릴레이; garbage는 mempool.space가 자체 검증 레이어에서 반려, arkade는 RPC -4 릴레이). 제3자(mempool.space) 1순위 — ASP 적대 시나리오에서 Ark 생태계 독립 인프라 우선, 폴링(5초 1회)은 rate limit 여유. **bitcoind 폴백 = 당장 불필요.** regtest 라이브 1P1C는 이 머신 docker 미가용으로 **#15 드릴로 이월**(스크립트 `--live <base> <parentHex> <childHex>` 모드 준비됨). 정책 리스크 추가 확인: arkd 트리 tx는 **v3(TRUC) + 제로값 P2A**로 생성(`arkd pkg/ark-lib/tree/builder.go:222`의 `psbt.New(..., 3, 0, ...)`, `txutils/anchor.go:13-22`), SDK CPFP child도 v3(`ts-sdk src/wallet/onchain.ts:249`) → TRUC/ephemeral-dust 정합 모양.
-- [ ] #02: 증명 용량 실측 = (미정) / settle→완비 PSBT 지연 = (미정) / 페이지 크기 = (미정)
+- [x] #02 (2026-07-04, **운영 지갑 mainnet 실검증 통과**): 운영 vtxo 1개(830,863 sats, preconfirmed)의 chain을 `--address` 모드로 덤프 → **107/107 tx 오프라인 finalize 성공 + 전부 P2A 앵커 확인 + 실제 `Unroll.Session.next()`가 스텁 indexer 위에서 finalize된 UNROLL 패키지 생성**. DoD의 "2종" 충족: chain에 TREE 3(=tapKeySig 경로) + ARK 49/CHECKPOINT 55(=finalize() 경로) 모두 포함. 실측: chain refs 119 → unique 107(단일 vtxo 안에서도 DAG dedup 발생), 증명 106.1 KB(base64), ARK ~217vB·CHECKPOINT ~174vB. **핵심 함의 — 체인 깊이 = 탈출 비용**: 이 vtxo는 refresh 없이 zap을 53홉 쌓은 상태라 unroll에 ~107패키지 ≈ 총 ~32,000vB → 1 sat/vB에서도 ~32k sats(가치의 ~4%), 10 sat/vB면 ~39%. settle(자동갱신) 직후엔 chain이 TREE-leaf 수준(3~5 tx)으로 리셋되어 비용이 급감 — #11 견적기와 /exit UI가 이 관계를 반드시 표면화할 것(refresh 비활성 트레이드오프). 스파이크 모드 4종: `--db`(nsec→스크립트 도출)/`--address`(주소만; 증명은 두 모드 다 공개 인덱서에서)/`--replay`(저장 덤프만으로 오프라인 재검증 — SDK 범프 후 회귀용)/`--watch`(증명 가용 지연 측정; 미실측 — #04는 generic backoff로 흡수). 부수 확인: ① `ReadonlyWallet.getVtxos`는 repo-first라 fresh InMemory repo에선 빈 결과 — vtxo 목록은 `RestIndexerProvider.getVtxos({scripts, spendableOnly∪recoverableOnly})` 직접 조회(#04 반영). ② bun 1.3 콜드 캐시에서 폴리필 없이 SDK import 시 1회성 크래시 — `src/polyfills` 선-import 관례를 #07 degraded 경로에도 유지. 덤프는 워크트리 `data/exit-spike/`(gitignore) 전용 — 커밋 금지.
 - [ ] #03: SDK `serializeVtxo` 패키지 export 여부 = (미정)
 
 ## 8. 백로그 (에픽 스코프 밖)
