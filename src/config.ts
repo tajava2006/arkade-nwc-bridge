@@ -7,6 +7,7 @@ export interface Config {
   network: defaults.Network
   arkServerUrl: string
   boltzApiUrl: string
+  esploraUrls: readonly string[]
   httpBind: string
   httpPort: number
   dbPath: string
@@ -24,6 +25,10 @@ export function loadConfig(): Config {
     network: overrides.network ?? defaults.NETWORK,
     arkServerUrl: overrides.arkServerUrl ?? defaults.ARK_SERVER_URL,
     boltzApiUrl: overrides.boltzApiUrl ?? defaults.BOLTZ_API_URL,
+    esploraUrls:
+      overrides.esploraUrls && overrides.esploraUrls.length > 0
+        ? overrides.esploraUrls
+        : defaults.ESPLORA_URLS,
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,
     dbPath: overrides.dbPath ?? defaults.DB_PATH,
