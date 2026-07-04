@@ -172,7 +172,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   `src/exit/proof_sync.ts`: `syncOnce(currentVtxos)` — vault와 diff → 신규/변경 outpoint별 chain 페이지 순회 → 미보유 txid만 `getVirtualTxs` 배치 fetch → 트랜잭션 저장 → GC. 백오프 재시도(#02 결과 반영). 순수 로직 — index.ts 배선 없음.
   DoD: fake indexer로 단위 테스트(페이지네이션, 부분 실패, dedup fetch) + 라이브 지갑 1회 수동 실행.
 
-- ⬜ **#05 `exit/05-proof-sync-wiring`** (M)
+- ✅ **#05 `exit/05-proof-sync-wiring`** (M)
   index.ts 배선: boot reconcile + `notifyIncomingFunds` 훅 + bridge발 자금이동 후 트리거 + 주기 폴링(~10분) + shutdown teardown. 대시보드 exit-readiness 프래그먼트("vtxo N/M 증명완비 · 마지막 동기화 X분 전 · Y KB") + SSE 이벤트 `exit-readiness` (기존 SseHub/data-슬롯 패턴).
   DoD: mainnet에서 수신/송금/refresh 각각 후 vault 추종 + 대시보드 라이브 갱신 확인.
 
