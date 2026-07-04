@@ -190,7 +190,10 @@ describe('web server', () => {
     expect(body).toContain('Send')
     expect(body).toContain('data-send-form')
     expect(body).toContain('Balance breakdown')
-    expect(body).toContain('Refresh all')
+    // Consolidate-all Refresh is commented out (647bf09, arkd expiry-gap
+    // gating — arkade-os/arkd#1119); restore this assertion together with
+    // the send.ts UI block and the /refresh route.
+    // expect(body).toContain('Refresh all')
   })
 
   test('POST /send (review) with empty destination is 400', async () => {
@@ -258,7 +261,10 @@ describe('web server', () => {
     expect(row?.amount_sat).toBe(5000) // recipient-net; fee 0 under empty intent-fee program
   })
 
-  test('POST /refresh acks immediately (fire-and-forget)', async () => {
+  // Skipped as the pair of the /refresh route disable (647bf09) — the route
+  // 404s on purpose until arkd lets a near-expiry input anchor a mixed-expiry
+  // intent (arkade-os/arkd#1119). Re-enable together with the route.
+  test.skip('POST /refresh acks immediately (fire-and-forget)', async () => {
     const res = await fetch(`${base}/refresh`, { method: 'POST' })
     expect(res.status).toBe(200)
     const body = await res.text()
