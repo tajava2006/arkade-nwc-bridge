@@ -10,6 +10,7 @@ import type { OutboxWatcher } from '../../src/nostr/outbox'
 import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
+import type { ProofSyncService } from '../../src/exit/sync_service'
 import {
   emptyBalance,
   makeArkProviderStub,
@@ -29,6 +30,25 @@ const STUB_NOSTR: NostrService = {
 
 // Shared pool isn't exercised by these web tests (only /send's CLINK resolve
 // uses it). A bare cast is enough to satisfy the ready-state shape.
+// Readiness tile reads snapshot(); web tests never run a real sync pass.
+const STUB_PROOF_SYNC: ProofSyncService = {
+  trigger: () => {},
+  snapshot: () => ({
+    stats: {
+      vtxoCount: 0,
+      readyCount: 0,
+      proofTxCount: 0,
+      proofBytes: 0,
+      lastSyncedAt: null,
+      soonestExpiresAt: null,
+    },
+    lastRun: null,
+    running: false,
+  }),
+  onUpdate: () => () => {},
+  stop: () => {},
+}
+
 const STUB_POOL = {} as unknown as import('nostr-tools/pool').SimplePool
 
 const STUB_OFFERS: OfferService = {
@@ -77,6 +97,7 @@ function readyState(): AppStateRef {
       boardingAddress: 'bc1qstubboarding',
       onboardingFeeProgram: '1000.0',
       arkProvider: makeArkProviderStub(),
+      proofSync: STUB_PROOF_SYNC,
     },
   }
 }
@@ -305,6 +326,7 @@ describe('web server — setup mode', () => {
           boardingAddress: 'bc1qstubboarding',
           onboardingFeeProgram: '1000.0',
           arkProvider: makeArkProviderStub(),
+          proofSync: STUB_PROOF_SYNC,
         }
       },
     })
