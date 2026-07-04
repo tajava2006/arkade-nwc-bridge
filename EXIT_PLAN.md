@@ -168,7 +168,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   `src/exit/vault.ts`: upsertProofTx / upsertVtxoChain / getChain / getProofTxs / listVtxos / missingTxids / gc(liveOutpoints) / stats(readiness 카운트+바이트). vtxo_json 직렬화: SDK `serializeVtxo` export 여부 확인, 안 되면 필요 필드(outpoint, value, script, tapTree, createdAt, expiresAt)만 자체 직렬화.
   DoD: 인메모리 sqlite 단위 테스트 + typecheck.
 
-- ⬜ **#04 `exit/04-proof-sync-engine`** (M)
+- ✅ **#04 `exit/04-proof-sync-engine`** (M)
   `src/exit/proof_sync.ts`: `syncOnce(currentVtxos)` — vault와 diff → 신규/변경 outpoint별 chain 페이지 순회 → 미보유 txid만 `getVirtualTxs` 배치 fetch → 트랜잭션 저장 → GC. 백오프 재시도(#02 결과 반영). 순수 로직 — index.ts 배선 없음.
   DoD: fake indexer로 단위 테스트(페이지네이션, 부분 실패, dedup fetch) + 라이브 지갑 1회 수동 실행.
 
