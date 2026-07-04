@@ -129,5 +129,8 @@ const LIVE_SCRIPT = `<script>
   on('history-status', function (d) { swap('[data-history]', d.html) })
   on('send-breakdown', function (d) { swap('[data-breakdown]', d.html) })
   on('offboards-update', function (d) { swap('[data-offboards]', d.html) })
+  // Degraded ↔ ready flips restructure the whole page — reload instead of
+  // fragment-swapping (EXIT_PLAN #07).
+  on('mode-change', function () { location.reload() })
 })()
 </script>`
