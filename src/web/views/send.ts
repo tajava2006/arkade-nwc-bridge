@@ -219,6 +219,13 @@ export function sendView(args: {
         <button type="submit">Review</button>
       </form>
 
+      ${''
+      /* TEMP-DISABLED (arkade-os/arkd#1119): consolidate-all also folds healthy
+         long-expiry VTXOs, and arkd's SETTLEMENT_MIN_EXPIRY_GAP anti-griefing
+         check rejects any intent containing one — so with the gap active this
+         button can only fail. Restore this block (and the /refresh route in
+         web/server.ts) once upstream lets a near-expiry input anchor a
+         mixed-expiry intent.
       <h2>Refresh</h2>
       <p class="muted">
         Consolidate <strong>every</strong> VTXO (incl. sub-dust + swept) into one fresh VTXO,
@@ -228,6 +235,7 @@ export function sendView(args: {
       <form method="post" action="/refresh" onsubmit="return confirm('Consolidate all VTXOs into one fresh VTXO?')">
         <button type="submit">Refresh all</button>
       </form>
+      */}
 
       <h2>Balance breakdown</h2>
       <div data-breakdown>${renderBreakdownFragment(args.value)}</div>

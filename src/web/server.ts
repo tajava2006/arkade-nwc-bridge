@@ -707,6 +707,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           )
         },
       },
+      /* TEMP-DISABLED (arkade-os/arkd#1119): consolidate-all trips arkd's
+         SETTLEMENT_MIN_EXPIRY_GAP — see the matching commented-out Refresh
+         block in views/send.ts. Restore both together.
       '/refresh': {
         // Consolidate-all: wallet.settle() with no params folds every VTXO
         // (incl. sub-dust + swept) + confirmed boarding into one fresh VTXO.
@@ -736,6 +739,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           )
         },
       },
+      */
       '/events': {
         GET: (req) => {
           // Server-Sent Events feed for live UI updates. Open one per
