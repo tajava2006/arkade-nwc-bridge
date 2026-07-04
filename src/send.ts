@@ -43,10 +43,14 @@ export function classifyDestination(raw: string): Rail | null {
   return 'onchain'
 }
 
-/** The two ark-side reads the /send breakdown needs, fetched together. */
+/**
+ * The reads the /send breakdown needs, fetched together: the two ark-side ones
+ * plus the boltz fee table (for the LN drain hint — see lnDrainInvoiceSat).
+ */
 export interface SendData {
   arkInfo: ArkInfo
   vtxos: ExtendedVirtualCoin[]
+  fees: FeesResponse
 }
 
 export interface VtxoBuckets {
@@ -149,6 +153,31 @@ export function offboardMaxSat(arkInfo: ArkInfo, buckets: VtxoBuckets): number |
 export function submarineFeeSat(fees: FeesResponse, amountSats: number): number {
   const { percentage, minerFees } = fees.submarine
   return Math.ceil((amountSats * percentage) / 100 + minerFees)
+}
+
+/**
+ * Invoice amount whose LN-send total (invoice + Boltz fee) lands as close to
+ * `targetSat` as possible without exceeding it — the number to show for
+ * "empty this wallet over Lightning". Mirrors boltz's expectedAmount
+ * arithmetic (`invoice + ceil(pct·invoice) + baseFee`; baseFee is 0 on ARK
+ * but kept for formula fidelity). Because the fee is a ceil, some targets are
+ * unreachable exactly — and the server's own ceil can disagree with ours by
+ * ±1 sat at float boundaries — so this number is advisory: execution funds
+ * the swap all-in and folds a residue of up to DRAIN_SLACK_SATS into the
+ * swap margin (see ln_send.ts), never stranding it as sub-dust change.
+ * Null when no positive invoice amount fits under the target.
+ */
+export function lnDrainInvoiceSat(fees: FeesResponse, targetSat: number): number | null {
+  const p = fees.submarine.percentage / 100
+  const base = fees.submarine.minerFees
+  const total = (x: number) => x + Math.ceil(p * x) + base
+  let x = Math.floor((targetSat - base) / (1 + p))
+  if (x <= 0) return null
+  // Float estimate can land a step off in either direction; walk to the
+  // largest x whose total still fits.
+  while (total(x + 1) <= targetSat) x++
+  while (x > 0 && total(x) > targetSat) x--
+  return x > 0 ? x : null
 }
 
 export interface LnPreview {

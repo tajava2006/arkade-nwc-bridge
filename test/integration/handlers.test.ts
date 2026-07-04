@@ -11,7 +11,8 @@ import { openTempDb, type TempDb } from '../helpers/db'
 import {
   emptyBalance,
   fakeInvoiceResponse,
-  fakePaymentResponse,
+  fakeSpendableVtxo,
+  fakeSubmarineSwap,
   makeSwapsStub,
   makeWalletStub,
 } from '../helpers/mocks'
@@ -108,15 +109,18 @@ describe('handlers', () => {
     test('successful pay updates transaction + connection.spent_msat', async () => {
       const conn = newConn(temp)
       const swaps = makeSwapsStub({
-        sendLightningPayment: async (args) => {
+        createSubmarineSwap: async (args) => {
           expect(args.invoice).toBe(INVOICE_2000_SAT)
           // Boltz takes ~5 sat fee on a 2000-sat invoice — total leaving
           // the wallet is 2005 sat.
-          return fakePaymentResponse({ amount: 2005, preimage: 'be'.repeat(32) })
+          return fakeSubmarineSwap({ expectedAmount: 2005 })
         },
+        waitForSwapSettlement: async () => ({ preimage: 'be'.repeat(32) }),
       })
+      // Well above expectedAmount + drain slack, so the funding stays exact.
+      const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
       const r = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet: makeWalletStub(), boltzApiUrl: '' },
+        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet, boltzApiUrl: '' },
         { invoice: INVOICE_2000_SAT },
       )) as Record<string, unknown>
       expect(r.preimage).toBe('be'.repeat(32))
@@ -143,7 +147,7 @@ describe('handlers', () => {
     test('SDK failure marks the row failed and throws PAYMENT_FAILED', async () => {
       const conn = newConn(temp)
       const swaps = makeSwapsStub({
-        sendLightningPayment: async () => {
+        createSubmarineSwap: async () => {
           throw new Error('route closed')
         },
       })

@@ -14,6 +14,7 @@ import type {
 } from '@arkade-os/sdk'
 import type {
   ArkadeSwaps,
+  BoltzSubmarineSwap,
   CreateLightningInvoiceRequest,
   CreateLightningInvoiceResponse,
   SendLightningPaymentRequest,
@@ -33,6 +34,11 @@ export function emptyBalance(overrides: Partial<WalletBalance> = {}): WalletBala
     total: 0,
     ...overrides,
   } as WalletBalance
+}
+
+/** Minimal spendable vtxo for ln_send's balance sum — only `value` is read. */
+export function fakeSpendableVtxo(value: number): ExtendedVirtualCoin {
+  return { value } as unknown as ExtendedVirtualCoin
 }
 
 export interface WalletStubOptions {
@@ -55,6 +61,9 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
     },
     async getVtxos() {
       return opts.vtxos ?? []
+    },
+    async send() {
+      return 'arktxid-stub'
     },
     async sendBitcoin() {
       return 'arktxid-stub'
@@ -98,7 +107,13 @@ export function makeSwrCaches(wallet: Wallet, balance: WalletBalance): SwrCaches
     }),
     sendData: new AsyncCache<SendData>({
       label: 'test-send-data',
-      fetcher: async () => ({ arkInfo: {} as never, vtxos: [] }),
+      // fees carries enough shape for drainHint should a test ever render a
+      // non-empty breakdown (empty vtxos short-circuit before touching it).
+      fetcher: async () => ({
+        arkInfo: {} as never,
+        vtxos: [],
+        fees: { submarine: { percentage: 0.1, minerFees: 0 } } as never,
+      }),
     }),
   }
   caches.balance.seed(balance)
@@ -112,6 +127,8 @@ export interface SwapsStubOptions {
   sendLightningPayment?: (
     args: SendLightningPaymentRequest,
   ) => Promise<SendLightningPaymentResponse>
+  createSubmarineSwap?: (args: SendLightningPaymentRequest) => Promise<BoltzSubmarineSwap>
+  waitForSwapSettlement?: (pendingSwap: BoltzSubmarineSwap) => Promise<{ preimage: string }>
 }
 
 export function makeSwapsStub(opts: SwapsStubOptions = {}): ArkadeSwaps {
@@ -126,6 +143,16 @@ export function makeSwapsStub(opts: SwapsStubOptions = {}): ArkadeSwaps {
       (async () => {
         throw new Error('sendLightningPayment not stubbed')
       }),
+    createSubmarineSwap:
+      opts.createSubmarineSwap ??
+      (async () => {
+        throw new Error('createSubmarineSwap not stubbed')
+      }),
+    waitForSwapSettlement:
+      opts.waitForSwapSettlement ??
+      (async () => {
+        throw new Error('waitForSwapSettlement not stubbed')
+      }),
     async getFees() {
       return {
         submarine: { percentage: 0.1, minerFees: 0 },
@@ -133,6 +160,23 @@ export function makeSwapsStub(opts: SwapsStubOptions = {}): ArkadeSwaps {
       }
     },
   } as unknown as ArkadeSwaps
+}
+
+/**
+ * A pre-baked pending submarine swap, shaped like createSubmarineSwap's
+ * return: ln_send only reads response.address + response.expectedAmount.
+ */
+export function fakeSubmarineSwap(
+  overrides: { expectedAmount?: number; address?: string } = {},
+): BoltzSubmarineSwap {
+  return {
+    id: 'swap-id-fake',
+    type: 'submarine',
+    response: {
+      address: overrides.address ?? 'tark1boltzlockup',
+      expectedAmount: overrides.expectedAmount ?? 105,
+    },
+  } as unknown as BoltzSubmarineSwap
 }
 
 /**
@@ -152,13 +196,3 @@ export function fakeInvoiceResponse(
   } as unknown as CreateLightningInvoiceResponse
 }
 
-export function fakePaymentResponse(
-  overrides: Partial<SendLightningPaymentResponse> = {},
-): SendLightningPaymentResponse {
-  return {
-    amount: 105,
-    preimage: 'aa'.repeat(32),
-    txid: 'cc'.repeat(32),
-    ...overrides,
-  } as SendLightningPaymentResponse
-}

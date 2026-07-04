@@ -1,8 +1,17 @@
-import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
+import type { ArkInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
+import type { FeesResponse } from '@arkade-os/boltz-swap'
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import type { OffboardRow } from '../../offboards'
-import { classifyVtxos, isExpiringSoon, offboardMaxSat, type SendData, type VtxoBuckets } from '../../send'
+import {
+  classifyVtxos,
+  isExpiringSoon,
+  lnDrainInvoiceSat,
+  offboardFeeSat,
+  offboardMaxSat,
+  type SendData,
+  type VtxoBuckets,
+} from '../../send'
 
 function fmtSats(n: number): string {
   return `${n.toLocaleString()} sats`
@@ -96,6 +105,66 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
 }
 
 /**
+ * Standing "how do I empty this wallet" guidance, independent of the Max
+ * button. Onchain: the offboard rail is the one path that always works — a
+ * settlement round consumes sub-dust and swept/expired VTXOs directly, no
+ * Refresh needed. Lightning: the drain works by making the invoice amount
+ * fit the balance (lnDrainInvoiceSat) and needs a Refresh first whenever
+ * sub-dust/swept funds exist, since those can't back an offchain send.
+ * Amounts are computed from arkInfo + the boltz fee table, never hardcoded:
+ * either fee config can change without this copy going stale.
+ */
+function drainHint(arkInfo: ArkInfo, fees: FeesResponse, buckets: VtxoBuckets): RawHtml {
+  if (buckets.roundTotalSat === 0) return html``
+  const fee = offboardFeeSat(arkInfo, buckets.roundTotalSat)
+  const dust = Number(arkInfo.dust)
+  const max = offboardMaxSat(arkInfo, buckets)
+  const onchain =
+    max === null
+      ? html`
+          <p class="muted">
+            <strong>Emptying the wallet — onchain:</strong> not possible right now — total
+            ${fmtSats(buckets.roundTotalSat)} minus the intent fee (${fmtSats(fee)}) is below
+            dust (${fmtSats(dust)}), so no valid onchain output can be made. Top the wallet up
+            first, then sweep.
+          </p>`
+      : html`
+          <p class="muted">
+            <strong>Emptying the wallet — onchain:</strong> an offboard (Max) always works — it
+            sweeps every VTXO including sub-dust and swept/expired, no Refresh needed, and the
+            destination receives <strong>${fmtSats(max)}</strong> (total
+            ${fmtSats(buckets.roundTotalSat)} − intent fee ${fmtSats(fee)}). A <em>partial</em>
+            onchain send must leave either nothing or at least ${fmtSats(dust)} behind — change
+            of 1–${(dust - 1).toLocaleString()} sats is rejected before anything moves.
+          </p>`
+
+  // LN drain targets the full balance (Refresh is a free round, so the total
+  // is unchanged by it — the same invoice amount stays valid before/after).
+  const lnInvoice = lnDrainInvoiceSat(fees, buckets.roundTotalSat)
+  const needsRefresh = buckets.subdustSat + buckets.recoverableSat > 0
+  const ln =
+    lnInvoice === null
+      ? html``
+      : needsRefresh
+        ? html`
+            <p class="muted">
+              <strong>Emptying the wallet — Lightning:</strong> hit Refresh first (free, the
+              total doesn't change), then pay a self-made invoice of exactly
+              <strong>${fmtSats(lnInvoice)}</strong>. Sub-dust/swept funds can't back an LN
+              send, so skipping the Refresh just fails cleanly before anything moves.
+            </p>`
+        : html`
+            <p class="muted">
+              <strong>Emptying the wallet — Lightning:</strong> pay a self-made invoice of
+              exactly <strong>${fmtSats(lnInvoice)}</strong> — the bridge funds the swap with
+              the entire balance, so nothing is left behind (a rounding residue of up to 2 sats
+              is folded into the swap fee instead of stranding as sub-dust).
+            </p>`
+
+  return html`${onchain}${ln}`
+}
+
+/**
  * Inner content of the [data-breakdown] slot. Rendered from the SWR snapshot
  * at page load and swapped in via SSE when the send-data cache refreshes — the
  * whole table is replaced (no diffing the VTXO set). `null` = first load before
@@ -103,7 +172,8 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
  */
 export function renderBreakdownFragment(value: SendData | null): RawHtml {
   if (!value) return html`<p class="muted">Loading…</p>`
-  return breakdownTable(classifyVtxos(value.vtxos, value.arkInfo.dust))
+  const buckets = classifyVtxos(value.vtxos, value.arkInfo.dust)
+  return html`${breakdownTable(buckets)}${drainHint(value.arkInfo, value.fees, buckets)}`
 }
 
 export function sendView(args: {
@@ -112,7 +182,13 @@ export function sendView(args: {
   error?: string
 }): RawHtml {
   const buckets = args.value ? classifyVtxos(args.value.vtxos, args.value.arkInfo.dust) : null
-  const arkSendMaxSat = buckets ? buckets.spendableSat : 0
+  // Max exists to *empty* the wallet. An Ark-send "max" of just the spendable
+  // bucket would leave sub-dust/swept behind — worse for the user than no
+  // button (the leftovers are the annoying part to deal with later) — so the
+  // button is offered only when there's nothing it would strand. The leftover
+  // total is passed separately so the hint can say why Max is missing.
+  const arkLeftoverSat = buckets ? buckets.subdustSat + buckets.recoverableSat : 0
+  const arkSendMaxSat = buckets && arkLeftoverSat === 0 ? buckets.spendableSat : 0
   const offboardMax = args.value && buckets ? offboardMaxSat(args.value.arkInfo, buckets) : null
   const offboardMaxAttr = offboardMax ?? 0
   return layout({
@@ -123,6 +199,7 @@ export function sendView(args: {
 
       <form method="post" action="/send" data-send-form
             data-ark-max="${arkSendMaxSat}"
+            data-ark-leftover="${arkLeftoverSat}"
             data-offboard-max="${offboardMaxAttr}">
         <label>
           Destination
@@ -252,6 +329,7 @@ const SEND_SCRIPT = `<script>
   var railHint = form.querySelector('[data-rail-hint]');
   var feeHint = form.querySelector('[data-fee-hint]');
   var arkMax = parseInt(form.getAttribute('data-ark-max') || '0', 10);
+  var arkLeftover = parseInt(form.getAttribute('data-ark-leftover') || '0', 10);
   var offboardMax = parseInt(form.getAttribute('data-offboard-max') || '0', 10);
   function rail(v) {
     var s = (v || '').trim().toLowerCase();
@@ -297,10 +375,14 @@ const SEND_SCRIPT = `<script>
     amountRow.style.display = '';
     amount.required = true;
     if (r === 'ark') {
+      // arkMax is 0 whenever sub-dust/swept exists (server-side gating): a
+      // spendable-only "max" would strand those, betraying what Max is for.
       maxBtn.style.display = arkMax > 0 ? '' : 'none';
       maxBtn.dataset.fill = String(arkMax);
       railHint.textContent = 'Ark offchain send — instant, free. Sub-dust/swept funds are not included.';
-      feeHint.textContent = '';
+      feeHint.textContent = arkLeftover > 0
+        ? 'Max is disabled: ' + arkLeftover.toLocaleString() + ' sats of sub-dust/swept funds exist and an Ark send would strand them. Refresh first, or enter an amount to send spendable funds only.'
+        : '';
     } else if (r === 'onchain') {
       maxBtn.style.display = offboardMax > 0 ? '' : 'none';
       maxBtn.dataset.fill = String(offboardMax);
