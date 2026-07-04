@@ -36,6 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # runtime state (sqlite db + wal/shm sidecars)
 data
 
+# in-repo git worktrees for epic/subtask branches (see EXIT_PLAN.md §4)
+.worktrees
+
 # reference
 nips
 nostr-tools
