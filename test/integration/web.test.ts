@@ -11,6 +11,8 @@ import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
 import type { ProofSyncService } from '../../src/exit/sync_service'
+import { storeVtxoWithProofs } from '../../src/exit/vault'
+import { ChainTxType } from '@arkade-os/sdk'
 import {
   emptyBalance,
   makeArkProviderStub,
@@ -385,6 +387,87 @@ describe('web server — setup mode', () => {
   })
 
   test('GET /setup once configured redirects to /', async () => {
+    const res = await fetch(`${base}/setup`, { redirect: 'manual' })
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toBe('/')
+  })
+})
+
+describe('web server — degraded mode', () => {
+  let temp: TempDb
+  let web: WebServer
+  let base: string
+
+  beforeAll(() => {
+    temp = openTempDb()
+    // one exit-ready vtxo in the vault — the page must render it from
+    // sqlite alone (no wallet object exists in this mode)
+    storeVtxoWithProofs(
+      temp.db,
+      {
+        txid: 'a'.repeat(64),
+        vout: 0,
+        valueSat: 1000,
+        script: '5120' + 'ab'.repeat(32),
+        tapTree: 'c0de',
+        status: 'preconfirmed',
+        expiresAt: null,
+        chain: [
+          {
+            txid: 'a'.repeat(64),
+            type: ChainTxType.ARK,
+            expiresAt: '',
+            spends: ['c'.repeat(64)],
+          },
+          { txid: 'c'.repeat(64), type: ChainTxType.COMMITMENT, expiresAt: '', spends: [] },
+        ],
+      },
+      [{ txid: 'a'.repeat(64), type: ChainTxType.ARK, psbtB64: 'psbt' }],
+    )
+    const state: AppStateRef = {
+      current: {
+        mode: 'degraded',
+        error: 'getInfo: ConnectionRefused',
+        since: Math.floor(Date.now() / 1000) - 120,
+        attempts: 3,
+        onchainAddress: 'bc1pstubfunding',
+      },
+    }
+    web = startWebServer({
+      cfg: CFG,
+      db: temp.db,
+      state,
+      sseHub: new SseHub(),
+      outbox: STUB_OUTBOX,
+      bootReady: async () => {},
+    })
+    base = web.url
+  })
+
+  afterAll(async () => {
+    await web.stop()
+    temp.cleanup()
+  })
+
+  test('/ renders the degraded status page from local data only', async () => {
+    const res = await fetch(`${base}/`)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('unreachable')
+    expect(body).toContain('getInfo: ConnectionRefused')
+    expect(body).toContain('bc1pstubfunding')
+    expect(body).toContain('1/1 vtxos exit-ready')
+  })
+
+  test('ready-only routes bounce to the status page', async () => {
+    for (const path of ['/send', '/connections', '/history', '/settings']) {
+      const res = await fetch(`${base}${path}`, { redirect: 'manual' })
+      expect(res.status).toBe(303)
+      expect(res.headers.get('location')).toBe('/')
+    }
+  })
+
+  test('/setup bounces to / — the account already exists', async () => {
     const res = await fetch(`${base}/setup`, { redirect: 'manual' })
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/')

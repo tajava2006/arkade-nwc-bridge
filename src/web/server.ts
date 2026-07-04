@@ -36,6 +36,8 @@ import { walletHistoryView } from './views/history'
 import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
 import { settingsView } from './views/settings'
+import { degradedView } from './views/degraded'
+import { vaultStats } from '../exit/vault'
 import {
   sendView,
   sendConfirmView,
@@ -69,6 +71,20 @@ export interface SwrCaches {
 
 export type AppState =
   | { mode: 'setup' }
+  | {
+      // Account exists but the full bring-up (wallet/boltz/nostr) failed —
+      // typically the ASP or Boltz being unreachable, which is exactly the
+      // scenario unilateral exit exists for (EXIT_PLAN #07). Everything here
+      // works without the ASP: the vault is sqlite, the onchain address is
+      // derived from the nsec. index.ts retries the full boot every 60s and
+      // promotes in place; open tabs reload on the 'mode-change' SSE event.
+      mode: 'degraded'
+      error: string
+      since: number
+      attempts: number
+      // nsec-derived plain P2TR — CPFP fuel + sweep destination (EXIT_PLAN §2.4)
+      onchainAddress: string
+    }
   | {
       mode: 'ready'
       wallet: Wallet
@@ -152,14 +168,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     })
   }
 
-  // All non-/setup routes funnel through this guard. If we're in setup
-  // mode, bounce to /setup; otherwise hand back the ready-mode handles so
-  // the caller doesn't have to re-narrow state.current.
+  // All ready-only routes funnel through this guard: setup mode bounces to
+  // /setup, degraded mode bounces to / (the degraded status page — the only
+  // meaningful place until the exit tab lands). Otherwise hand back the
+  // ready-mode handles so the caller doesn't have to re-narrow state.current.
   const requireReady = ():
     | { ok: true; ready: Extract<AppState, { mode: 'ready' }> }
     | { ok: false; response: Response } => {
-    if (state.current.mode !== 'ready') {
+    if (state.current.mode === 'setup') {
       return { ok: false, response: redirectToSetup() }
+    }
+    if (state.current.mode === 'degraded') {
+      return { ok: false, response: Response.redirect('/', 303) }
     }
     return { ok: true, ready: state.current }
   }
@@ -170,11 +190,11 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     routes: {
       '/setup': {
         GET: () => {
-          if (state.current.mode === 'ready') return Response.redirect('/', 303)
+          if (state.current.mode !== 'setup') return Response.redirect('/', 303)
           return htmlResponse(setupView())
         },
         POST: async (req) => {
-          if (state.current.mode === 'ready') return Response.redirect('/', 303)
+          if (state.current.mode !== 'setup') return Response.redirect('/', 303)
           const form = await req.formData()
           const mode = form.get('mode')
 
@@ -233,6 +253,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/': {
         GET: () => {
+          if (state.current.mode === 'degraded') {
+            return htmlResponse(degradedView({ state: state.current, stats: vaultStats(db) }))
+          }
           const r = requireReady()
           if (!r.ok) return r.response
           // SWR: hand back the last cached balance immediately, kick off
