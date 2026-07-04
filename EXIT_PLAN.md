@@ -163,7 +163,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ### Phase 1 — Proof Vault + ProofSync
 
-- ⬜ **#03 `exit/03-vault-schema`** (M)
+- ✅ **#03 `exit/03-vault-schema`** (M)
   마이그레이션 **v10**: `exit_proof_txs(txid PK, type, psbt_base64, first_seen_at)` + `exit_vtxos(txid, vout, PK(txid,vout), vtxo_json, chain_json, expires_at, synced_at)`.
   `src/exit/vault.ts`: upsertProofTx / upsertVtxoChain / getChain / getProofTxs / listVtxos / missingTxids / gc(liveOutpoints) / stats(readiness 카운트+바이트). vtxo_json 직렬화: SDK `serializeVtxo` export 여부 확인, 안 되면 필요 필드(outpoint, value, script, tapTree, createdAt, expiresAt)만 자체 직렬화.
   DoD: 인메모리 sqlite 단위 테스트 + typecheck.
@@ -178,7 +178,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ### Phase 2 — ASP 없이 부팅
 
-- ⬜ **#06 `exit/06-esplora-config`** (S)
+- ✅ **#06 `exit/06-esplora-config`** (S)
   defaults.ts에 exit용 esplora 우선순위 리스트(#01 결정) + Config 필드(→ `data/config.json` override로 **백로그 "유저 자기 mempool" 코드가 사실상 완성됨**). `src/exit/esplora.ts`: 리스트 기반 EsploraProvider 팩토리(첫 정상 응답 인스턴스 선택 수준의 단순 failover). 같은 URL을 `Wallet.create({esploraUrl})`에도 전달(평시/비상 뷰 일치).
   DoD: typecheck + mainnet 부팅 정상.
 
