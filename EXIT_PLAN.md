@@ -151,7 +151,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 ### Phase 0 — 검증 스파이크 (여기서 죽으면 플랜 수정이 제일 싸다)
 
 - ⬜ **#01 `exit/01-spike-package-broadcast`** (S)
-  `POST {esplora}/txs/package` 실지원 검증: `mempool.arkade.sh/api`, `mempool.space/api` probe(유효하지 않은 패키지로 404 vs 파싱에러 판별) + arkade-regtest(localhost:3000)에서 실제 1P1C 성공 확인.
+  `POST {esplora}/txs/package` 실지원 검증: `mempool.arkade.sh/api`, `mempool.space/api` probe(유효하지 않은 패키지로 404 vs 파싱에러 판별). 실제 1P1C 성공 확인은 docker 미가용으로 #15 드릴로 이월(스크립트 `--live` 모드로 준비).
   산출: `test/spike/package_broadcast.spike.ts` + §7 결정 기록(esplora 우선순위 리스트 확정, 전멸 시 bitcoind `submitpackage` 폴백을 #09 스코프에 추가).
   DoD: 결정 기록 작성됨.
 
@@ -241,7 +241,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ## 7. 결정 기록 (스파이크가 채움)
 
-- [ ] #01: esplora 우선순위 리스트 = (미정) / bitcoind 폴백 필요 여부 = (미정)
+- [x] #01 (2026-07-04): **esplora 우선순위 = `["https://mempool.space/api", "https://mempool.arkade.sh/api"]`** — 프로브 결과 둘 다 `POST /txs/package` 지원, bitcoind `submitpackage` RPC 직결 확인(`[]` → RPC -8 count 에러 릴레이; garbage는 mempool.space가 자체 검증 레이어에서 반려, arkade는 RPC -4 릴레이). 제3자(mempool.space) 1순위 — ASP 적대 시나리오에서 Ark 생태계 독립 인프라 우선, 폴링(5초 1회)은 rate limit 여유. **bitcoind 폴백 = 당장 불필요.** regtest 라이브 1P1C는 이 머신 docker 미가용으로 **#15 드릴로 이월**(스크립트 `--live <base> <parentHex> <childHex>` 모드 준비됨). 정책 리스크 추가 확인: arkd 트리 tx는 **v3(TRUC) + 제로값 P2A**로 생성(`arkd pkg/ark-lib/tree/builder.go:222`의 `psbt.New(..., 3, 0, ...)`, `txutils/anchor.go:13-22`), SDK CPFP child도 v3(`ts-sdk src/wallet/onchain.ts:249`) → TRUC/ephemeral-dust 정합 모양.
 - [ ] #02: 증명 용량 실측 = (미정) / settle→완비 PSBT 지연 = (미정) / 페이지 크기 = (미정)
 - [ ] #03: SDK `serializeVtxo` 패키지 export 여부 = (미정)
 
