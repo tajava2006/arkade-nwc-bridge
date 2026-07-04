@@ -15,6 +15,23 @@ export const ARK_SERVER_URL = 'https://ark.hoppe-relay.it.com'
 // SDK's network-derived default flipping under us across version bumps.
 export const BOLTZ_API_URL = 'https://boltz.hoppe-relay.it.com'
 
+// Esplora endpoints, priority-ordered — the wallet's onchain view and the
+// unilateral-exit path's only onchain dependency (EXIT_PLAN.md). Pinned here
+// instead of letting the SDK derive its default from ASP info: the exit path
+// exists for the ASP-dead case, so it can't inherit anything from getInfo,
+// and the same URLs feed Wallet.create so normal-mode and exit-mode agree on
+// chain state. mempool.space first — exit is the ASP-adversarial scenario, so
+// infrastructure independent of the Ark ecosystem beats the SDK default
+// (mempool.arkade.sh, Ark Labs operated). Both relay bitcoind submitpackage
+// via POST /txs/package (probed 2026-07-04, EXIT_PLAN §7 #01) — a hard
+// requirement: zero-fee pre-signed txs can only enter a mempool inside a
+// 1P1C package. A self-hosted mempool instance slots in ahead of these via
+// the data/config.json `esploraUrls` override.
+export const ESPLORA_URLS: readonly string[] = [
+  'https://mempool.space/api',
+  'https://mempool.arkade.sh/api',
+]
+
 // Last-resort relay set, handed to new NWC connections only while
 // *neither* the account key's nor the operator's NIP-65 list has
 // resolved — e.g. all bootstrap relays unreachable at boot. Not used

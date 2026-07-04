@@ -53,6 +53,7 @@ const CFG: Config = {
   network: 'bitcoin',
   arkServerUrl: 'https://stub',
   boltzApiUrl: 'https://stub',
+  esploraUrls: ['https://stub-esplora'],
   httpBind: '127.0.0.1',
   httpPort: 0,
   dbPath: '',

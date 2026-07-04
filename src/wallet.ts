@@ -18,6 +18,12 @@ export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promis
   const wallet = await Wallet.create({
     identity,
     arkServerUrl: cfg.arkServerUrl,
+    // Pin the wallet's esplora to our own priority list instead of the
+    // SDK's ASP-network-derived default (mempool.arkade.sh). The exit path
+    // (src/exit/) reads chain state from the same list, so normal mode and
+    // ASP-dead mode agree on what's confirmed — and a config.json override
+    // (e.g. a self-hosted mempool) retargets both at once.
+    esploraUrl: cfg.esploraUrls[0],
     // Node has no IndexedDB; rebuild local caches from the indexer on each
     // boot. We have our own sqlite in src/db.ts for bridge-level state
     // (connections, payments, invoices) — that's a separate concern.
