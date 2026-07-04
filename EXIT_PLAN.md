@@ -92,6 +92,7 @@ vtxo를 온체인까지 풀어내고(unroll), CSV 대기 후, 유저 단독 제�
 ### 2.7 기타 확정 사실
 
 - 만료 = 탈출 데드라인: chain의 `expiresAt` / vtxo `expiresAt` 이후 ASP가 배치를 sweep하면 증명 무효. 만료 임박 exit은 ASP sweep과 race (분석: 워크스페이스 문서 UNROLL_TREE_MECHANICS.md).
+- **swept(=SDK recoverable) vtxo는 증명이 완비돼도 일방탈출 불가** — ASP sweep이 트리 root를 이미 소비해 사전서명 tx가 죽은 종이. 회수는 ASP 협조 settlement뿐 (`ts-sdk src/wallet/index.ts:683` isRecoverable = state 'swept' && unspent; sub-dust가 합계<dust로 방치되다 만료되는 전형 케이스). → **readiness 지표·/exit 탭은 status='swept'를 'ready'가 아니라 '협조 회수 전용'으로 구분**해야 과대표시가 안 된다 (#09/#12 반영, 2026-07-04 발견).
 - 여러 vtxo 동시 탈출: 공유 브랜치는 Session이 온체인/멤풀 상태를 보고 스킵/WAIT 처리(2.1) → 순차 실행이면 자연 dedup.
 - 비용 견적은 오프라인 계산 가능: 저장 PSBT의 vsize + child(~111 vB) × feerate 합 + sweep fee. exit-all은 tx 합집합 기준(공유 브랜치 1회 계상).
 - `bun test`는 `*.test.ts`만 집전 → 네트워크 치는 스파이크는 `test/spike/*.spike.ts`로 격리.
@@ -210,7 +211,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 ### Phase 4 — /exit 탭 UI
 
 - ⬜ **#12 `exit/12-ui-tab`** (M)
-  nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · **탈출 견적 = 브로드캐스트할 tx/패키지 개수 + 총 vByte + 현재 feerate 기준 예상 sats + 가치 대비 %** · **경제성 판정("빼는 게 더 손해" 명시 — sub-dust만이 아니라 660 sats류 저액도, 깊은 체인의 고액도 feerate 따라 해당)**. 서버 렌더 우선(라이브는 #13).
+  nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · **탈출 견적 = 브로드캐스트할 tx/패키지 개수 + 총 vByte + 현재 feerate 기준 예상 sats + 가치 대비 %** · **경제성 판정("빼는 게 더 손해" 명시 — sub-dust만이 아니라 660 sats류 저액도, 깊은 체인의 고액도 feerate 따라 해당)** · **status='swept'는 '일방탈출 불가 — 협조 회수 전용' 뱃지(§2.7)**. 서버 렌더 우선(라이브는 #13).
   DoD: ready/degraded 양쪽에서 렌더.
 
 - ⬜ **#13 `exit/13-ui-stepper`** (M)
