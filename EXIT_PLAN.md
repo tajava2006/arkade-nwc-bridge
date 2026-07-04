@@ -183,7 +183,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   defaults.ts에 exit용 esplora 우선순위 리스트(#01 결정) + Config 필드(→ `data/config.json` override로 **백로그 "유저 자기 mempool" 코드가 사실상 완성됨**). `src/exit/esplora.ts`: 리스트 기반 EsploraProvider 팩토리(첫 정상 응답 인스턴스 선택 수준의 단순 failover). 같은 URL을 `Wallet.create({esploraUrl})`에도 전달(평시/비상 뷰 일치).
   DoD: typecheck + mainnet 부팅 정상.
 
-- ⬜ **#07 `exit/07-degraded-boot`** (M)
+- ✅ **#07 `exit/07-degraded-boot`** (M)
   index.ts: `bootReady` 실패 시 크래시 대신 `mode:'degraded'` AppState(identity + esplora + OnchainWallet + db) + 주기 재시도로 ready 자동 승격(SSE 공지). server.ts: setup/ready 이분법 → 3-모드 가드, degraded에서 `/exit`(+ CPFP 펀딩 뷰) 허용, 나머지는 "ASP 연결 불가 — 일방탈출은 가능" 안내.
   ⚠ ASP만이 아니라 **Boltz 단독 장애도 degraded로 받아야 한다** — 2026-07-04 #06 스모크에서 boltz 도메인 일시 불통만으로 `initBoltz` throw → 프로세스 exit 1 실증(요구 1: "ark, boltz와 연결이 안 되어도 정상 동작"). `bootReady` 안의 wallet/boltz/nostr 각 단계를 개별 try로 감싸 부분 성공을 허용할지, 통째 degraded로 갈지는 구현 시 결정.
   DoD: arkd 내리고 재시작 → degraded 부팅 + /exit 접근, arkd 올리면 재시작 없이 ready 승격. boltz만 내려도 최소한 crash 없이 부팅.
