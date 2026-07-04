@@ -125,6 +125,7 @@ const LIVE_SCRIPT = `<script>
     swap('[data-connection-relay-detail="' + id + '"]', d.detailHtml)
   })
   on('balance-status', function (d) { swap('[data-balance]', d.html) })
+  on('exit-readiness', function (d) { swap('[data-exit-readiness]', d.html) })
   on('history-status', function (d) { swap('[data-history]', d.html) })
   on('send-breakdown', function (d) { swap('[data-breakdown]', d.html) })
   on('offboards-update', function (d) { swap('[data-offboards]', d.html) })

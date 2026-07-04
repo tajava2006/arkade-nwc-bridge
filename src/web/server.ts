@@ -17,6 +17,7 @@ import {
 } from '../nostr/connections'
 import type { NostrService } from '../nostr/service'
 import type { OfferService } from '../clink/offers'
+import type { ProofSyncService } from '../exit/sync_service'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
 import type { OutboxWatcher } from '../nostr/outbox'
@@ -88,6 +89,9 @@ export type AppState =
       // VTXO breakdown and offboard fee preview. A second RestArkProvider
       // alongside the wallet's internal one is fine — it's stateless REST.
       arkProvider: RestArkProvider
+      // Exit-proof mirroring scheduler (EXIT_PLAN #05) — the dashboard reads
+      // its snapshot for the readiness tile; live updates ride SSE.
+      proofSync: ProofSyncService
     }
 
 /**
@@ -247,6 +251,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             dashboardView({
               balance,
+              exitReadiness: r.ready.proofSync.snapshot(),
               arkAddress: r.ready.arkAddress,
               boardingAddress: r.ready.boardingAddress,
               onboardingFeeProgram: r.ready.onboardingFeeProgram,

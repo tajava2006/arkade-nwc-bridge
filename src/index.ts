@@ -14,6 +14,7 @@ import { loadAccount } from './account'
 import { RestArkProvider } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
+import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
@@ -25,7 +26,7 @@ import {
   connectionRelayPayload,
   outboxPanelPayload,
 } from './lib/relay_status'
-import { renderBalanceFragment } from './web/views/dashboard'
+import { renderBalanceFragment, renderExitReadinessFragment } from './web/views/dashboard'
 import { renderHistoryFragment } from './web/views/history'
 import { renderBreakdownFragment } from './web/views/send'
 
@@ -153,6 +154,10 @@ async function main(): Promise<void> {
   // account key + swaps). Cleared on shutdown.
   let ackReconcilerInterval: ReturnType<typeof setInterval> | undefined
 
+  // Exit-proof mirroring — assigned in bootReady, torn down on shutdown.
+  let proofSync: ProofSyncService | undefined
+  let stopIncomingFunds: (() => void) | undefined
+
   // Bound the processed_events replay-backstop table: rows past the redelivery
   // window can't be replayed, so drop anything older than the TTL. Runs at boot
   // (clears pre-existing bloat) + periodically. Only needs `db`, so it lives out
@@ -274,6 +279,33 @@ async function main(): Promise<void> {
     // one and there's no boot-time consumer that already has the data.
     caches.balance.seed(balance)
 
+    // Exit-proof mirroring (EXIT_PLAN #04/#05): keep the vault able to
+    // unilaterally exit every live vtxo after the ASP dies. Triggers: a
+    // boot reconcile now, the wallet's funds subscription (fires for
+    // incoming AND outgoing activity), and the service's own slow poll as
+    // the missed-event safety net. Gap/failure retry lives in the service.
+    const proofSyncSvc = startProofSync({
+      db,
+      indexer: wallet.indexerProvider,
+      listVtxos: () => wallet.getVtxos({ withRecoverable: true }),
+      log: (msg) => console.log(msg),
+    })
+    proofSync = proofSyncSvc
+    proofSyncSvc.onUpdate((snap) => {
+      sseHub.broadcast('exit-readiness', { html: renderExitReadinessFragment(snap).value })
+    })
+    proofSyncSvc.trigger('boot')
+    try {
+      stopIncomingFunds = await wallet.notifyIncomingFunds(() =>
+        proofSyncSvc.trigger('funds-activity'),
+      )
+    } catch (err) {
+      // best-effort: the reconcile poll still converges without the push
+      console.warn(
+        `exit-sync: funds subscription failed (poll still covers): ${err instanceof Error ? err.message : err}`,
+      )
+    }
+
     // Boarding receive handle (deterministic for our SingleKey). Plus a boot
     // prefetch of ArkInfo + VTXOs: seeds the /send breakdown cache (so the
     // first /send visit is instant) and gives the dashboard the onboarding
@@ -308,6 +340,7 @@ async function main(): Promise<void> {
       boardingAddress,
       onboardingFeeProgram,
       arkProvider,
+      proofSync: proofSyncSvc,
     }
     console.log('ready — waiting for NWC requests')
   }
@@ -327,6 +360,8 @@ async function main(): Promise<void> {
     clearInterval(watchdog)
     clearInterval(eventPrune)
     if (ackReconcilerInterval) clearInterval(ackReconcilerInterval)
+    proofSync?.stop()
+    stopIncomingFunds?.()
     sseHub.closeAll()
     await web.stop()
     if (appState.current.mode === 'ready') {
