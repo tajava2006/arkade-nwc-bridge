@@ -242,7 +242,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 ## 7. 결정 기록 (스파이크가 채움)
 
 - [ ] #01: esplora 우선순위 리스트 = (미정) / bitcoind 폴백 필요 여부 = (미정)
-- [ ] #02: 증명 용량 실측 = (미정) / settle→완비 PSBT 지연 = (미정) / 페이지 크기 = (미정)
+- [ ] #02 (2026-07-04, 부분 — 스크립트 완성, 실검증 대기): 모드 4종 구현(`--db`/`--address`/`--replay`/`--watch`). **블로커: 이 머신(`data/bridge.sqlite`)의 계정은 온체인 이력 0인 개발용 — 실검증은 운영 bridge 지갑 필요** (운영 주소로 `--address` 실행 or 운영 머신에서 `--db` 실행). 부수 확인 2건: ① `ReadonlyWallet.getVtxos`는 repo-first 읽기라 fresh InMemory repo에선 항상 빈 결과 — 단독 툴/ProofSync류는 `RestIndexerProvider.getVtxos({scripts, spendableOnly/recoverableOnly})` 직접 조회가 정도(#04 설계에 반영; live vtxo = spendable ∪ recoverable). ② bun 1.3 콜드 캐시에서 SDK import가 @bitcoinerlab CJS adapter의 async-ESM `require()`로 1회성 크래시 관찰 — `src/polyfills` 선-import 필수(모든 bridge 엔트리포인트가 이미 그렇게 함; #07 degraded 부팅 경로도 유지할 것). 증명 용량/지연/페이지 실측 = 실검증 때. 덤프는 워크트리 `data/exit-spike/`(gitignore)에만 — 커밋 금지.
 - [ ] #03: SDK `serializeVtxo` 패키지 export 여부 = (미정)
 
 ## 8. 백로그 (에픽 스코프 밖)
