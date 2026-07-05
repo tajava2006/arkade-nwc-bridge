@@ -190,7 +190,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ### Phase 3 — Exit 엔진
 
-- ⬜ **#08 `exit/08-stub-indexer`** (S) — 단일 브랜치로 충분
+- ✅ **#08 `exit/08-stub-indexer`** (S) — 단일 브랜치로 충분
   `src/exit/vault_indexer.ts`: vault에서 `getVirtualTxs` 서빙(+`getVtxoChain`도 vault에서), 나머지 메소드는 "not available offline" throw. IndexerProvider 인터페이스 준수.
   DoD: fixture 단위 테스트 (#02 덤프를 로컬로 사용, 커밋 fixture는 #15에서 교체).
 
