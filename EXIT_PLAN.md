@@ -204,7 +204,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   `src/exit/sweep.ts`: `prepareUnrollTransaction` 로컬판 — 저장 tapTree의 exitPaths + esplora 컨펌 정보로 CSV 판정, 여러 vtxo 배치 입력, 목적지 default = nsec P2TR(오버라이드 입력 허용), `DUST_AMOUNT`(546) 가드, feerate floor `MIN_FEE_RATE`.
   DoD: fixture tapTree 단위 테스트 (실브로드캐스트 검증은 #15).
 
-- ⬜ **#11 `exit/11-engine-estimator`** (M)
+- ✅ **#11 `exit/11-engine-estimator`** (M)
   `src/exit/estimate.ts`: vtxo별 비용 = Σ(브랜치 tx vsize + child ~111vB)×feerate + sweep fee 분담. exit-all은 tx 합집합(공유 브랜치 1회 계상). CPFP 지갑 잔액 vs 견적 부족분. sub-dust "비용 > 가치" 판정.
   DoD: 단위 테스트. #09와 병렬 가능(입력은 vault만).
 
