@@ -229,7 +229,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   선행: 이 머신에 docker 필요(colima 권장 — Docker Desktop보다 가벼움). arkade-regtest boltz는 stock이라 **sub-dust LN은 이 환경에서 안 됨**(커스텀 subdust boltz 미주입) — 단, exit은 boltz 무관이라 이 드릴엔 영향 없음. sub-dust까지 e2e로 보려면 커스텀 boltz 주입이 별도 후속.
   DoD: 브라우저에서 setup→sweep 완주 재현. 이게 이 기능의 존재 증명이자 유일한 실브로드캐스트 검증.
 
-- ⬜ **#16 `exit/16-design-doc`** (S)
+- ✅ **#16 `exit/16-design-doc`** (S)
   `EXIT_DESIGN.md` (영어, SEND/RECEIVE_DESIGN 관례) — 왜 Session 재사용인지, 왜 nsec P2TR인지, vault 스키마 근거, 스코프 아웃, 운영 절차(비상 시 순서). CLAUDE.md 갱신(프로젝트 shape + when-to-read-what). 이 문서(EXIT_PLAN.md) 상태 최종화.
   DoD: 문서 머지.
 
