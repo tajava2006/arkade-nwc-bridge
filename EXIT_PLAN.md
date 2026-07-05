@@ -218,7 +218,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   요구 10의 그림. vtxo별 수직 스테퍼: commitment(항상 온체인)→TREE…→CHECKPOINT/ARK→vtxo tx, 단계별 ✅컨펌/🕐멤풀/⬜대기 + **단계별 vsize 표기(합계가 #12 견적과 일치)** → `WAIT: CSV n/총` 카운트다운 → `SWEEP → 주소`. SSE 라이브 갱신(기존 data-슬롯 패턴). 이 그림이 "몇 번을 브로드캐스트해야 하는지"의 시각 답이다.
   DoD: 진행 중 exit이 실시간으로 단계 이동.
 
-- ⬜ **#14 `exit/14-ui-controls`** (M)
+- ✅ **#14 `exit/14-ui-controls`** (M)
   실행 컨트롤: **실행은 반드시 vtxo 단위** — vtxo별 [탈출 시작]/[Sweep]만 두고 일괄 [전체 탈출] 버튼은 두지 않는다(§1 추가 확정: 경제성이 vtxo마다 달라 개별 판단 강제). 확인 다이얼로그(그 vtxo의 tx 개수·총 vB·예상 비용·비가역 고지) + 재개 상태 표시. Sweep은 unroll 완료된 vtxo들을 한 tx 배치 입력으로 묶는 것 유지(수수료 분담 — 탈출 실행 결정과 무관한 절약). CPFP 펀딩 패널: nsec P2TR 주소 + QR(기존 qr.ts) + 잔액 + 견적 대비 부족 경고 — degraded에서도 동작.
   DoD: regtest에서 버튼만으로 exit 1건 완주 가능한 상태.
 
