@@ -15,6 +15,7 @@ import { EsploraProvider, OnchainWallet, RestArkProvider, SingleKey } from '@ark
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
+import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
@@ -161,6 +162,25 @@ async function main(): Promise<void> {
   // Degraded-mode boot retry — armed by bootReadyOrDegrade, cleared on shutdown.
   let bootRetryTimer: ReturnType<typeof setTimeout> | undefined
 
+  // Unilateral-exit engine — created once on the first boot attempt (ready
+  // OR degraded: it only needs sqlite + the nsec + esplora, never the ASP)
+  // and reused across mode flips. resume() re-drives ops interrupted by the
+  // restart.
+  let exitEngine: ExitEngine | undefined
+  const ensureExitEngine = (privateKey: Uint8Array): ExitEngine => {
+    if (!exitEngine) {
+      exitEngine = startExitEngine({
+        db,
+        identity: SingleKey.fromPrivateKey(privateKey),
+        network: cfg.network,
+        esploraUrls: cfg.esploraUrls,
+        log: (msg) => console.log(msg),
+      })
+      exitEngine.resume()
+    }
+    return exitEngine
+  }
+
   // Bound the processed_events replay-backstop table: rows past the redelivery
   // window can't be replayed, so drop anything older than the TTL. Runs at boot
   // (clears pre-existing bloat) + periodically. Only needs `db`, so it lives out
@@ -186,6 +206,8 @@ async function main(): Promise<void> {
     // until it has its own 10002, the watcher stays on the operator's.
     // Idempotent for the same key, so safe on both boot paths.
     outbox.setPrimaryPubkey(getPublicKey(privateKey))
+
+    ensureExitEngine(privateKey)
 
     // Unwind stack for a partially-built bring-up. bootReady used to be
     // crash-on-failure (process exit), so a half-created wallet could never
@@ -445,6 +467,7 @@ async function main(): Promise<void> {
     proofSync?.stop()
     stopIncomingFunds?.()
     if (bootRetryTimer) clearTimeout(bootRetryTimer)
+    exitEngine?.stop()
     sseHub.closeAll()
     await web.stop()
     if (appState.current.mode === 'ready') {
