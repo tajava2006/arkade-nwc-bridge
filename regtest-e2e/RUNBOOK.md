@@ -34,14 +34,26 @@ the CSV exit delay is block-denominated (20 blocks), so you advance it
 deliberately with `mine`. If background blocks kept coming they could fire the
 ASP's own sweep mid-drill and race your exit.
 
-## Why the CSV is fast here
+## Two modes (`EXIT_DRILL_MODE`)
 
-arkd reads its locktimes by magnitude: values < 512 mean **blocks** (regtest
-only) and arkd switches to a block-height scheduler. env.sh sets
-`ARKD_UNILATERAL_EXIT_DELAY=20`, so a VTXO's exit CSV is 20 blocks — elapse it
-with `node regtest.mjs mine 20` instead of waiting ~a day of wall-clock. (On
-mainnet the same delay is seconds/time-based; arkd rejects block values off
-regtest.)
+arkd reads locktimes by magnitude: `>= 512` = seconds (time scheduler), `< 512`
+= blocks (regtest only). env.sh picks one:
+
+- **`seconds` (default)** — the realistic mode. Tree expiry is a real 1-day
+  timestamp, so the bridge's auto-renew never fires and the funding VTXO stays
+  put: you can **build tree depth** by sending offchain payments without arkd
+  re-treeing it away. The exit CSV is **512 s (~8.5 min)** — the BIP68 floor
+  (time locktimes come in 512-second units, so 3 min isn't expressible). The
+  auto-miner runs every 30 s, so broadcasts confirm promptly and the CSV
+  **elapses on its own** (block MedianTimePast tracks real time) — no manual
+  mining for the wait.
+- **`blocks` (`EXIT_DRILL_MODE=blocks up.sh`)** — the fast mode. Exit CSV is 20
+  blocks, elapsed instantly with `mine 20`, auto-miner off. But block mode makes
+  arkd report a bogus near-now expiry, so the bridge auto-renews constantly
+  (re-tree churn) and the UI countdown false-flags "expired". Fine for a quick
+  single-VTXO smoke; bad for building depth.
+
+Pick seconds for a realistic deep-tree exit; blocks for a 30-second smoke.
 
 ## Data isolation
 
@@ -73,8 +85,14 @@ cd regtest-e2e/runtime && bun run <bridge-repo>/src/index.ts
   the bridge log shows `exit-sync: 1 vtxo(s) mirrored (funds-activity)`. The
   vault now holds the VTXO's pre-signed proofs.
 
-Optionally build a deeper chain (higher exit cost, more stepper rows) by sending
-a few offchain payments between fundings before exiting.
+**Building tree depth** (higher exit cost, more stepper rows) — do this in
+**seconds mode** so arkd doesn't re-tree the VTXO away while you work. Depth
+comes from offchain hops: send the funds through several offchain transfers
+before they land at the bridge. The pre-seeded `ark` client and the official
+web wallet (http://localhost:3003, same regtest) can both send offchain — bounce
+a payment client → wallet → bridge, or loop `ark send` a few times, then exit
+the resulting deep-chained VTXO. In blocks mode the auto-renew churn resets the
+chain under you, so depth-building there is a losing game.
 
 ### 3. Kill the ASP → degraded boot
 
@@ -120,25 +138,31 @@ the estimate.
 - `/exit` → pick a VTXO → open its detail page. Read the cost (tx count, vB,
   sats, % of value) and the verdict.
 - **Start exit.** The engine broadcasts the pre-signed chain as 1P1C packages.
-- **Mine** so the broadcasts confirm:
+- The broadcasts need blocks to confirm (each level before the next). In
+  **seconds mode** the 30s auto-miner does this for you — just watch. In
+  **blocks mode**, mine manually as the stepper advances:
   ```bash
-  node regtest.mjs mine 1     # repeat as the stepper advances; each broadcast
-                              # needs a block to confirm before the next
+  node regtest.mjs mine 1     # repeat per broadcast
   ```
   The stepper walks commitment → tree/checkpoint/ark → the VTXO tx, each
   flipping 🕐 mempool → ✅ confirmed.
 
 ### 6. Wait out the CSV, then sweep
 
-- Once fully unrolled the op is **waiting**; the stepper shows `CSV wait —
-  n/20 blocks`.
-- Elapse it:
+Once fully unrolled the op is **waiting**; the stepper shows the CSV countdown.
+
+- **seconds mode (default):** wait ~8.5 min — the auto-miner advances the chain,
+  so the CSV elapses on its own. Nothing to do but wait (and keep the fuel
+  address funded; the auto-miner also confirms your broadcasts).
+- **blocks mode:** elapse it instantly by mining:
   ```bash
   node regtest.mjs mine 20
   ```
-- The op flips to **sweepable** (the engine's 60s poll, or reload). **Sweep now**
-  on the detail page → mine 1 to confirm. The op goes **swept** with the sweep
-  txid; the funds are now on the plain P2TR you alone control.
+
+The op flips to **sweepable** (the engine's 60s poll, or reload the page).
+**Sweep now** on the detail page. In seconds mode the auto-miner confirms it; in
+blocks mode `mine 1`. The op goes **swept** with the sweep txid; the funds are
+now on the plain P2TR you alone control.
 
 Verify onchain:
 ```bash

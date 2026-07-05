@@ -20,26 +20,47 @@ ARKD_URL="http://localhost:7070"
 ESPLORA_URL="http://localhost:3000/api"
 BOLTZ_URL="http://localhost:9069"
 
-# Block-denominated locktimes so unilateral-exit CSV elapses by MINING, not by
-# waiting wall-clock time (arkd auto-selects the block scheduler for values
-# < 512; rejected on non-regtest). Auto-miner OFF so background blocks can't
-# advance the tip and fire ASP sweeps mid-drill. regtest.mjs's loadEnv only
-# fills UNSET vars, so these inline values win over the submodule's own
-# .env.regtest.
+# arkd interprets locktimes by magnitude: values >= 512 are SECONDS (time
+# scheduler), < 512 are BLOCKS (regtest only, rejected elsewhere). All five
+# must share one type or arkd refuses to start. regtest.mjs's loadEnv only
+# fills UNSET vars, so these inline exports win over the submodule .env.regtest.
 #
-# Exit delay 20 = a VTXO's exit CSV is 20 blocks (elapse with `mine 20`). Tree
-# expiry is deliberately LARGE (500) even though it's block-denominated: the
-# drill's boltz channel setup mines ~10 blocks and you mine ~20 more for the
-# CSV, so a short tree expiry (arkd's e2e default is 40) would sweep the
-# funding VTXO out from under the drill. All values must share the same type
-# (all blocks here); arkd refuses a mismatch. 500 tree ≫ 20 exit keeps the
-# funding VTXO alive across the whole drill while CSV still elapses fast.
-export ARKD_VTXO_TREE_EXPIRY=500
-export ARKD_UNILATERAL_EXIT_DELAY=20
-export ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=20
-export ARKD_BOARDING_EXIT_DELAY=30
-export ARKD_CHECKPOINT_EXIT_DELAY=10
-export AUTOMINE_INTERVAL=0
+# Two modes, toggled by EXIT_DRILL_MODE (default: seconds).
+#
+# seconds (default) — the realistic mode. Tree expiry is a real 1-day
+#   timestamp, so the bridge's auto-renew (settlementConfig vtxoThreshold =
+#   3600s, fires within 1h of expiry) never triggers — the funding VTXO stays
+#   put, so you can build tree DEPTH by sending offchain payments without arkd
+#   re-treeing it out from under you. The exit CSV is 512s (~8.5 min) — the
+#   BIP68 floor (time locktimes are quantised to 512s units, so 3 min isn't
+#   expressible; 512s is the shortest). Auto-miner ON at 30s so blocks keep
+#   coming: broadcasts confirm promptly AND the block MedianTimePast advances
+#   in real time, which is what actually elapses a relative-time CSV — so the
+#   ~8.5 min wait passes hands-off, no manual mining. A 1-day tree expiry means
+#   the auto-miner can't fire an ASP sweep mid-drill either.
+#
+# blocks — the fast mode (EXIT_DRILL_MODE=blocks). Exit CSV is 20 blocks,
+#   elapsed instantly with `mine 20`; auto-miner OFF. Trade-off: arkd reports a
+#   bogus near-now batchExpiry timestamp in block mode, which makes the bridge
+#   auto-renew constantly (re-treeing churn) and the UI countdown false-flag
+#   "expired" (EXIT_PLAN #15 finding C). Fine for a quick single-VTXO exit
+#   smoke, bad for building depth.
+EXIT_DRILL_MODE="${EXIT_DRILL_MODE:-seconds}"
+if [ "${EXIT_DRILL_MODE}" = "blocks" ]; then
+  export ARKD_VTXO_TREE_EXPIRY=500
+  export ARKD_UNILATERAL_EXIT_DELAY=20
+  export ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=20
+  export ARKD_BOARDING_EXIT_DELAY=30
+  export ARKD_CHECKPOINT_EXIT_DELAY=10
+  export AUTOMINE_INTERVAL=0
+else
+  export ARKD_VTXO_TREE_EXPIRY=86400          # 1 day — no auto-renew churn
+  export ARKD_UNILATERAL_EXIT_DELAY=512        # ~8.5 min CSV (BIP68 floor)
+  export ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512
+  export ARKD_BOARDING_EXIT_DELAY=512
+  export ARKD_CHECKPOINT_EXIT_DELAY=512
+  export AUTOMINE_INTERVAL=30                  # MTP advances → CSV self-elapses
+fi
 
 regtest() {
   ( cd "${REGTEST_DIR}" && node regtest.mjs "$@" )
