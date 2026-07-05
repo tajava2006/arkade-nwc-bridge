@@ -8,6 +8,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 ADDR="${1:-}"
 SATS="${2:-100000}"
+# ark send needs the client wallet password (arkade-regtest sets it to
+# ARKD_PASSWORD, default 'secret'); passing it here avoids the interactive
+# prompt that fails under a non-tty ("inappropriate ioctl for device").
+ARK_PW="${ARKD_PASSWORD:-secret}"
 if [ -z "${ADDR}" ]; then
   echo "usage: fund.sh <bridge-ark-address> [sats]" >&2
   exit 1
@@ -17,7 +21,7 @@ echo "▶ ark client balance before:"
 regtest ark balance || true
 
 echo "▶ sending ${SATS} sats offchain → ${ADDR}"
-regtest ark send --to "${ADDR}" --amount "${SATS}"
+regtest ark send --to "${ADDR}" --amount "${SATS}" --password "${ARK_PW}"
 
 echo "▶ mining 1 block to settle any pending round"
 regtest mine 1
