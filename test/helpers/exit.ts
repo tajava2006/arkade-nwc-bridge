@@ -1,6 +1,7 @@
 import { base64, hex } from '@scure/base'
 import {
   ChainTxType,
+  DefaultVtxo,
   OnchainWallet,
   SingleKey,
   Transaction,
@@ -27,6 +28,10 @@ export interface SignedExitFixture {
   proofs: VaultProofTx[]
   vtxo: Omit<VaultVtxo, 'syncedAt'>
 }
+
+// Exit-path timelock baked into fixture tapTrees — short so CSV tests can
+// advance a mock tip past it without huge numbers.
+export const FIXTURE_CSV_BLOCKS = 10n
 
 export async function makeSignedExitFixture(
   seed: number,
@@ -58,6 +63,17 @@ export async function makeSignedExitFixture(
 
   const signed = await identity.sign(child)
   const txid = signed.id
+
+  // Real encoded vtxo script (user+server collaborative path + CSV exit
+  // path) so the CSV helper and the sweep path (#10) work against fixtures.
+  const serverKey = SingleKey.fromPrivateKey(new Uint8Array(32).fill(0xa5))
+  const tapTree = hex.encode(
+    new DefaultVtxo.Script({
+      pubKey: await identity.xOnlyPublicKey(),
+      serverPubKey: await serverKey.xOnlyPublicKey(),
+      csvTimelock: { type: 'blocks', value: FIXTURE_CSV_BLOCKS },
+    }).encode(),
+  )
   const chain: ChainTx[] = [
     { txid, type: chainType, expiresAt: '1783431985', spends: [parent.id] },
     { txid: parent.id, type: ChainTxType.COMMITMENT, expiresAt: '1783431985', spends: [] },
@@ -73,7 +89,7 @@ export async function makeSignedExitFixture(
       vout: 0,
       valueSat,
       script: hex.encode(p2tr.script),
-      tapTree: 'c0de', // sweep-path tests (#10) replace this with a real encoded tree
+      tapTree,
       status: 'preconfirmed',
       expiresAt: 1783431985,
       chain,

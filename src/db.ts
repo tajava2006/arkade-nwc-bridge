@@ -271,6 +271,32 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_exit_vtxos_expires_at ON exit_vtxos(expires_at);
     `,
   },
+  {
+    version: 11,
+    description: 'exit_ops — unilateral-exit intent/progress records (EXIT_PLAN #09)',
+    // One row per vtxo the operator told the engine to exit. Deliberately a
+    // COARSE record: the fine-grained unroll progress is re-derived from
+    // chain state every time (Unroll.Session skips what is already onchain),
+    // so a crash mid-exit needs no precise replay — resume just re-runs the
+    // session. States: unrolling (broadcasting the pre-signed chain) →
+    // waiting (all confirmed, CSV timelock running) → sweepable (CSV
+    // elapsed) → swept (sweep tx broadcast, #10 sets sweep_txid). failed is
+    // retryable — startExit on a failed row resets it.
+    sql: `
+      CREATE TABLE exit_ops (
+        txid         TEXT    NOT NULL,
+        vout         INTEGER NOT NULL,
+        state        TEXT    NOT NULL,
+        dest_address TEXT,               -- sweep destination override; NULL = nsec P2TR
+        sweep_txid   TEXT,
+        error        TEXT,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        PRIMARY KEY (txid, vout)
+      );
+      CREATE INDEX idx_exit_ops_state ON exit_ops(state);
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {
