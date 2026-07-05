@@ -1,7 +1,96 @@
-import { html, type RawHtml } from '../../lib/html'
+import { html, raw, type RawHtml } from '../../lib/html'
 import { ChainTxType } from '@arkade-os/sdk'
 import type { ExitStep, ExitStepper } from '../../exit/stepper'
+import type { ExitEstimate } from '../../exit/estimate'
+import { qrSvg } from '../qr'
 import { layout } from './layout'
+
+export interface FundingStatus {
+  address: string
+  balanceSat: number | null
+}
+
+// Per-vtxo action + funding panel (EXIT_PLAN #14). Actions are per-vtxo only
+// (§1: no bulk exit). Full cost sits visibly next to the button; the confirm
+// dialog is a short irreversibility gate. The funding panel warns when the
+// exit-fuel address can't cover the CPFP fees the unroll will need.
+function actionPanel(s: ExitStepper, est: ExitEstimate | null): RawHtml {
+  const op = s.op
+  if (op?.state === 'swept') {
+    return html`<p class="ok">Swept to <code>${op.destAddress ?? '—'}</code>. This vtxo has left Ark.</p>`
+  }
+
+  const costLine = est
+    ? html`<p>Exit cost: <strong>${est.packages} transactions + sweep</strong>,
+        ${est.totalVb.toLocaleString()} vB, about
+        <strong>${est.totalFeeSat.toLocaleString()} sats</strong> in fees at
+        ${est.feeRateSatVb} sat/vB
+        (${Number.isFinite(est.feePctOfValue) ? est.feePctOfValue + '%' : '∞'} of value).</p>`
+    : html``
+  const uneconomical = est?.uneconomical
+    ? html`<p class="bad">Fees meet or exceed this vtxo's value — exiting loses money.
+        Only proceed if you need the funds out regardless.</p>`
+    : html``
+
+  const canStart = !op || op.state === 'failed'
+  const startBtn = canStart
+    ? html`<form method="post" action="/exit/${s.txid}/${s.vout}/start"
+            onsubmit="return confirm('Start unilateral exit? This broadcasts the pre-signed chain and cannot be undone once the first transaction confirms.');">
+          <button type="submit"${s.proofComplete ? raw('') : raw(' disabled')}>
+            ${op?.state === 'failed' ? 'Retry exit' : 'Start exit'}
+          </button>
+          ${s.proofComplete
+            ? html``
+            : html`<span class="muted"> — proofs incomplete, cannot exit yet</span>`}
+        </form>
+        ${op?.state === 'failed' && op.error
+          ? html`<p class="muted">Last error: ${op.error}</p>`
+          : html``}`
+    : html``
+
+  const runningNote =
+    op?.state === 'unrolling' || op?.state === 'waiting'
+      ? html`<p class="muted">In progress — ${op.state === 'unrolling' ? 'broadcasting the pre-signed chain' : 'waiting out the CSV timelock'}.
+          Safe to leave; it resumes across restarts.</p>`
+      : html``
+
+  const sweepBtn =
+    op?.state === 'sweepable'
+      ? html`<form method="post" action="/exit/${s.txid}/${s.vout}/sweep"
+              onsubmit="return confirm('Sweep to your onchain address? The CSV timelock has elapsed; this spends the vtxo to a plain address you alone control.');">
+            <button type="submit">Sweep now → your address</button>
+          </form>`
+      : html``
+
+  return html`${costLine}${uneconomical}${startBtn}${runningNote}${sweepBtn}`
+}
+
+function fundingPanel(funding: FundingStatus, est: ExitEstimate | null): RawHtml {
+  const bal = funding.balanceSat
+  const needed = est ? est.totalFeeSat : null
+  const low =
+    bal !== null && needed !== null && bal < needed
+      ? html`<p class="bad">Exit fuel is low: ${bal.toLocaleString()} sats on hand, about
+          ${needed.toLocaleString()} needed for CPFP fees. Top it up before starting,
+          or the unroll stalls unconfirmed.</p>`
+      : html``
+  return html`
+    <h2>Exit fuel (onchain)</h2>
+    ${low}
+    <div class="receive-card">
+      <div class="qr-box">${raw(qrSvg(funding.address))}</div>
+      <pre>${funding.address}</pre>
+      <p class="muted">
+        Balance:
+        ${bal === null
+          ? html`<span class="muted">unknown (esplora unreachable)</span>`
+          : html`<strong>${bal.toLocaleString()} sats</strong>`}.
+        Each zero-fee exit transaction is CPFP-bumped from here (same nsec as
+        the wallet — no extra backup). This is also the default sweep destination.
+      </p>
+    </div>
+  `
+}
 
 // Requirement 10 made visual: a vertical stepper for one vtxo. Broadcast
 // steps (root→leaf) show state + vsize, then the CSV countdown, then the
@@ -91,8 +180,22 @@ export function renderStepperFragment(stepper: ExitStepper): RawHtml {
   `
 }
 
+/** Shown when a sweep is rejected (CSV not elapsed, dust, etc.) — a plain page with the reason. */
+export function exitSweepError(txid: string, vout: number, reason: string): RawHtml {
+  return layout({
+    title: 'Sweep failed',
+    current: 'exit',
+    body: html`
+      <p><a href="/exit/${txid}/${vout}">← back</a></p>
+      <p class="bad">Sweep failed: ${reason}</p>
+    `,
+  })
+}
+
 export function exitDetailView(args: {
   stepper: ExitStepper
+  estimate: ExitEstimate | null
+  funding: FundingStatus
   degraded: boolean
 }): RawHtml {
   const s = args.stepper
@@ -106,6 +209,12 @@ export function exitDetailView(args: {
         : html``}
       <p><strong>${s.valueSat.toLocaleString()} sats</strong> · <code>${s.txid}:${s.vout}</code></p>
       <div data-exit-stepper="${s.txid}:${s.vout}">${renderStepperFragment(s)}</div>
+
+      <h2>Action</h2>
+      ${actionPanel(s, args.estimate)}
+
+      ${fundingPanel(args.funding, args.estimate)}
+
       <p class="muted">
         Each broadcast is a zero-fee transaction paired with a CPFP child from
         your exit-fuel address. First unroll the chain to the blockchain, wait

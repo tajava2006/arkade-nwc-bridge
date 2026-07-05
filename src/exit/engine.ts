@@ -57,6 +57,8 @@ export interface ExitEngine {
   feeRate(): Promise<number>
   /** the resolved exit esplora — for the stepper's per-tx onchain status reads */
   explorer(): Promise<OnchainProvider>
+  /** CPFP fuel + sweep-destination status: the nsec P2TR address and its onchain balance (null when esplora is unreachable) */
+  fundingStatus(): Promise<{ address: string; balanceSat: number | null }>
   snapshot(): { ops: ExitOp[]; active: string | null }
   onUpdate(cb: (u: ExitEngineUpdate) => void): () => void
   stop(): void
@@ -204,17 +206,19 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     }
   }, deps.pollIntervalMs ?? DEFAULT_POLL_MS)
 
-  // Default sweep destination — same key, plain address, no ASP involved.
-  let defaultDestPromise: Promise<string> | null = null
-  const defaultDest = (): Promise<string> => {
-    if (!defaultDestPromise) {
-      defaultDestPromise = OnchainWallet.create(
+  // The nsec-derived onchain wallet: CPFP fuel source, default sweep
+  // destination, funding-panel balance. Built from the key + first esplora
+  // (address needs no network; getBalance does), cached and shared.
+  let fundingWalletPromise: Promise<OnchainWallet> | null = null
+  const fundingWallet = (): Promise<OnchainWallet> => {
+    if (!fundingWalletPromise) {
+      fundingWalletPromise = OnchainWallet.create(
         deps.identity,
         deps.network,
         new EsploraProvider(deps.esploraUrls[0]),
-      ).then((w) => w.address)
+      )
     }
-    return defaultDestPromise
+    return fundingWalletPromise
   }
 
   return {
@@ -233,7 +237,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
         }
       }
       const { explorer } = await providers()
-      const dest = destAddress ?? (await defaultDest())
+      const dest = destAddress ?? (await fundingWallet()).address
       const result = await sweepVtxos(
         { db, identity: deps.identity, explorer, network: deps.network },
         outpoints,
@@ -250,6 +254,16 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     },
     async explorer() {
       return (await providers()).explorer
+    },
+    async fundingStatus() {
+      const w = await fundingWallet()
+      let balanceSat: number | null = null
+      try {
+        balanceSat = await w.getBalance()
+      } catch {
+        // esplora unreachable — show the address, leave balance unknown
+      }
+      return { address: w.address, balanceSat }
     },
     async feeRate() {
       try {

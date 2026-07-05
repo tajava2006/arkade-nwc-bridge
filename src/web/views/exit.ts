@@ -92,6 +92,8 @@ export function exitView(args: {
   degraded: boolean
   stats: VaultStats
   nowSec: number
+  fundingAddress: string
+  fundingBalanceSat: number | null
 }): RawHtml {
   const { rows, stats } = args
   return layout({
@@ -123,6 +125,13 @@ export function exitView(args: {
         Expiry is the hard deadline: once the ASP sweeps an expired batch the
         pre-signed proofs are unusable. Deep payment chains cost more to exit —
         settling (refresh) resets the chain and with it the exit price.
+      </p>
+      <p class="muted">
+        Exit fuel (CPFP + sweep destination): <code>${args.fundingAddress}</code> —
+        ${args.fundingBalanceSat === null
+          ? 'balance unknown'
+          : `${args.fundingBalanceSat.toLocaleString()} sats`}.
+        Open a vtxo for its funding QR and the guided flow.
       </p>
     `,
   })
