@@ -65,10 +65,13 @@ if [ "${EXIT_DRILL_MODE}" = "blocks" ]; then
   export ARKD_CHECKPOINT_EXIT_DELAY=10
   export AUTOMINE_INTERVAL=0
 else
-  export ARKD_VTXO_TREE_EXPIRY=86400          # 1 day — no auto-renew churn
+  # arkd (settings.go) requires: all delays same type (>=512 = seconds),
+  # public >= unilateral, and unilateral != boarding. So boarding is 1024,
+  # not 512 — everything else stays at the 512s floor.
+  export ARKD_VTXO_TREE_EXPIRY=86400          # ~1 day — no auto-renew churn
   export ARKD_UNILATERAL_EXIT_DELAY=512        # ~8.5 min CSV (BIP68 floor)
-  export ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512
-  export ARKD_BOARDING_EXIT_DELAY=512
+  export ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 # must be >= unilateral
+  export ARKD_BOARDING_EXIT_DELAY=1024         # must differ from unilateral
   export ARKD_CHECKPOINT_EXIT_DELAY=512
   export AUTOMINE_INTERVAL=30                  # MTP advances → CSV self-elapses
 fi
