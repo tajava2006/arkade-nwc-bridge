@@ -39,6 +39,9 @@ data
 # in-repo git worktrees for epic/subtask branches (see EXIT_PLAN.md §4)
 .worktrees
 
+# isolated bridge runtime for the regtest e2e drill (EXIT_PLAN.md #15)
+regtest-e2e/runtime
+
 # reference
 nips
 nostr-tools
