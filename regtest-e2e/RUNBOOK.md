@@ -78,8 +78,23 @@ a few offchain payments between fundings before exiting.
 
 ### 3. Kill the ASP → degraded boot
 
+First **confirm the last settlement round** — mine a block so the funding
+VTXO's commitment is on-chain, not left unconfirmed in the mempool. Exit
+broadcasts the tree *on top of* the commitment, so an unconfirmed commitment
+makes the 1P1C package fail with a silent missing-input rejection (the engine
+just retries in a loop). One block settles it:
+
 ```bash
-cd $REGTEST_DIR && docker compose stop arkd     # or: node regtest.mjs stop arkd
+cd $REGTEST_DIR && node regtest.mjs mine 1
+```
+
+Then stop arkd. While arkd is alive it keeps re-treeing the VTXO into new
+outpoints every round, so an exit started against a stale outpoint fails with
+"no chain for this vtxo" — killing arkd freezes the VTXO, which is the whole
+point of unilateral exit:
+
+```bash
+docker compose -p arkade-regtest stop arkd      # freezes the VTXO
 ```
 
 Restart the bridge (Ctrl-C, then the same start command). It boots into
