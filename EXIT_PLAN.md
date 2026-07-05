@@ -194,7 +194,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   `src/exit/vault_indexer.ts`: vault에서 `getVirtualTxs` 서빙(+`getVtxoChain`도 vault에서), 나머지 메소드는 "not available offline" throw. IndexerProvider 인터페이스 준수.
   DoD: fixture 단위 테스트 (#02 덤프를 로컬로 사용, 커밋 fixture는 #15에서 교체).
 
-- ⬜ **#09 `exit/09-engine-core`** (L)
+- ✅ **#09 `exit/09-engine-core`** (L)
   마이그레이션 **v11**: `exit_ops(txid, vout, PK(txid,vout), state: unrolling|waiting|sweepable|swept|failed, sweep_txid, dest_address, error, created_at, updated_at)`.
   `src/exit/engine.ts`: `startExit(outpoints[])` → vault chain으로 `new Unroll.Session(...)`(스텁 indexer + 자체 esplora + OnchainWallet bumper), 순차 실행, 스텝 이벤트 SSE 중계, op 상태 전이, **부팅 시 미완료 op 재개**(degraded/ready 공통 — Session 재생성으로 충분, §2.1). CSV 충족 판정 헬퍼(`availableExitPath` 복제, blocks/time 겸용).
   (#01 결과에 따라 bitcoind `submitpackage` 폴백 broadcaster 포함 여부 결정.)
