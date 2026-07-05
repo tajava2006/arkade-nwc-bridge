@@ -11,6 +11,7 @@ import { SseHub } from '../../src/lib/sse'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
 import type { ProofSyncService } from '../../src/exit/sync_service'
+import type { ExitEngine } from '../../src/exit/engine'
 import { storeVtxoWithProofs } from '../../src/exit/vault'
 import { ChainTxType } from '@arkade-os/sdk'
 import {
@@ -33,6 +34,18 @@ const STUB_NOSTR: NostrService = {
 // Shared pool isn't exercised by these web tests (only /send's CLINK resolve
 // uses it). A bare cast is enough to satisfy the ready-state shape.
 // Readiness tile reads snapshot(); web tests never run a real sync pass.
+const STUB_EXIT_ENGINE: ExitEngine = {
+  startExit: () => {},
+  sweep: async () => {
+    throw new Error('stub')
+  },
+  resume: () => {},
+  feeRate: async () => 2,
+  snapshot: () => ({ ops: [], active: null }),
+  onUpdate: () => () => {},
+  stop: () => {},
+}
+
 const STUB_PROOF_SYNC: ProofSyncService = {
   trigger: () => {},
   snapshot: () => ({
@@ -100,6 +113,7 @@ function readyState(): AppStateRef {
       onboardingFeeProgram: '1000.0',
       arkProvider: makeArkProviderStub(),
       proofSync: STUB_PROOF_SYNC,
+      exitEngine: STUB_EXIT_ENGINE,
     },
   }
 }
@@ -329,6 +343,7 @@ describe('web server — setup mode', () => {
           onboardingFeeProgram: '1000.0',
           arkProvider: makeArkProviderStub(),
           proofSync: STUB_PROOF_SYNC,
+          exitEngine: STUB_EXIT_ENGINE,
         }
       },
     })
@@ -431,6 +446,7 @@ describe('web server — degraded mode', () => {
         since: Math.floor(Date.now() / 1000) - 120,
         attempts: 3,
         onchainAddress: 'bc1pstubfunding',
+        exitEngine: STUB_EXIT_ENGINE,
       },
     }
     web = startWebServer({
@@ -471,5 +487,15 @@ describe('web server — degraded mode', () => {
     const res = await fetch(`${base}/setup`, { redirect: 'manual' })
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/')
+  })
+
+  test('/exit renders from the vault with the ASP dead', async () => {
+    const res = await fetch(`${base}/exit`)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain('Degraded mode')
+    expect(body).toContain('one vtxo at a time')
+    expect(body).toContain('1,000 sats') // the seeded vault vtxo
+    expect(body).toContain('exit cost')
   })
 })

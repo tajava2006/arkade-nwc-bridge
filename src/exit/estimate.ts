@@ -80,16 +80,22 @@ function cpfpChildVb(): number {
 }
 
 function sweepVbOf(tapTreeHex: string): number {
-  const script = VtxoScript.decode(hex.decode(tapTreeHex))
-  const exits = script.exitPaths()
-  if (exits.length === 0) return 0
-  const leaf = script.findLeaf(hex.encode(exits[0]!.script))
-  if (!leaf) return 0
-  const est = TxWeightEstimator.create()
-  // control block: version+parity byte + 32B internal key + 32B per merkle step
-  est.addTapscriptInput(64, leaf[1].length, 33 + 32 * leaf[0].merklePath.length)
-  est.addOutputScript(P2TR_SCRIPT_STANDIN)
-  return Number(est.vsize().value)
+  // defensive: a row with an undecodable tapTree must not take down the
+  // whole /exit page — the sweep part just shows as unpriced (0)
+  try {
+    const script = VtxoScript.decode(hex.decode(tapTreeHex))
+    const exits = script.exitPaths()
+    if (exits.length === 0) return 0
+    const leaf = script.findLeaf(hex.encode(exits[0]!.script))
+    if (!leaf) return 0
+    const est = TxWeightEstimator.create()
+    // control block: version+parity byte + 32B internal key + 32B per merkle step
+    est.addTapscriptInput(64, leaf[1].length, 33 + 32 * leaf[0].merklePath.length)
+    est.addOutputScript(P2TR_SCRIPT_STANDIN)
+    return Number(est.vsize().value)
+  } catch {
+    return 0
+  }
 }
 
 export function estimateExit(

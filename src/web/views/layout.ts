@@ -52,7 +52,7 @@ const STYLES = `
   .relay-dot.down { color: #888; }
 `
 
-type Nav = 'dashboard' | 'send' | 'connections' | 'history' | 'settings' | 'setup'
+type Nav = 'dashboard' | 'send' | 'exit' | 'connections' | 'history' | 'settings' | 'setup'
 
 export function layout(args: {
   title: string
@@ -69,6 +69,7 @@ export function layout(args: {
       : html`<nav>
           ${tab('dashboard', '/', 'Dashboard')}
           ${tab('send', '/send', 'Send')}
+          ${tab('exit', '/exit', 'Exit')}
           ${tab('connections', '/connections', 'Connections')}
           ${tab('history', '/history', 'History')}
           ${tab('settings', '/settings', 'Settings')}

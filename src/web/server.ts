@@ -18,6 +18,11 @@ import {
 import type { NostrService } from '../nostr/service'
 import type { OfferService } from '../clink/offers'
 import type { ProofSyncService } from '../exit/sync_service'
+import type { ExitEngine } from '../exit/engine'
+import { estimateExit } from '../exit/estimate'
+import { isVtxoExitReady, listVaultVtxos } from '../exit/vault'
+import { getExitOp } from '../exit/ops'
+import { exitView, type ExitRow } from './views/exit'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
 import type { OutboxWatcher } from '../nostr/outbox'
@@ -38,6 +43,7 @@ import { setupGeneratedView, setupView } from './views/setup'
 import { settingsView } from './views/settings'
 import { degradedView } from './views/degraded'
 import { vaultStats } from '../exit/vault'
+
 import {
   sendView,
   sendConfirmView,
@@ -84,6 +90,8 @@ export type AppState =
       attempts: number
       // nsec-derived plain P2TR — CPFP fuel + sweep destination (EXIT_PLAN §2.4)
       onchainAddress: string
+      // exit engine runs in BOTH non-setup modes (vault + nsec + esplora only)
+      exitEngine: ExitEngine
     }
   | {
       mode: 'ready'
@@ -108,6 +116,7 @@ export type AppState =
       // Exit-proof mirroring scheduler (EXIT_PLAN #05) — the dashboard reads
       // its snapshot for the readiness tile; live updates ride SSE.
       proofSync: ProofSyncService
+      exitEngine: ExitEngine
     }
 
 /**
@@ -282,6 +291,40 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               offerRelay: r.ready.offers.getRelayStatus(),
               activeConnections: active.length,
               totalTxCount: txCountRow?.c ?? 0,
+            }),
+          )
+        },
+      },
+      '/exit': {
+        GET: async () => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          // ready AND degraded — this page must hold with the ASP dead
+          const feeRate = await st.exitEngine.feeRate()
+          const nowSec = Math.floor(Date.now() / 1000)
+          const rows: ExitRow[] = listVaultVtxos(db).map((vtxo) => {
+            // one corrupt row must not 500 the emergency page — render it
+            // unpriced instead
+            let estimate = null
+            try {
+              estimate = estimateExit(db, vtxo.txid, vtxo.vout, feeRate)
+            } catch {
+              estimate = null
+            }
+            return {
+              vtxo,
+              ready: isVtxoExitReady(db, vtxo.txid, vtxo.vout),
+              estimate,
+              op: getExitOp(db, vtxo.txid, vtxo.vout),
+            }
+          })
+          return htmlResponse(
+            exitView({
+              rows,
+              feeRate,
+              degraded: st.mode === 'degraded',
+              stats: vaultStats(db),
+              nowSec,
             }),
           )
         },
