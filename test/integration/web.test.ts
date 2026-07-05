@@ -41,6 +41,9 @@ const STUB_EXIT_ENGINE: ExitEngine = {
   },
   resume: () => {},
   feeRate: async () => 2,
+  explorer: async () => {
+    throw new Error('stub')
+  },
   snapshot: () => ({ ops: [], active: null }),
   onUpdate: () => () => {},
   stop: () => {},

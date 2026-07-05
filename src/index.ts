@@ -176,6 +176,14 @@ async function main(): Promise<void> {
         esploraUrls: cfg.esploraUrls,
         log: (msg) => console.log(msg),
       })
+      // Push per-op progress to any open /exit or detail page. The stepper's
+      // per-tx onchain status needs esplora reads, too heavy to recompute on
+      // every step — so we send just the outpoint key and the client reloads
+      // (same coarse strategy as mode-change; the detail page isn't kept open
+      // constantly). A single successful op also nudges exit-readiness.
+      exitEngine.onUpdate((u) => {
+        sseHub.broadcast('exit-op', { key: `${u.txid}:${u.vout}`, state: u.op?.state ?? null })
+      })
       exitEngine.resume()
     }
     return exitEngine

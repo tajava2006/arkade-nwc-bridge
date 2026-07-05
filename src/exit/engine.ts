@@ -55,6 +55,8 @@ export interface ExitEngine {
   resume(): void
   /** current fee rate from the exit esplora (floor 1); 1 when unreachable — estimates stay renderable offline */
   feeRate(): Promise<number>
+  /** the resolved exit esplora — for the stepper's per-tx onchain status reads */
+  explorer(): Promise<OnchainProvider>
   snapshot(): { ops: ExitOp[]; active: string | null }
   onUpdate(cb: (u: ExitEngineUpdate) => void): () => void
   stop(): void
@@ -245,6 +247,9 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
         `exit-engine: swept ${result.inputCount} vtxo(s) → ${dest} (${result.amountSat} sats, fee ${result.feeSat}) in ${result.txid}`,
       )
       return result
+    },
+    async explorer() {
+      return (await providers()).explorer
     },
     async feeRate() {
       try {

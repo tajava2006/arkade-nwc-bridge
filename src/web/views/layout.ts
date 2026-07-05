@@ -133,5 +133,13 @@ const LIVE_SCRIPT = `<script>
   // Degraded ↔ ready flips restructure the whole page — reload instead of
   // fragment-swapping (EXIT_PLAN #07).
   on('mode-change', function () { location.reload() })
+  // Exit op progress — reload if we're on the /exit list or this vtxo's
+  // detail page (the stepper is server-rendered from esplora reads).
+  on('exit-op', function (d) {
+    var slot = document.querySelector('[data-exit-stepper]')
+    var onDetail = slot && slot.getAttribute('data-exit-stepper') === d.key
+    var onList = document.querySelector('[data-exit-row]')
+    if (onDetail || onList) location.reload()
+  })
 })()
 </script>`
