@@ -53,6 +53,8 @@ export interface ExitEngine {
   sweep(outpoints: { txid: string; vout: number }[], destAddress?: string): Promise<SweepResult>
   /** Re-enqueue non-terminal ops after a restart. */
   resume(): void
+  /** current fee rate from the exit esplora (floor 1); 1 when unreachable — estimates stay renderable offline */
+  feeRate(): Promise<number>
   snapshot(): { ops: ExitOp[]; active: string | null }
   onUpdate(cb: (u: ExitEngineUpdate) => void): () => void
   stop(): void
@@ -243,6 +245,15 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
         `exit-engine: swept ${result.inputCount} vtxo(s) → ${dest} (${result.amountSat} sats, fee ${result.feeSat}) in ${result.txid}`,
       )
       return result
+    },
+    async feeRate() {
+      try {
+        const { explorer } = await providers()
+        const rate = await explorer.getFeeRate()
+        return Math.max(1, Math.ceil(rate ?? 1))
+      } catch {
+        return 1
+      }
     },
     resume() {
       const pending = listExitOps(db, ['unrolling'])

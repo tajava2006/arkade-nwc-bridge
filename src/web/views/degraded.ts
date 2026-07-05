@@ -56,8 +56,8 @@ export function degradedView(args: { state: DegradedState; stats: VaultStats }):
       </p>
       <p class="muted">
         The pre-signed exit proofs live in this machine's local vault and do not
-        need the ASP. The guided exit flow (unroll → CSV wait → sweep) ships in
-        the /exit tab; until then the proofs are safe where they are.
+        need the ASP. <a href="/exit">Open the Exit tab</a> for per-vtxo costs
+        and the guided unroll → CSV wait → sweep flow.
       </p>
 
       <h2>Exit fuel (onchain)</h2>

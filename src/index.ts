@@ -378,6 +378,7 @@ async function main(): Promise<void> {
         onboardingFeeProgram,
         arkProvider,
         proofSync: proofSyncSvc,
+        exitEngine: ensureExitEngine(privateKey),
       }
       console.log('ready — waiting for NWC requests')
     } catch (err) {
@@ -440,6 +441,7 @@ async function main(): Promise<void> {
           since: Math.floor(Date.now() / 1000),
           attempts: bootAttempts,
           onchainAddress: onchain.address,
+          exitEngine: ensureExitEngine(privateKey),
         }
         sseHub.broadcast('mode-change', { mode: 'degraded' })
       } else {
