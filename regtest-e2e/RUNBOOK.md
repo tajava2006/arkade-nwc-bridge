@@ -171,10 +171,14 @@ node regtest.mjs rpc gettxout <sweep-txid> 0
 
 ### 7. Tear down
 
+The bridge is a plain `bun` process, separate from the docker stack — `down.sh`
+stops the containers but NOT the bridge. If you started it in the foreground
+(step 1), just Ctrl-C it. If it's running in the background, kill it by port:
+
 ```bash
-# Ctrl-C the bridge, then:
-regtest-e2e/down.sh          # stop, keep volumes
-regtest-e2e/down.sh --clean  # stop + wipe the chain for a fresh next run
+lsof -ti tcp:4282 | xargs kill      # stop the bridge process
+regtest-e2e/down.sh                 # stop the stack, keep volumes
+regtest-e2e/down.sh --clean         # stop + wipe the chain for a fresh run
 ```
 
 ## Troubleshooting
