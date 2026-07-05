@@ -25,11 +25,21 @@ src/
                                boot-time reconcile for incoming swaps
   boltz_repository.ts        — SqliteSwapRepository: rows keyed on swap.id,
                                full BoltzSwap stashed as JSON blob
-  polyfills.ts               — EventSource shim for the SDK's SSE streams
-  index.ts                   — two-phase boot (setup-mode if no account;
-                               ready-mode otherwise); owns the shared
-                               SimplePool + relay-status dispatch + 5s
-                               ensureRelay watchdog; SIGINT/SIGTERM teardown
+  exit/                      — unilateral exit (EXIT_DESIGN.md). ASP-free:
+                               vault.ts (offline proof store, migration v10),
+                               proof_sync.ts + sync_service.ts (mirror proofs
+                               while the ASP is alive), esplora.ts (pickEsplora),
+                               vault_indexer.ts (serve Unroll.Session offline),
+                               csv.ts (CSV-elapsed judgment), estimate.ts
+                               (offline exit cost), engine.ts + ops.ts (drive
+                               the session, exit_ops v11, sweep, funding),
+                               stepper.ts (per-vtxo visual model)
+  polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
+                               (bun async-ESM require trap) + EventSource shim
+  index.ts                   — three-mode boot (setup / ready / degraded);
+                               owns the shared SimplePool + relay-status
+                               dispatch + 5s ensureRelay watchdog + the exit
+                               engine + proof-sync; SIGINT/SIGTERM teardown
   nostr/
     connections.ts           — connections table CRUD + URI builder;
                                Connection.relays persisted per row
@@ -72,12 +82,13 @@ src/
                                sendTo / broadcast / ping / closeAll
     transaction.ts           — TransactionRow + NIP-47 mapping
   web/
-    server.ts                — Bun.serve routes; AppState (setup|ready)
-                               carries wallet/swaps/nostr/caches; /events
-                               opens an SSE stream per browser tab;
-                               loopback only
+    server.ts                — Bun.serve routes; AppState (setup|ready|
+                               degraded) carries wallet/swaps/nostr/caches +
+                               exitEngine/proofSync; /events opens an SSE
+                               stream per browser tab; loopback only
     qr.ts                    — `qr` package wrapper (SVG)
-    views/                   — server-rendered pages incl. setup.ts;
+    views/                   — server-rendered pages incl. setup.ts,
+                               degraded.ts, exit.ts + exit_detail.ts;
                                layout.ts injects the SSE client JS
 data/                        — sqlite file (gitignored)
 ```
@@ -236,4 +247,9 @@ row exists. Logs go to stdout; when running in background pipe to
   onchain boarding), CLINK offers + NIP-57 zap plan, native onboarding vs
   Boltz chain swap, why a fixed boarding address is safe (relative CSV
   timelock), send↔receive ramp symmetry* → [RECEIVE_DESIGN.md](RECEIVE_DESIGN.md).
+- *unilateral exit (ASP-free VTXO recovery): proof vault, degraded boot,
+  Unroll.Session reuse via the stub indexer, per-vtxo execution, CPFP/sweep
+  from the nsec P2TR, the /exit tab* → [EXIT_DESIGN.md](EXIT_DESIGN.md); the
+  code is under `src/exit/` + `src/web/views/exit*`. Implementation planning,
+  spike results, and the regtest drill are in [EXIT_PLAN.md](EXIT_PLAN.md).
 - *why a decision was made* → [DESIGN.md](DESIGN.md) §2 / §6 / §9.
