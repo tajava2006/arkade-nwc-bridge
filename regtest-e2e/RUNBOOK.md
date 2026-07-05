@@ -86,13 +86,29 @@ cd regtest-e2e/runtime && bun run <bridge-repo>/src/index.ts
   vault now holds the VTXO's pre-signed proofs.
 
 **Building tree depth** (higher exit cost, more stepper rows) — do this in
-**seconds mode** so arkd doesn't re-tree the VTXO away while you work. Depth
-comes from offchain hops: send the funds through several offchain transfers
-before they land at the bridge. The pre-seeded `ark` client and the official
-web wallet (http://localhost:3003, same regtest) can both send offchain — bounce
-a payment client → wallet → bridge, or loop `ark send` a few times, then exit
-the resulting deep-chained VTXO. In blocks mode the auto-renew churn resets the
-chain under you, so depth-building there is a losing game.
+**seconds mode** so arkd doesn't re-tree the VTXO away while you work. Depth is
+the VTXO's own offchain history: each offchain send adds a checkpoint+ark hop to
+its chain (sending to a *fresh* address just makes a new shallow VTXO — it's the
+same funds hopping that deepens). Ark blocks self-sends, so ping-pong the funds
+between the pre-seeded `ark` client and the bridge:
+
+```bash
+cd $REGTEST_DIR   # e.g. ../ts-sdk/regtest
+
+# the ark client's own address, so the bridge can send back to it
+node regtest.mjs ark receive              # prints an ark1… / tark1… address
+
+# ark client → bridge  (this direction; --password avoids the tty prompt)
+node regtest.mjs ark send --to <bridge-ark-addr> --amount 50000 --password secret
+```
+
+Then the other leg, **bridge → ark client**, from the bridge UI: open
+http://127.0.0.1:4282/send, paste the ark client's address (from `ark receive`),
+send Ark. Bounce it back and forth a handful of times — each round-trip adds
+depth to that VTXO's chain. Leave it at the bridge, then exit it (steps 3–6) and
+watch the stepper show the deeper chain and higher cost. (The official web wallet
+at :3003 could be the second wallet too, but its delegate-info fetch is broken in
+this regtest — the `ark` CLI ping-pong needs nothing extra.)
 
 ### 3. Kill the ASP → degraded boot
 
