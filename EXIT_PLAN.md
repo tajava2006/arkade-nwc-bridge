@@ -214,7 +214,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · **탈출 견적 = 브로드캐스트할 tx/패키지 개수 + 총 vByte + 현재 feerate 기준 예상 sats + 가치 대비 %** · **경제성 판정("빼는 게 더 손해" 명시 — sub-dust만이 아니라 660 sats류 저액도, 깊은 체인의 고액도 feerate 따라 해당)** · **status='swept'는 '일방탈출 불가 — 협조 회수 전용' 뱃지(§2.7)**. 서버 렌더 우선(라이브는 #13).
   DoD: ready/degraded 양쪽에서 렌더.
 
-- ⬜ **#13 `exit/13-ui-stepper`** (M)
+- ✅ **#13 `exit/13-ui-stepper`** (M)
   요구 10의 그림. vtxo별 수직 스테퍼: commitment(항상 온체인)→TREE…→CHECKPOINT/ARK→vtxo tx, 단계별 ✅컨펌/🕐멤풀/⬜대기 + **단계별 vsize 표기(합계가 #12 견적과 일치)** → `WAIT: CSV n/총` 카운트다운 → `SWEEP → 주소`. SSE 라이브 갱신(기존 data-슬롯 패턴). 이 그림이 "몇 번을 브로드캐스트해야 하는지"의 시각 답이다.
   DoD: 진행 중 exit이 실시간으로 단계 이동.
 
