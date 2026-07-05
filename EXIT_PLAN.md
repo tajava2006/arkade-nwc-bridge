@@ -224,7 +224,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ### Phase 5 — 드릴 + 문서
 
-- ⬜ **#15 `exit/15-drill-regtest`** (L) — **브라우저 e2e 규모로 확대** (2026-07-05)
+- ✅ **#15 `exit/15-drill-regtest`** (L) — **브라우저 e2e 규모로 확대** (2026-07-05)
   단순 CLI 드릴이 아니라 **완전한 로컬 유저-시선 e2e 환경**: arkade-regtest 스택(ts-sdk repo `regtest/` — bitcoin core + arkd + arkd-wallet + mempool/esplora + boltz 이미 다 포함, docker)을 이 개발 머신에서 띄우고, bridge를 `data/config.json`로 그 인프라에 붙여(`network: regtest`, `arkServerUrl: http://localhost:7070`, `esploraUrls: ["http://localhost:3000/api"]`, `boltzApiUrl: http://localhost:9069`), **localhost:4282에서 브라우저로 처음(setup)부터 끝(sweep)까지** 실행. 이게 에픽 스코프 안인 이유: 인프라는 arkade-regtest가 이미 갖췄고 bridge를 붙이는 건 #06 config override 덕에 파일 하나 — **새 에픽이 아니라 이 태스크의 구현 방식**. 산출물: ① `test-script/regtest-e2e/` 아래 bring-up 스크립트(regtest up + config 주입 + bridge 기동) + 티어다운, ② 드릴 런북, ③ **#01 이월분**(regtest mempool의 `/txs/package` 실지원 = 실브로드캐스트 최종 검증), ④ **커밋용 fixture를 regtest에서 채취해 #08/#10에 주입**(mainnet 덤프 대체). 드릴 시퀀스: setup → 수신 → vault 동기화 확인 → **arkd 컨테이너 stop** → bridge 재시작 → degraded 부팅 → 탭에서 vtxo별 exit → 블록 채굴로 CSV 경과 → sweep 완주. 여기서 나오는 수정은 이 브랜치 또는 소형 후속 브랜치.
   선행: 이 머신에 docker 필요(colima 권장 — Docker Desktop보다 가벼움). arkade-regtest boltz는 stock이라 **sub-dust LN은 이 환경에서 안 됨**(커스텀 subdust boltz 미주입) — 단, exit은 boltz 무관이라 이 드릴엔 영향 없음. sub-dust까지 e2e로 보려면 커스텀 boltz 주입이 별도 후속.
   DoD: 브라우저에서 setup→sweep 완주 재현. 이게 이 기능의 존재 증명이자 유일한 실브로드캐스트 검증.
