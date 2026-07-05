@@ -44,6 +44,7 @@ const STUB_EXIT_ENGINE: ExitEngine = {
   explorer: async () => {
     throw new Error('stub')
   },
+  fundingStatus: async () => ({ address: 'bc1pstubfunding', balanceSat: 5_000 }),
   snapshot: () => ({ ops: [], active: null }),
   onUpdate: () => () => {},
   stop: () => {},

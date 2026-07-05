@@ -23,7 +23,7 @@ import { estimateExit } from '../exit/estimate'
 import { isVtxoExitReady, listVaultVtxos } from '../exit/vault'
 import { getExitOp } from '../exit/ops'
 import { exitView, type ExitRow } from './views/exit'
-import { exitDetailView } from './views/exit_detail'
+import { exitDetailView, exitSweepError } from './views/exit_detail'
 import { buildExitStepper } from '../exit/stepper'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
@@ -320,6 +320,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               op: getExitOp(db, vtxo.txid, vtxo.vout),
             }
           })
+          const funding = await st.exitEngine.fundingStatus()
           return htmlResponse(
             exitView({
               rows,
@@ -327,6 +328,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               degraded: st.mode === 'degraded',
               stats: vaultStats(db),
               nowSec,
+              fundingAddress: funding.address,
+              fundingBalanceSat: funding.balanceSat,
             }),
           )
         },
@@ -342,7 +345,47 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const feeRate = await st.exitEngine.feeRate()
           const stepper = await buildExitStepper({ db, explorer }, txid, vout, feeRate)
           if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
-          return htmlResponse(exitDetailView({ stepper, degraded: st.mode === 'degraded' }))
+          let estimate = null
+          try {
+            estimate = estimateExit(db, txid, vout, feeRate)
+          } catch {
+            estimate = null
+          }
+          const funding = await st.exitEngine.fundingStatus()
+          return htmlResponse(
+            exitDetailView({ stepper, estimate, funding, degraded: st.mode === 'degraded' }),
+          )
+        },
+      },
+      '/exit/:txid/:vout/start': {
+        POST: (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          // fire-and-forget: the engine queues + drives the op, progress
+          // streams back over the exit-op SSE event
+          st.exitEngine.startExit(txid, vout)
+          return Response.redirect(`/exit/${txid}/${vout}`, 303)
+        },
+      },
+      '/exit/:txid/:vout/sweep': {
+        POST: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          try {
+            await st.exitEngine.sweep([{ txid, vout }])
+          } catch (err) {
+            return htmlResponse(
+              exitSweepError(txid, vout, err instanceof Error ? err.message : String(err)),
+              { status: 400 },
+            )
+          }
+          return Response.redirect(`/exit/${txid}/${vout}`, 303)
         },
       },
       '/connections': {
