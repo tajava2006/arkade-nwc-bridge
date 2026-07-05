@@ -210,7 +210,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ### Phase 4 — /exit 탭 UI
 
-- ⬜ **#12 `exit/12-ui-tab`** (M)
+- ✅ **#12 `exit/12-ui-tab`** (M)
   nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · **탈출 견적 = 브로드캐스트할 tx/패키지 개수 + 총 vByte + 현재 feerate 기준 예상 sats + 가치 대비 %** · **경제성 판정("빼는 게 더 손해" 명시 — sub-dust만이 아니라 660 sats류 저액도, 깊은 체인의 고액도 feerate 따라 해당)** · **status='swept'는 '일방탈출 불가 — 협조 회수 전용' 뱃지(§2.7)**. 서버 렌더 우선(라이브는 #13).
   DoD: ready/degraded 양쪽에서 렌더.
 
