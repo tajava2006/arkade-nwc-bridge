@@ -200,7 +200,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   (#01 결과에 따라 bitcoind `submitpackage` 폴백 broadcaster 포함 여부 결정.)
   DoD: mocked esplora로 상태 전이 단위 테스트.
 
-- ⬜ **#10 `exit/10-engine-sweep`** (M)
+- ✅ **#10 `exit/10-engine-sweep`** (M)
   `src/exit/sweep.ts`: `prepareUnrollTransaction` 로컬판 — 저장 tapTree의 exitPaths + esplora 컨펌 정보로 CSV 판정, 여러 vtxo 배치 입력, 목적지 default = nsec P2TR(오버라이드 입력 허용), `DUST_AMOUNT`(546) 가드, feerate floor `MIN_FEE_RATE`.
   DoD: fixture tapTree 단위 테스트 (실브로드캐스트 검증은 #15).
 
