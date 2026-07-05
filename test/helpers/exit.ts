@@ -1,0 +1,82 @@
+import { base64, hex } from '@scure/base'
+import {
+  ChainTxType,
+  OnchainWallet,
+  SingleKey,
+  Transaction,
+  type ChainTx,
+} from '@arkade-os/sdk'
+import type { VaultProofTx, VaultVtxo } from '../../src/exit/vault'
+
+export const ANCHOR_SCRIPT_HEX = '51024e73' // zero-value P2A, same bytes arkd emits
+
+// A REAL exit-proof shape, signed but not finalized — exactly what
+// getVirtualTxs serves: Unroll.Session runs tx.finalize() on ARK/CHECKPOINT
+// entries (needs a valid signature in the PSBT) and lifts input 0's
+// tapKeySig for TREE entries (a p2tr keyspend signature doubles as one).
+// Built from a deterministic key so engine-level tests can drive the actual
+// SDK session over synthetic vaults instead of mainnet dumps (which must
+// never be committed — EXIT_PLAN §6 fixture privacy).
+export interface SignedExitFixture {
+  /** the vtxo's own tx — the thing Session broadcasts last */
+  txid: string
+  psbtB64: string
+  /** fake commitment ancestor — chain marks it COMMITMENT so Session skips it */
+  parentTxid: string
+  chain: ChainTx[]
+  proofs: VaultProofTx[]
+  vtxo: Omit<VaultVtxo, 'syncedAt'>
+}
+
+export async function makeSignedExitFixture(
+  seed: number,
+  opts: { chainType?: ChainTxType; valueSat?: number } = {},
+): Promise<SignedExitFixture> {
+  const chainType = opts.chainType ?? ChainTxType.ARK
+  const valueSat = opts.valueSat ?? 10_000
+
+  const identity = SingleKey.fromPrivateKey(new Uint8Array(32).fill(seed))
+  // OnchainWallet.create is network-free (provider stays lazy); it hands us a
+  // ready-made p2tr payment for the identity, same shape arkd locks vtxos to
+  const wallet = await OnchainWallet.create(identity, 'bitcoin')
+  const p2tr = wallet.onchainP2TR
+
+  const parent = new Transaction({ allowUnknownOutputs: true })
+  parent.addInput({ txid: new Uint8Array(32).fill(seed ^ 0xff), index: 0 })
+  parent.addOutput({ script: p2tr.script, amount: BigInt(valueSat) })
+  parent.addOutput({ script: hex.decode(ANCHOR_SCRIPT_HEX), amount: 0n })
+
+  const child = new Transaction({ allowUnknownOutputs: true })
+  child.addInput({
+    txid: parent.id,
+    index: 0,
+    witnessUtxo: { script: p2tr.script, amount: BigInt(valueSat) },
+    tapInternalKey: p2tr.tapInternalKey,
+  })
+  child.addOutput({ script: p2tr.script, amount: BigInt(valueSat) })
+  child.addOutput({ script: hex.decode(ANCHOR_SCRIPT_HEX), amount: 0n })
+
+  const signed = await identity.sign(child)
+  const txid = signed.id
+  const chain: ChainTx[] = [
+    { txid, type: chainType, expiresAt: '1783431985', spends: [parent.id] },
+    { txid: parent.id, type: ChainTxType.COMMITMENT, expiresAt: '1783431985', spends: [] },
+  ]
+  return {
+    txid,
+    psbtB64: base64.encode(signed.toPSBT()),
+    parentTxid: parent.id,
+    chain,
+    proofs: [{ txid, type: chainType, psbtB64: base64.encode(signed.toPSBT()) }],
+    vtxo: {
+      txid,
+      vout: 0,
+      valueSat,
+      script: hex.encode(p2tr.script),
+      tapTree: 'c0de', // sweep-path tests (#10) replace this with a real encoded tree
+      status: 'preconfirmed',
+      expiresAt: 1783431985,
+      chain,
+    },
+  }
+}

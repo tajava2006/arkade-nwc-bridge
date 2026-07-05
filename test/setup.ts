@@ -6,3 +6,7 @@
 // adding any new module to the graph can flip it. ESM-importing it here,
 // before any test file loads, resolves it once so later requires hit cache.
 import '@noble/curves/secp256k1.js'
+// @bitcoinerlab/descriptors-scure also CJS-requires @scure/btc-signer (async
+// ESM as well) — warming only @noble/curves left this race open, which is why
+// fresh worktrees kept aborting a file on their first `bun test`.
+import '@scure/btc-signer'

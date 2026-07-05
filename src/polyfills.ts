@@ -7,6 +7,9 @@
 // boot path (observed on the #07 branch). Every bridge entrypoint imports
 // this file first, so warming here covers them all.
 import '@noble/curves/secp256k1.js'
+// Same trap one layer up: @bitcoinerlab/descriptors-scure CJS-requires
+// @scure/btc-signer (also async ESM). Warm both or the crash just moves.
+import '@scure/btc-signer'
 
 // The Ark SDK uses EventSource for SSE streams (settlement events, contract
 // watching). Bun ships EventSource globally on recent versions, but install
