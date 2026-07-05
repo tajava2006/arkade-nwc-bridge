@@ -19,6 +19,8 @@ export const ANCHOR_SCRIPT_HEX = '51024e73' // zero-value P2A, same bytes arkd e
 // SDK session over synthetic vaults instead of mainnet dumps (which must
 // never be committed — EXIT_PLAN §6 fixture privacy).
 export interface SignedExitFixture {
+  /** key that owns the vtxo (signs the exit-path sweep) */
+  identity: SingleKey
   /** the vtxo's own tx — the thing Session broadcasts last */
   txid: string
   psbtB64: string
@@ -35,12 +37,14 @@ export const FIXTURE_CSV_BLOCKS = 10n
 
 export async function makeSignedExitFixture(
   seed: number,
-  opts: { chainType?: ChainTxType; valueSat?: number } = {},
+  opts: { chainType?: ChainTxType; valueSat?: number; identity?: SingleKey } = {},
 ): Promise<SignedExitFixture> {
   const chainType = opts.chainType ?? ChainTxType.ARK
   const valueSat = opts.valueSat ?? 10_000
 
-  const identity = SingleKey.fromPrivateKey(new Uint8Array(32).fill(seed))
+  // one wallet key owns every vtxo in real life — batch-sweep tests pass a
+  // shared identity while the seed keeps parent txids distinct
+  const identity = opts.identity ?? SingleKey.fromPrivateKey(new Uint8Array(32).fill(seed))
   // OnchainWallet.create is network-free (provider stays lazy); it hands us a
   // ready-made p2tr payment for the identity, same shape arkd locks vtxos to
   const wallet = await OnchainWallet.create(identity, 'bitcoin')
@@ -79,6 +83,7 @@ export async function makeSignedExitFixture(
     { txid: parent.id, type: ChainTxType.COMMITMENT, expiresAt: '1783431985', spends: [] },
   ]
   return {
+    identity,
     txid,
     psbtB64: base64.encode(signed.toPSBT()),
     parentTxid: parent.id,
@@ -93,6 +98,42 @@ export async function makeSignedExitFixture(
       status: 'preconfirmed',
       expiresAt: 1783431985,
       chain,
+    },
+  }
+}
+
+// Chain simulator: txs start unknown, broadcasting via the bumper confirms
+// them instantly (skips Session's 5s mempool poll), the tip is hand-advanced
+// to run CSV clocks, and every raw broadcast is captured for inspection.
+export function makeMockChain(startHeight = 1_000) {
+  const confirmed = new Map<string, { height: number; time: number }>()
+  let tip = { height: startHeight, time: startHeight * 600, hash: 'h' }
+  const broadcasts: string[][] = []
+  const explorer = {
+    async getTxStatus(txid: string) {
+      const c = confirmed.get(txid)
+      if (!c) throw new Error('not found')
+      return { confirmed: true, blockHeight: c.height, blockTime: c.time }
+    },
+    async broadcastTransaction(...txs: string[]) {
+      broadcasts.push(txs)
+      return 'ok'
+    },
+    async getChainTip() {
+      return tip
+    },
+    async getFeeRate() {
+      return 2
+    },
+  }
+  return {
+    explorer,
+    broadcasts,
+    confirm(txid: string) {
+      confirmed.set(txid, { height: tip.height, time: tip.time })
+    },
+    advance(blocks: number) {
+      tip = { ...tip, height: tip.height + blocks, time: tip.time + blocks * 600 }
     },
   }
 }

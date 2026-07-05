@@ -19,6 +19,7 @@ import {
   setExitOpState,
   type ExitOp,
 } from './ops'
+import { sweepVtxos, type SweepResult } from './sweep'
 
 // The emergency half of unilateral exit (EXIT_PLAN #09): drives the SDK's
 // Unroll.Session over the local vault (VaultIndexer) with CPFP fees paid by
@@ -44,6 +45,12 @@ export interface ExitEngineUpdate {
 export interface ExitEngine {
   /** Enqueue a vtxo for unilateral exit; restarts a failed op. No-op while queued/active. */
   startExit(txid: string, vout: number): void
+  /**
+   * Spend sweepable vtxos through their CSV exit path in ONE tx (fee
+   * sharing — the exit decision was already made per-vtxo, EXIT_PLAN §1).
+   * destAddress defaults to the nsec-derived P2TR.
+   */
+  sweep(outpoints: { txid: string; vout: number }[], destAddress?: string): Promise<SweepResult>
   /** Re-enqueue non-terminal ops after a restart. */
   resume(): void
   snapshot(): { ops: ExitOp[]; active: string | null }
@@ -193,11 +200,49 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     }
   }, deps.pollIntervalMs ?? DEFAULT_POLL_MS)
 
+  // Default sweep destination — same key, plain address, no ASP involved.
+  let defaultDestPromise: Promise<string> | null = null
+  const defaultDest = (): Promise<string> => {
+    if (!defaultDestPromise) {
+      defaultDestPromise = OnchainWallet.create(
+        deps.identity,
+        deps.network,
+        new EsploraProvider(deps.esploraUrls[0]),
+      ).then((w) => w.address)
+    }
+    return defaultDestPromise
+  }
+
   return {
     startExit(txid, vout) {
       createOrRestartExitOp(db, txid, vout)
       notify(txid, vout)
       enqueue(txid, vout)
+    },
+    async sweep(outpoints, destAddress) {
+      for (const o of outpoints) {
+        const op = getExitOp(db, o.txid, o.vout)
+        if (op?.state !== 'sweepable') {
+          throw new Error(
+            `${o.txid}:${o.vout} is not sweepable (state: ${op?.state ?? 'no exit op'})`,
+          )
+        }
+      }
+      const { explorer } = await providers()
+      const dest = destAddress ?? (await defaultDest())
+      const result = await sweepVtxos(
+        { db, identity: deps.identity, explorer, network: deps.network },
+        outpoints,
+        dest,
+      )
+      for (const o of outpoints) {
+        setExitOpState(db, o.txid, o.vout, 'swept', { sweepTxid: result.txid, destAddress: dest })
+        notify(o.txid, o.vout)
+      }
+      log(
+        `exit-engine: swept ${result.inputCount} vtxo(s) → ${dest} (${result.amountSat} sats, fee ${result.feeSat}) in ${result.txid}`,
+      )
+      return result
     },
     resume() {
       const pending = listExitOps(db, ['unrolling'])
