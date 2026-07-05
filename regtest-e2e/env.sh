@@ -4,16 +4,27 @@
 
 set -euo pipefail
 
-# Where the arkade-regtest checkout lives. Default assumes the operator
-# workspace layout (sibling ../ts-sdk/regtest submodule); override for any
-# other setup, or clone github.com/ArkLabsHQ/arkade-regtest and point here.
-REGTEST_DIR="${REGTEST_DIR:-../../../ts-sdk/regtest}"
-
 # The bridge runs from its OWN runtime dir so its ./data never coincides with
 # the operator's real bridge data or the dev checkout's ./data — the regtest
 # account/seed and sqlite live only here (EXIT_PLAN #15, isolation ask).
 BRIDGE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="${BRIDGE_REPO}/regtest-e2e/runtime"
+
+# Where arkade-regtest lives (ts-sdk's regtest submodule). Auto-discovered
+# relative to THIS script (absolute, so it's CWD-independent), trying the
+# layouts we ship in: a normal checkout (reference/arkade-nwc-bridge, sibling
+# reference/ts-sdk) and a worktree nested under .worktrees/. Override
+# REGTEST_DIR for any other setup, or clone github.com/ArkLabsHQ/arkade-regtest.
+if [ -z "${REGTEST_DIR:-}" ]; then
+  for cand in \
+    "${BRIDGE_REPO}/../ts-sdk/regtest" \
+    "${BRIDGE_REPO}/../../../ts-sdk/regtest" \
+    "${BRIDGE_REPO}/../../ts-sdk/regtest"; do
+    if [ -f "${cand}/regtest.mjs" ]; then REGTEST_DIR="${cand}"; break; fi
+  done
+  # fall back to the normal-checkout path so a miss gives a sensible error
+  REGTEST_DIR="${REGTEST_DIR:-${BRIDGE_REPO}/../ts-sdk/regtest}"
+fi
 
 # Regtest service endpoints (arkade-regtest defaults — README "Service URLs").
 ARKD_URL="http://localhost:7070"
