@@ -23,6 +23,8 @@ import { estimateExit } from '../exit/estimate'
 import { isVtxoExitReady, listVaultVtxos } from '../exit/vault'
 import { getExitOp } from '../exit/ops'
 import { exitView, type ExitRow } from './views/exit'
+import { exitDetailView } from './views/exit_detail'
+import { buildExitStepper } from '../exit/stepper'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
 import type { OutboxWatcher } from '../nostr/outbox'
@@ -327,6 +329,20 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               nowSec,
             }),
           )
+        },
+      },
+      '/exit/:txid/:vout': {
+        GET: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          const explorer = await st.exitEngine.explorer()
+          const feeRate = await st.exitEngine.feeRate()
+          const stepper = await buildExitStepper({ db, explorer }, txid, vout, feeRate)
+          if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
+          return htmlResponse(exitDetailView({ stepper, degraded: st.mode === 'degraded' }))
         },
       },
       '/connections': {
