@@ -6,6 +6,16 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
+# Always start from a pristine slate. arkade-regtest's `start` isn't
+# idempotent on leftover volumes — a plain re-run over a previous run's
+# docker volumes fails at "Bitcoin Core wallet (created) did not become ready
+# in time". Each exit drill consumes its chain (you exit + sweep VTXOs) so
+# there's nothing to resume anyway; wipe the chain volumes AND the stale
+# bridge runtime (old regtest account/vault) so every up.sh is a clean drill.
+echo "▶ wiping any previous stack + bridge runtime for a fresh drill…"
+regtest clean >/dev/null 2>&1 || true
+rm -rf "${RUNTIME_DIR}"
+
 # Both profiles: `ark` is all the exit feature needs, but the bridge requires
 # a reachable Boltz at boot (getFees), so `boltz` must be up too — its REST
 # comes up without LN channels, which is all boot needs. We never make an LN
