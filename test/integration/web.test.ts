@@ -502,4 +502,101 @@ describe('web server — degraded mode', () => {
     expect(body).toContain('1,000 sats') // the seeded vault vtxo
     expect(body).toContain('exit cost')
   })
+
+  test('/exit/:txid/:vout renders DB-only and arms the client probe loop', async () => {
+    // the stub engine's explorer() throws, so a 200 here proves the page
+    // render never touched esplora — statuses are the fill-in loop's job
+    const res = await fetch(`${base}/exit/${'a'.repeat(64)}/0`)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).toContain(`data-step="${'a'.repeat(64)}"`)
+    expect(body).toContain('data-probe-note')
+    expect(body).toContain(`/exit/${'a'.repeat(64)}/0/step/`)
+    expect(body).toContain('not broadcast yet')
+  })
+
+  test('step endpoint answers 503 when no esplora resolves', async () => {
+    const res = await fetch(`${base}/exit/${'a'.repeat(64)}/0/step/${'a'.repeat(64)}`)
+    expect(res.status).toBe(503)
+  })
+})
+
+describe('web server — exit step endpoint', () => {
+  const TXID = 'a'.repeat(64)
+  let temp: TempDb
+  let web: WebServer
+  let base: string
+
+  beforeAll(() => {
+    temp = openTempDb()
+    storeVtxoWithProofs(
+      temp.db,
+      {
+        txid: TXID,
+        vout: 0,
+        valueSat: 1000,
+        script: '5120' + 'ab'.repeat(32),
+        tapTree: 'c0de',
+        status: 'preconfirmed',
+        expiresAt: null,
+        chain: [
+          { txid: TXID, type: ChainTxType.ARK, expiresAt: '', spends: ['c'.repeat(64)] },
+          { txid: 'c'.repeat(64), type: ChainTxType.COMMITMENT, expiresAt: '', spends: [] },
+        ],
+      },
+      [{ txid: TXID, type: ChainTxType.ARK, psbtB64: 'psbt' }],
+    )
+    // explorer that has seen nothing — every probe answers "not broadcast"
+    const explorer = {
+      getTxStatus: async () => {
+        throw new Error('not found')
+      },
+      getChainTip: async () => ({ height: 100, time: 60_000, hash: 'h' }),
+    }
+    const state: AppStateRef = {
+      current: {
+        mode: 'degraded',
+        error: 'getInfo: ConnectionRefused',
+        since: Math.floor(Date.now() / 1000) - 120,
+        attempts: 3,
+        onchainAddress: 'bc1pstubfunding',
+        exitEngine: {
+          ...STUB_EXIT_ENGINE,
+          explorer: async () => explorer as unknown as Awaited<ReturnType<ExitEngine['explorer']>>,
+        },
+      },
+    }
+    web = startWebServer({
+      cfg: CFG,
+      db: temp.db,
+      state,
+      sseHub: new SseHub(),
+      outbox: STUB_OUTBOX,
+      bootReady: async () => {},
+    })
+    base = web.url
+  })
+
+  afterAll(async () => {
+    await web.stop()
+    temp.cleanup()
+  })
+
+  test('serves the probed step as status + rendered li', async () => {
+    const res = await fetch(`${base}/exit/${TXID}/0/step/${TXID}`)
+    expect(res.status).toBe(200)
+    const d = (await res.json()) as { status: string; stepHtml: string; waitHtml?: string }
+    expect(d.status).toBe('pending')
+    expect(d.stepHtml).toContain(`data-step="${TXID}"`)
+    expect(d.stepHtml).toContain('not broadcast yet')
+    expect(d.waitHtml).toBeUndefined()
+  })
+
+  test('404 for txids outside the vtxo chain (no open esplora proxy)', async () => {
+    const res = await fetch(`${base}/exit/${TXID}/0/step/${'b'.repeat(64)}`)
+    expect(res.status).toBe(404)
+    // commitment entries are metadata, not probeable steps
+    const res2 = await fetch(`${base}/exit/${TXID}/0/step/${'c'.repeat(64)}`)
+    expect(res2.status).toBe(404)
+  })
 })

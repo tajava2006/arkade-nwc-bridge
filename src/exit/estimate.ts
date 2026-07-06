@@ -69,6 +69,17 @@ function finalizedVsize(type: ChainTxType, psbtB64: string): number {
   return tx.vsize
 }
 
+/** finalized vsize of one stored proof tx; null when it's missing or undecodable */
+export function storedTxVsize(db: Database, txid: string, type: ChainTxType): number | null {
+  const psbt = getProofPsbts(db, [txid]).get(txid)
+  if (!psbt) return null
+  try {
+    return finalizedVsize(type, psbt)
+  } catch {
+    return null
+  }
+}
+
 function cpfpChildVb(): number {
   return Number(
     TxWeightEstimator.create()
