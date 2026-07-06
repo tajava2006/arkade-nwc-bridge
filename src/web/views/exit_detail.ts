@@ -125,7 +125,10 @@ const TYPE_LABEL: Record<string, string> = {
   [ChainTxType.UNSPECIFIED]: 'tx',
 }
 
-function stepLine(step: ExitStep): RawHtml {
+// Exported for the per-step status endpoint: a probe result re-renders the
+// exact li the initial page carried, so the client only swaps nodes by their
+// data-step key — no client-side templating.
+export function stepLine(step: ExitStep): RawHtml {
   if (step.kind === 'broadcast') {
     const vsize = step.vsize !== null ? html` · <span class="muted">${step.vsize} vB</span>` : html``
     const state =
@@ -134,31 +137,31 @@ function stepLine(step: ExitStep): RawHtml {
         : step.status === 'mempool'
           ? 'in mempool — waiting for a block'
           : 'not broadcast yet'
-    return html`<li>
+    return html`<li data-step="${step.txid}">
       ${icon(step.status)} <strong>${TYPE_LABEL[step.txType] ?? 'tx'}</strong>
       <code>${short(step.txid)}</code>${vsize} — ${state}
     </li>`
   }
   if (step.kind === 'wait') {
     if (step.status === 'sweepable') {
-      return html`<li>${icon(step.status)} <strong>CSV timelock elapsed</strong> — ready to sweep</li>`
+      return html`<li data-step="wait">${icon(step.status)} <strong>CSV timelock elapsed</strong> — ready to sweep</li>`
     }
     if (step.status === 'running') {
       const unit = step.unit === 'blocks' ? 'blocks' : 'seconds'
-      return html`<li>
-        ${icon(step.status)} <strong>CSV wait</strong> — ${step.have}/${step.need} ${unit}
+      return html`<li data-step="wait">
+        ${icon(step.status)} <strong>CSV wait</strong> — ${step.have ?? '…'}/${step.need} ${unit}
       </li>`
     }
-    return html`<li>${icon(step.status)} <strong>CSV wait</strong> — starts once fully unrolled</li>`
+    return html`<li data-step="wait">${icon(step.status)} <strong>CSV wait</strong> — starts once fully unrolled</li>`
   }
   // sweep
   if (step.status === 'done') {
-    return html`<li>
+    return html`<li data-step="sweep">
       ${icon(step.status)} <strong>swept</strong> → <code>${step.destAddress ?? '—'}</code>
       ${step.sweepTxid ? html`<br /><span class="muted">tx <code>${short(step.sweepTxid)}</code></span>` : html``}
     </li>`
   }
-  return html`<li>
+  return html`<li data-step="sweep">
     ${icon(step.status)} <strong>sweep</strong> → your onchain address
     ${step.status === 'sweepable' ? html` <span class="ok">(available now)</span>` : html``}
   </li>`
@@ -177,6 +180,58 @@ export function renderStepperFragment(stepper: ExitStepper): RawHtml {
     <ol style="list-style:none; padding-left:0; line-height:2;">
       ${stepper.steps.map(stepLine)}
     </ol>
+  `
+}
+
+// Onchain statuses arrive after render — the initial page is DB-only so a
+// 100+ entry chain can't stall it. Steps are probed one at a time root→leaf
+// and the first non-confirmed answer ends the scan: Session broadcasts in
+// order, so nothing past that point can be onchain. Rows keep their
+// server-rendered "not broadcast yet" default; only probed rows get swapped.
+function statusFillIn(s: ExitStepper): RawHtml {
+  if (s.probe.length === 0) return html``
+  return html`
+    <p class="muted" data-probe-note>checking onchain status…</p>
+    <script>
+      ;(function () {
+        var probe = ${raw(JSON.stringify(s.probe))}
+        var base = '/exit/${s.txid}/${s.vout}/step/'
+        var note = document.querySelector('[data-probe-note]')
+        var i = 0
+        function set(msg) {
+          if (note) note.textContent = msg
+        }
+        function swap(key, markup) {
+          if (!markup) return
+          var el = document.querySelector('[data-step="' + key + '"]')
+          if (el) el.outerHTML = markup
+        }
+        function next() {
+          if (i >= probe.length) {
+            set('')
+            return
+          }
+          set('checking onchain status… ' + (i + 1) + '/' + probe.length)
+          fetch(base + probe[i])
+            .then(function (r) {
+              if (!r.ok) throw new Error('status ' + r.status)
+              return r.json()
+            })
+            .then(function (d) {
+              swap(probe[i], d.stepHtml)
+              swap('wait', d.waitHtml)
+              swap('sweep', d.sweepHtml)
+              i = i + 1
+              if (d.status === 'confirmed') next()
+              else set('')
+            })
+            .catch(function () {
+              set('onchain status check unavailable — showing last known state')
+            })
+        }
+        next()
+      })()
+    </script>
   `
 }
 
@@ -209,6 +264,7 @@ export function exitDetailView(args: {
         : html``}
       <p><strong>${s.valueSat.toLocaleString()} sats</strong> · <code>${s.txid}:${s.vout}</code></p>
       <div data-exit-stepper="${s.txid}:${s.vout}">${renderStepperFragment(s)}</div>
+      ${statusFillIn(s)}
 
       <h2>Action</h2>
       ${actionPanel(s, args.estimate)}

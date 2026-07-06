@@ -210,11 +210,26 @@ verdict / `proofComplete`, feeding both the per-row cost column and the stepper.
   the funding panel (nsec P2TR + QR + onchain balance, low-fuel warning against
   the estimate).
 
+The detail page renders **DB-only**, then fills in onchain state. A mainnet
+chain is 100+ entries, and the first cut probed each one serially *before*
+responding — long enough for Bun.serve's idleTimeout to kill the socket (the
+page "crashed" with nothing in the logs). Now the page ships instantly with
+every step defaulting to "not broadcast yet", and a ~30-line inline loop
+probes `/exit/:txid/:vout/step/:stepTxid` one tx at a time root→leaf, swapping
+in each server-rendered `<li>`. The first non-confirmed answer ends the scan:
+Session broadcasts in order and waits out each confirmation, so a chain always
+reads `[confirmed…][≤1 mempool][absent…]` — an untouched vtxo settles in one
+probe. Op states shortcut the rest: waiting/sweepable/swept exist only after
+Session DONE, so their statuses are final with zero probes ('waiting' probes
+the vtxo tx once, for the CSV countdown). One esplora read per request, capped
+at 4s, keeps every probe far under any socket timeout; a hung explorer
+degrades to "not broadcast yet" plus a "status check unavailable" note.
+
 Live updates are coarse: the engine's per-op events broadcast an `exit-op` SSE
 carrying just the outpoint, and the client reloads if it's on the matching
-detail or the list page — recomputing the stepper's per-tx onchain status on
-every step would be too many esplora reads, and the detail page isn't kept open
-constantly (same strategy as `mode-change`).
+detail or the list page — each reload re-arms the probe loop, which stops at
+the frontier, so reloads stay cheap even mid-unroll (same strategy as
+`mode-change`).
 
 ## 7. Scope-outs
 

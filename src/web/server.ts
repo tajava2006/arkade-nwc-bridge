@@ -23,8 +23,8 @@ import { estimateExit } from '../exit/estimate'
 import { isVtxoExitReady, listVaultVtxos } from '../exit/vault'
 import { getExitOp } from '../exit/ops'
 import { exitView, type ExitRow } from './views/exit'
-import { exitDetailView, exitSweepError } from './views/exit_detail'
-import { buildExitStepper } from '../exit/stepper'
+import { exitDetailView, exitSweepError, stepLine } from './views/exit_detail'
+import { buildExitStepper, probeExitStep } from '../exit/stepper'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
 import type { OutboxWatcher } from '../nostr/outbox'
@@ -198,6 +198,10 @@ export function startWebServer(deps: WebServerDeps): WebServer {
   const server = Bun.serve({
     port: cfg.httpPort,
     hostname: cfg.httpBind,
+    // Bun's default (10s) also cuts off responses still waiting on upstream
+    // reads — routes that touch esplora (feeRate/funding/step probes) need
+    // the headroom on a slow day
+    idleTimeout: 30,
     routes: {
       '/setup': {
         GET: () => {
@@ -341,9 +345,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const { txid } = req.params
           const vout = Number.parseInt(req.params.vout, 10)
           if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
-          const explorer = await st.exitEngine.explorer()
           const feeRate = await st.exitEngine.feeRate()
-          const stepper = await buildExitStepper({ db, explorer }, txid, vout, feeRate)
+          const stepper = buildExitStepper({ db }, txid, vout, feeRate)
           if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
           let estimate = null
           try {
@@ -355,6 +358,32 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             exitDetailView({ stepper, estimate, funding, degraded: st.mode === 'degraded' }),
           )
+        },
+      },
+      // One onchain status probe per request, fetched by the detail page's
+      // fill-in loop after render — the initial stepper is DB-only so a long
+      // chain can't stall the page (see statusFillIn in views/exit_detail.ts).
+      '/exit/:txid/:vout/step/:stepTxid': {
+        GET: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return new Response('setup required', { status: 409 })
+          const { txid, stepTxid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          let explorer
+          try {
+            explorer = await st.exitEngine.explorer()
+          } catch {
+            return new Response('esplora unavailable', { status: 503 })
+          }
+          const probe = await probeExitStep({ db, explorer }, txid, vout, stepTxid)
+          if (!probe) return new Response('no such step', { status: 404 })
+          return Response.json({
+            status: probe.status,
+            stepHtml: stepLine(probe.step).value,
+            waitHtml: probe.wait ? stepLine(probe.wait).value : undefined,
+            sweepHtml: probe.sweep ? stepLine(probe.sweep).value : undefined,
+          })
         },
       },
       '/exit/:txid/:vout/start': {

@@ -26,6 +26,7 @@ const baseStepper = (over: Partial<ExitStepper> = {}): ExitStepper => ({
     { kind: 'wait', status: 'pending', need: 0, have: 0, unit: 'blocks' },
     { kind: 'sweep', status: 'pending', destAddress: null, sweepTxid: null },
   ],
+  probe: ['a'.repeat(64)],
   ...over,
 })
 
