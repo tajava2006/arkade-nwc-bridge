@@ -52,7 +52,7 @@ const STYLES = `
   .relay-dot.down { color: #888; }
 `
 
-type Nav = 'dashboard' | 'send' | 'connections' | 'history' | 'settings' | 'setup'
+type Nav = 'dashboard' | 'send' | 'exit' | 'connections' | 'history' | 'settings' | 'setup'
 
 export function layout(args: {
   title: string
@@ -69,6 +69,7 @@ export function layout(args: {
       : html`<nav>
           ${tab('dashboard', '/', 'Dashboard')}
           ${tab('send', '/send', 'Send')}
+          ${tab('exit', '/exit', 'Exit')}
           ${tab('connections', '/connections', 'Connections')}
           ${tab('history', '/history', 'History')}
           ${tab('settings', '/settings', 'Settings')}
@@ -125,8 +126,20 @@ const LIVE_SCRIPT = `<script>
     swap('[data-connection-relay-detail="' + id + '"]', d.detailHtml)
   })
   on('balance-status', function (d) { swap('[data-balance]', d.html) })
+  on('exit-readiness', function (d) { swap('[data-exit-readiness]', d.html) })
   on('history-status', function (d) { swap('[data-history]', d.html) })
   on('send-breakdown', function (d) { swap('[data-breakdown]', d.html) })
   on('offboards-update', function (d) { swap('[data-offboards]', d.html) })
+  // Degraded ↔ ready flips restructure the whole page — reload instead of
+  // fragment-swapping (EXIT_PLAN #07).
+  on('mode-change', function () { location.reload() })
+  // Exit op progress — reload if we're on the /exit list or this vtxo's
+  // detail page (the stepper is server-rendered from esplora reads).
+  on('exit-op', function (d) {
+    var slot = document.querySelector('[data-exit-stepper]')
+    var onDetail = slot && slot.getAttribute('data-exit-stepper') === d.key
+    var onList = document.querySelector('[data-exit-row]')
+    if (onDetail || onList) location.reload()
+  })
 })()
 </script>`

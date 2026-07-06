@@ -32,6 +32,7 @@ vtxo를 온체인까지 풀어내고(unroll), CSV 대기 후, 유저 단독 제�
 - degraded 부팅 모드(ASP 없이 뜨기)는 **선행 조건** 맞음.
 - 스텁 인덱서 만드는 방향 맞음. 단일 브랜치(하위작업 #08)로 충분하다고 판단 — 클래스 하나 + 테스트 크기.
 - esplora 의존 탈피(정확히는: 유저가 자기 mempool 인스턴스 URL을 지정할 수 있게) — **백로그**. #06에서 Config 필드로 설계해두면 코드는 사실상 공짜가 되고, 남는 건 문서화/설정 UI뿐.
+- **/exit 실행은 vtxo 단위 강제** (2026-07-04, #02 실측 후 확정): 탈출 비용이 vtxo마다 극단적으로 다르므로(660 sats vtxo는 dust 이상이어도 온체인 tx 두세 번 fee로 소멸; 반대로 깊은 체인의 큰 vtxo도 feerate에 따라 손해) 일괄 "전체 탈출" 실행은 두지 않는다. vtxo별로 **브로드캐스트할 tx 개수와 총 vByte를 그림과 숫자로** 보여 유저가 "이건 빼는 게 더 손해"를 가늠하게 한다.
 
 ## 2. 코드 검증 결과 (설계 근거 — 재검증 불필요하도록 기록)
 
@@ -91,6 +92,7 @@ vtxo를 온체인까지 풀어내고(unroll), CSV 대기 후, 유저 단독 제�
 ### 2.7 기타 확정 사실
 
 - 만료 = 탈출 데드라인: chain의 `expiresAt` / vtxo `expiresAt` 이후 ASP가 배치를 sweep하면 증명 무효. 만료 임박 exit은 ASP sweep과 race (분석: 워크스페이스 문서 UNROLL_TREE_MECHANICS.md).
+- **swept(=SDK recoverable) vtxo는 증명이 완비돼도 일방탈출 불가** — ASP sweep이 트리 root를 이미 소비해 사전서명 tx가 죽은 종이. 회수는 ASP 협조 settlement뿐 (`ts-sdk src/wallet/index.ts:683` isRecoverable = state 'swept' && unspent; sub-dust가 합계<dust로 방치되다 만료되는 전형 케이스). → **readiness 지표·/exit 탭은 status='swept'를 'ready'가 아니라 '협조 회수 전용'으로 구분**해야 과대표시가 안 된다 (#09/#12 반영, 2026-07-04 발견).
 - 여러 vtxo 동시 탈출: 공유 브랜치는 Session이 온체인/멤풀 상태를 보고 스킵/WAIT 처리(2.1) → 순차 실행이면 자연 dedup.
 - 비용 견적은 오프라인 계산 가능: 저장 PSBT의 vsize + child(~111 vB) × feerate 합 + sweep fee. exit-all은 tx 합집합 기준(공유 브랜치 1회 계상).
 - `bun test`는 `*.test.ts`만 집전 → 네트워크 치는 스파이크는 `test/spike/*.spike.ts`로 격리.
@@ -150,86 +152,95 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ### Phase 0 — 검증 스파이크 (여기서 죽으면 플랜 수정이 제일 싸다)
 
-- ⬜ **#01 `exit/01-spike-package-broadcast`** (S)
-  `POST {esplora}/txs/package` 실지원 검증: `mempool.arkade.sh/api`, `mempool.space/api` probe(유효하지 않은 패키지로 404 vs 파싱에러 판별) + arkade-regtest(localhost:3000)에서 실제 1P1C 성공 확인.
+- ✅ **#01 `exit/01-spike-package-broadcast`** (S)
+  `POST {esplora}/txs/package` 실지원 검증: `mempool.arkade.sh/api`, `mempool.space/api` probe(유효하지 않은 패키지로 404 vs 파싱에러 판별). 실제 1P1C 성공 확인은 docker 미가용으로 #15 드릴로 이월(스크립트 `--live` 모드로 준비).
   산출: `test/spike/package_broadcast.spike.ts` + §7 결정 기록(esplora 우선순위 리스트 확정, 전멸 시 bitcoind `submitpackage` 폴백을 #09 스코프에 추가).
   DoD: 결정 기록 작성됨.
 
-- ⬜ **#02 `exit/02-spike-offline-finalize`** (M)
+- ✅ **#02 `exit/02-spike-offline-finalize`** (M)
   핵심 디리스킹. 현재 mainnet vtxo로 chain+virtualTxs를 받아 로컬 JSON으로 덤프 → 인라인 스텁으로 `Session` 구성 → **`do()` 호출 없이** `next()` 드라이런: TREE `tapKeySig` finalize, ARK/CHECKPOINT `finalize()` 성공 확인. 페이지네이션 동작 확인. 증명 용량 실측. 타이밍 프로브: settle/send 직후 `getVirtualTxs`가 완비 PSBT를 주기까지 지연 측정 → ProofSync 백오프 파라미터.
   산출: `test/spike/offline_finalize.spike.ts` + §7 기록(용량 표, 타이밍, 라운드산/preconfirmed산 vtxo 각각 통과 여부). 덤프는 로컬 보관(mainnet txid가 지갑 역사를 드러내므로 **fixture 커밋 금지** — 커밋용 fixture는 #15 regtest에서 채취).
   DoD: vtxo 2종(라운드 산출, preconfirmed) 드라이런 통과.
 
 ### Phase 1 — Proof Vault + ProofSync
 
-- ⬜ **#03 `exit/03-vault-schema`** (M)
+- ✅ **#03 `exit/03-vault-schema`** (M)
   마이그레이션 **v10**: `exit_proof_txs(txid PK, type, psbt_base64, first_seen_at)` + `exit_vtxos(txid, vout, PK(txid,vout), vtxo_json, chain_json, expires_at, synced_at)`.
   `src/exit/vault.ts`: upsertProofTx / upsertVtxoChain / getChain / getProofTxs / listVtxos / missingTxids / gc(liveOutpoints) / stats(readiness 카운트+바이트). vtxo_json 직렬화: SDK `serializeVtxo` export 여부 확인, 안 되면 필요 필드(outpoint, value, script, tapTree, createdAt, expiresAt)만 자체 직렬화.
   DoD: 인메모리 sqlite 단위 테스트 + typecheck.
 
-- ⬜ **#04 `exit/04-proof-sync-engine`** (M)
+- ✅ **#04 `exit/04-proof-sync-engine`** (M)
   `src/exit/proof_sync.ts`: `syncOnce(currentVtxos)` — vault와 diff → 신규/변경 outpoint별 chain 페이지 순회 → 미보유 txid만 `getVirtualTxs` 배치 fetch → 트랜잭션 저장 → GC. 백오프 재시도(#02 결과 반영). 순수 로직 — index.ts 배선 없음.
   DoD: fake indexer로 단위 테스트(페이지네이션, 부분 실패, dedup fetch) + 라이브 지갑 1회 수동 실행.
 
-- ⬜ **#05 `exit/05-proof-sync-wiring`** (M)
+- ✅ **#05 `exit/05-proof-sync-wiring`** (M)
   index.ts 배선: boot reconcile + `notifyIncomingFunds` 훅 + bridge발 자금이동 후 트리거 + 주기 폴링(~10분) + shutdown teardown. 대시보드 exit-readiness 프래그먼트("vtxo N/M 증명완비 · 마지막 동기화 X분 전 · Y KB") + SSE 이벤트 `exit-readiness` (기존 SseHub/data-슬롯 패턴).
   DoD: mainnet에서 수신/송금/refresh 각각 후 vault 추종 + 대시보드 라이브 갱신 확인.
 
 ### Phase 2 — ASP 없이 부팅
 
-- ⬜ **#06 `exit/06-esplora-config`** (S)
+- ✅ **#06 `exit/06-esplora-config`** (S)
   defaults.ts에 exit용 esplora 우선순위 리스트(#01 결정) + Config 필드(→ `data/config.json` override로 **백로그 "유저 자기 mempool" 코드가 사실상 완성됨**). `src/exit/esplora.ts`: 리스트 기반 EsploraProvider 팩토리(첫 정상 응답 인스턴스 선택 수준의 단순 failover). 같은 URL을 `Wallet.create({esploraUrl})`에도 전달(평시/비상 뷰 일치).
   DoD: typecheck + mainnet 부팅 정상.
 
-- ⬜ **#07 `exit/07-degraded-boot`** (M)
+- ✅ **#07 `exit/07-degraded-boot`** (M)
   index.ts: `bootReady` 실패 시 크래시 대신 `mode:'degraded'` AppState(identity + esplora + OnchainWallet + db) + 주기 재시도로 ready 자동 승격(SSE 공지). server.ts: setup/ready 이분법 → 3-모드 가드, degraded에서 `/exit`(+ CPFP 펀딩 뷰) 허용, 나머지는 "ASP 연결 불가 — 일방탈출은 가능" 안내.
-  DoD: arkd 내리고 재시작 → degraded 부팅 + /exit 접근, arkd 올리면 재시작 없이 ready 승격.
+  ⚠ ASP만이 아니라 **Boltz 단독 장애도 degraded로 받아야 한다** — 2026-07-04 #06 스모크에서 boltz 도메인 일시 불통만으로 `initBoltz` throw → 프로세스 exit 1 실증(요구 1: "ark, boltz와 연결이 안 되어도 정상 동작"). `bootReady` 안의 wallet/boltz/nostr 각 단계를 개별 try로 감싸 부분 성공을 허용할지, 통째 degraded로 갈지는 구현 시 결정.
+  DoD: arkd 내리고 재시작 → degraded 부팅 + /exit 접근, arkd 올리면 재시작 없이 ready 승격. boltz만 내려도 최소한 crash 없이 부팅.
 
 ### Phase 3 — Exit 엔진
 
-- ⬜ **#08 `exit/08-stub-indexer`** (S) — 단일 브랜치로 충분
+- ✅ **#08 `exit/08-stub-indexer`** (S) — 단일 브랜치로 충분
   `src/exit/vault_indexer.ts`: vault에서 `getVirtualTxs` 서빙(+`getVtxoChain`도 vault에서), 나머지 메소드는 "not available offline" throw. IndexerProvider 인터페이스 준수.
   DoD: fixture 단위 테스트 (#02 덤프를 로컬로 사용, 커밋 fixture는 #15에서 교체).
 
-- ⬜ **#09 `exit/09-engine-core`** (L)
+- ✅ **#09 `exit/09-engine-core`** (L)
   마이그레이션 **v11**: `exit_ops(txid, vout, PK(txid,vout), state: unrolling|waiting|sweepable|swept|failed, sweep_txid, dest_address, error, created_at, updated_at)`.
   `src/exit/engine.ts`: `startExit(outpoints[])` → vault chain으로 `new Unroll.Session(...)`(스텁 indexer + 자체 esplora + OnchainWallet bumper), 순차 실행, 스텝 이벤트 SSE 중계, op 상태 전이, **부팅 시 미완료 op 재개**(degraded/ready 공통 — Session 재생성으로 충분, §2.1). CSV 충족 판정 헬퍼(`availableExitPath` 복제, blocks/time 겸용).
   (#01 결과에 따라 bitcoind `submitpackage` 폴백 broadcaster 포함 여부 결정.)
   DoD: mocked esplora로 상태 전이 단위 테스트.
 
-- ⬜ **#10 `exit/10-engine-sweep`** (M)
+- ✅ **#10 `exit/10-engine-sweep`** (M)
   `src/exit/sweep.ts`: `prepareUnrollTransaction` 로컬판 — 저장 tapTree의 exitPaths + esplora 컨펌 정보로 CSV 판정, 여러 vtxo 배치 입력, 목적지 default = nsec P2TR(오버라이드 입력 허용), `DUST_AMOUNT`(546) 가드, feerate floor `MIN_FEE_RATE`.
   DoD: fixture tapTree 단위 테스트 (실브로드캐스트 검증은 #15).
 
-- ⬜ **#11 `exit/11-engine-estimator`** (M)
+- ✅ **#11 `exit/11-engine-estimator`** (M)
   `src/exit/estimate.ts`: vtxo별 비용 = Σ(브랜치 tx vsize + child ~111vB)×feerate + sweep fee 분담. exit-all은 tx 합집합(공유 브랜치 1회 계상). CPFP 지갑 잔액 vs 견적 부족분. sub-dust "비용 > 가치" 판정.
   DoD: 단위 테스트. #09와 병렬 가능(입력은 vault만).
 
 ### Phase 4 — /exit 탭 UI
 
-- ⬜ **#12 `exit/12-ui-tab`** (M)
-  nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · 예상 비용 · sub-dust 경제성 경고. 서버 렌더 우선(라이브는 #13).
+- ✅ **#12 `exit/12-ui-tab`** (M)
+  nav 탭 + `/exit` 라우트 + vtxo 테이블: 금액 · **만료 카운트다운(최우선 표시 — 지나면 탈출 불가)** · 증명 상태 · **탈출 견적 = 브로드캐스트할 tx/패키지 개수 + 총 vByte + 현재 feerate 기준 예상 sats + 가치 대비 %** · **경제성 판정("빼는 게 더 손해" 명시 — sub-dust만이 아니라 660 sats류 저액도, 깊은 체인의 고액도 feerate 따라 해당)** · **status='swept'는 '일방탈출 불가 — 협조 회수 전용' 뱃지(§2.7)**. 서버 렌더 우선(라이브는 #13).
   DoD: ready/degraded 양쪽에서 렌더.
 
-- ⬜ **#13 `exit/13-ui-stepper`** (M)
-  요구 10의 그림. vtxo별 수직 스테퍼: commitment(항상 온체인)→TREE…→CHECKPOINT/ARK→vtxo tx, 단계별 ✅컨펌/🕐멤풀/⬜대기 → `WAIT: CSV n/총` 카운트다운 → `SWEEP → 주소`. SSE 라이브 갱신(기존 data-슬롯 패턴).
+- ✅ **#13 `exit/13-ui-stepper`** (M)
+  요구 10의 그림. vtxo별 수직 스테퍼: commitment(항상 온체인)→TREE…→CHECKPOINT/ARK→vtxo tx, 단계별 ✅컨펌/🕐멤풀/⬜대기 + **단계별 vsize 표기(합계가 #12 견적과 일치)** → `WAIT: CSV n/총` 카운트다운 → `SWEEP → 주소`. SSE 라이브 갱신(기존 data-슬롯 패턴). 이 그림이 "몇 번을 브로드캐스트해야 하는지"의 시각 답이다.
   DoD: 진행 중 exit이 실시간으로 단계 이동.
 
-- ⬜ **#14 `exit/14-ui-controls`** (M)
-  실행 컨트롤: vtxo별 [탈출 시작] / [전체 탈출] / [Sweep] POST + 확인 다이얼로그(총비용·소요 단계·비가역 고지) + 재개 상태 표시. CPFP 펀딩 패널: nsec P2TR 주소 + QR(기존 qr.ts) + 잔액 + 견적 대비 부족 경고 — degraded에서도 동작.
+- ✅ **#14 `exit/14-ui-controls`** (M)
+  실행 컨트롤: **실행은 반드시 vtxo 단위** — vtxo별 [탈출 시작]/[Sweep]만 두고 일괄 [전체 탈출] 버튼은 두지 않는다(§1 추가 확정: 경제성이 vtxo마다 달라 개별 판단 강제). 확인 다이얼로그(그 vtxo의 tx 개수·총 vB·예상 비용·비가역 고지) + 재개 상태 표시. Sweep은 unroll 완료된 vtxo들을 한 tx 배치 입력으로 묶는 것 유지(수수료 분담 — 탈출 실행 결정과 무관한 절약). CPFP 펀딩 패널: nsec P2TR 주소 + QR(기존 qr.ts) + 잔액 + 견적 대비 부족 경고 — degraded에서도 동작.
   DoD: regtest에서 버튼만으로 exit 1건 완주 가능한 상태.
 
 ### Phase 5 — 드릴 + 문서
 
-- ⬜ **#15 `exit/15-drill-regtest`** (L)
-  arkade-regtest 스택(ts-sdk repo `regtest/`)에 bridge를 붙여 풀 드릴: 수신 → vault 동기화 확인 → **arkd kill** → degraded 부팅 → 탭에서 전체 탈출 → 블록 채굴로 CSV 경과 → sweep 완주. 드릴 런북 스크립트화. 여기서 나오는 수정은 이 브랜치 또는 소형 후속 브랜치로. **커밋용 test fixture를 regtest에서 채취해 #08/#10 테스트에 주입** (mainnet 덤프 대체).
-  DoD: 런북 재현 성공. 이게 이 기능의 존재 증명.
+- ✅ **#15 `exit/15-drill-regtest`** (L) — **브라우저 e2e 규모로 확대** (2026-07-05)
+  단순 CLI 드릴이 아니라 **완전한 로컬 유저-시선 e2e 환경**: arkade-regtest 스택(ts-sdk repo `regtest/` — bitcoin core + arkd + arkd-wallet + mempool/esplora + boltz 이미 다 포함, docker)을 이 개발 머신에서 띄우고, bridge를 `data/config.json`로 그 인프라에 붙여(`network: regtest`, `arkServerUrl: http://localhost:7070`, `esploraUrls: ["http://localhost:3000/api"]`, `boltzApiUrl: http://localhost:9069`), **localhost:4282에서 브라우저로 처음(setup)부터 끝(sweep)까지** 실행. 이게 에픽 스코프 안인 이유: 인프라는 arkade-regtest가 이미 갖췄고 bridge를 붙이는 건 #06 config override 덕에 파일 하나 — **새 에픽이 아니라 이 태스크의 구현 방식**. 산출물: ① `test-script/regtest-e2e/` 아래 bring-up 스크립트(regtest up + config 주입 + bridge 기동) + 티어다운, ② 드릴 런북, ③ **#01 이월분**(regtest mempool의 `/txs/package` 실지원 = 실브로드캐스트 최종 검증), ④ **커밋용 fixture를 regtest에서 채취해 #08/#10에 주입**(mainnet 덤프 대체). 드릴 시퀀스: setup → 수신 → vault 동기화 확인 → **arkd 컨테이너 stop** → bridge 재시작 → degraded 부팅 → 탭에서 vtxo별 exit → 블록 채굴로 CSV 경과 → sweep 완주. 여기서 나오는 수정은 이 브랜치 또는 소형 후속 브랜치.
+  선행: 이 머신에 docker 필요(colima 권장 — Docker Desktop보다 가벼움). arkade-regtest boltz는 stock이라 **sub-dust LN은 이 환경에서 안 됨**(커스텀 subdust boltz 미주입) — 단, exit은 boltz 무관이라 이 드릴엔 영향 없음. sub-dust까지 e2e로 보려면 커스텀 boltz 주입이 별도 후속.
+  DoD: 브라우저에서 setup→sweep 완주 재현. 이게 이 기능의 존재 증명이자 유일한 실브로드캐스트 검증.
+  **드릴 실행 발견 (2026-07-05, 이 개발 머신 regtest에서 CLI로 degraded exit까지 몰아봄):**
+  - ✅ regtest esplora `/txs/package` 지원 확인(#01 이월 클리어). ✅ bridge regtest attach → ready 부팅(boltz WS `:9004` 경고는 non-fatal). ✅ ProofSync가 실제 regtest arkd에서 VTXO 증명 미러링(`exit-sync: mirrored`). ✅ **실브로드캐스트 완주**: degraded 모드에서 TREE tx의 1P1C 패키지(parent+CPFP child)가 멤풀 진입→블록 컨펌, op `unrolling`→`waiting`(CSV) 전이 확인.
+  - **[발견 A] exit는 arkd 죽은 뒤에 해야 한다(설계가 강제).** arkd 살아있으면 settlement 라운드가 VTXO를 계속 re-tree해서 outpoint가 움직임(4946b0→1262e714→d27de9d0→…) → 클릭 시점엔 이미 spent라 "no chain for this vtxo" 실패. arkd stop 후엔 VTXO가 얼어붙어 안정. degraded exit의 존재 이유를 실증. (제품 정상 동작.)
+  - **[발견 B] 미컨펌 commitment 위에선 TREE 브로드캐스트 불가.** 마지막 라운드의 commitment가 멤풀 미컨펌 상태로 arkd를 죽이면, 그 위 TREE tx의 1P1C가 submitpackage에서 missing-input으로 거부(`bumpP2A`가 에러 삼켜서 조용히 재시도 루프). commitment가 이미 비트코인 멤풀에 있으니 `mine 1`로 컨펌하면 진행. 런북에 "kill 전 마지막 라운드 컨펌(mine)" 절차 추가 필요. (제품 정상 — 실제 비상시엔 settled=컨펌된 VTXO를 exit.)
+  - **[발견 C — 실제 후속 필요] 블록모드 regtest에서 만료 카운트다운 오표시.** arkd 블록단위(exit=20/tree=500 blocks) 모드에서 `batchExpiry` *타임스탬프*가 실제 블록 만료(창발 height+500)와 무관하게 ~now로 보고됨 → 벌트의 `expires_at`이 과거로 찍혀 UI가 "EXPIRED — dead paper" 오표시. 실제 트리는 안 swept(arkd 죽어서 sweep 불가)이고 엔진은 타임스탬프 무시하고 브로드캐스트하므로 exit 무관. **mainnet(초 단위)에선 정상.** 후속: `expires_at`이 네트워크 만료 스킴(초 vs 블록)과 맞는지 표기하거나 블록모드에선 카운트다운 억제 — 소형 후속 브랜치. exit 기능 자체엔 영향 없음.
 
-- ⬜ **#16 `exit/16-design-doc`** (S)
+- ✅ **#16 `exit/16-design-doc`** (S)
   `EXIT_DESIGN.md` (영어, SEND/RECEIVE_DESIGN 관례) — 왜 Session 재사용인지, 왜 nsec P2TR인지, vault 스키마 근거, 스코프 아웃, 운영 절차(비상 시 순서). CLAUDE.md 갱신(프로젝트 shape + when-to-read-what). 이 문서(EXIT_PLAN.md) 상태 최종화.
   DoD: 문서 머지.
 
 에픽 완료 = #01-#16 전부 ✅ → `epic/unilateral-exit` → `main` 머지 (마이그레이션 번호 재확인 포함).
+
+**진행 상태 (2026-07-05):** Phase 0-4 + 문서(#16) 완료 — #01~#14, #16 머지됨. 코드는 전부 랜딩(vault·sync·degraded boot·엔진·sweep·견적·/exit 탭·스텝퍼·컨트롤). 유닛/통합 158+ green, mainnet 스모크로 탭 렌더 + 운영 지갑 증명 미러링 검증. **남은 것은 #15(브라우저 e2e regtest 드릴)뿐** — 유일한 실브로드캐스트 관문. #15 통과 후 에픽 → main. 리뷰는 운영자가 에픽 완성 뒤 일괄(대화에서 확정).
 
 ## 6. 리스크
 
@@ -238,12 +249,14 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 - **만료 race.** expiry 임박 vtxo는 unroll해도 ASP sweep과 경쟁. UI는 카운트다운으로 "여유 있을 때 시작"을 유도하는 것까지가 인프라 몫.
 - **SDK 업그레이드 취약면.** `getVirtualTxs` 포맷/finalize 규칙 변경 시 vault의 옛 PSBT와 어긋날 수 있음 → #02 스파이크 스크립트를 `update-refs.sh` 후 회귀 체크로 상시 활용.
 - **fixture 프라이버시.** mainnet 덤프(txid·PSBT)는 지갑 역사 노출 → 커밋 금지, regtest 채취분만 커밋.
+- **체인 깊이 = 탈출 비용 (#02 실측).** preconfirmed 홉이 쌓일수록 unroll 패키지 수가 선형 증가(운영 지갑 실측: 53홉 → ~32,000vB). settle이 체인을 리셋하므로 "주기적 refresh는 탈출 보험료"라는 관계를 UI(#11/#12)가 표면화해야 하고, griefing 이슈로 꺼둔 consolidate-all Refresh의 재활성 검토(arkd #1136 해소 후)와도 엮인다.
 
 ## 7. 결정 기록 (스파이크가 채움)
 
-- [ ] #01: esplora 우선순위 리스트 = (미정) / bitcoind 폴백 필요 여부 = (미정)
-- [ ] #02: 증명 용량 실측 = (미정) / settle→완비 PSBT 지연 = (미정) / 페이지 크기 = (미정)
-- [ ] #03: SDK `serializeVtxo` 패키지 export 여부 = (미정)
+- [x] #01 (2026-07-04): **esplora 우선순위 = `["https://mempool.space/api", "https://mempool.arkade.sh/api"]`** — 프로브 결과 둘 다 `POST /txs/package` 지원, bitcoind `submitpackage` RPC 직결 확인(`[]` → RPC -8 count 에러 릴레이; garbage는 mempool.space가 자체 검증 레이어에서 반려, arkade는 RPC -4 릴레이). 제3자(mempool.space) 1순위 — ASP 적대 시나리오에서 Ark 생태계 독립 인프라 우선, 폴링(5초 1회)은 rate limit 여유. **bitcoind 폴백 = 당장 불필요.** regtest 라이브 1P1C는 이 머신 docker 미가용으로 **#15 드릴로 이월**(스크립트 `--live <base> <parentHex> <childHex>` 모드 준비됨). 정책 리스크 추가 확인: arkd 트리 tx는 **v3(TRUC) + 제로값 P2A**로 생성(`arkd pkg/ark-lib/tree/builder.go:222`의 `psbt.New(..., 3, 0, ...)`, `txutils/anchor.go:13-22`), SDK CPFP child도 v3(`ts-sdk src/wallet/onchain.ts:249`) → TRUC/ephemeral-dust 정합 모양.
+- [x] #02 (2026-07-04, **운영 지갑 mainnet 실검증 통과**): 운영 vtxo 1개(830,863 sats, preconfirmed)의 chain을 `--address` 모드로 덤프 → **107/107 tx 오프라인 finalize 성공 + 전부 P2A 앵커 확인 + 실제 `Unroll.Session.next()`가 스텁 indexer 위에서 finalize된 UNROLL 패키지 생성**. DoD의 "2종" 충족: chain에 TREE 3(=tapKeySig 경로) + ARK 49/CHECKPOINT 55(=finalize() 경로) 모두 포함. 실측: chain refs 119 → unique 107(단일 vtxo 안에서도 DAG dedup 발생), 증명 106.1 KB(base64), ARK ~217vB·CHECKPOINT ~174vB. **핵심 함의 — 체인 깊이 = 탈출 비용**: 이 vtxo는 refresh 없이 zap을 53홉 쌓은 상태라 unroll에 ~107패키지 ≈ 총 ~32,000vB → 1 sat/vB에서도 ~32k sats(가치의 ~4%), 10 sat/vB면 ~39%. settle(자동갱신) 직후엔 chain이 TREE-leaf 수준(3~5 tx)으로 리셋되어 비용이 급감 — #11 견적기와 /exit UI가 이 관계를 반드시 표면화할 것(refresh 비활성 트레이드오프). 스파이크 모드 4종: `--db`(nsec→스크립트 도출)/`--address`(주소만; 증명은 두 모드 다 공개 인덱서에서)/`--replay`(저장 덤프만으로 오프라인 재검증 — SDK 범프 후 회귀용)/`--watch`(증명 가용 지연 측정; 미실측 — #04는 generic backoff로 흡수). 부수 확인: ① `ReadonlyWallet.getVtxos`는 repo-first라 fresh InMemory repo에선 빈 결과 — vtxo 목록은 `RestIndexerProvider.getVtxos({scripts, spendableOnly∪recoverableOnly})` 직접 조회(#04 반영). ② bun 1.3 콜드 캐시에서 폴리필 없이 SDK import 시 1회성 크래시 — `src/polyfills` 선-import 관례를 #07 degraded 경로에도 유지. 덤프는 워크트리 `data/exit-spike/`(gitignore) 전용 — 커밋 금지.
+- [x] #07 (2026-07-05): **부분-ready 대신 whole-or-degraded로 확정** — bootReady의 어느 단계가 실패하든 통째로 degraded, 60초 루프가 전체 bring-up 재시도(성공 시 in-place 승격 + `mode-change` SSE로 열린 탭 리로드). wallet만 살리는 부분-ready는 AppState를 서브시스템별 가용성 플래그로 쪼개는 비용 대비, 드물고 일시적인 상태를 재시도가 이미 치유하므로 기각. 재시도 도입으로 생기는 부분생성 자원 leak(실패 attempt마다 wallet watcher 누적)은 bootReady 내부 undo 스택으로 되감음. **부수 수정**: bun CJS↔async-ESM 크래시가 실제 부팅 경로에서 재현(#07의 import 추가가 모듈 그래프 레이스를 뒤집음) → `src/polyfills.ts`가 `@noble/curves/secp256k1.js`를 선-워밍(test/setup.ts와 동일 처치; 그간 앱 그래프는 운 의존). "새 워크트리 첫 bun test 파일 abort" 플레이크도 같은 뿌리로 추정. 로컬 검증: 죽은 포트로 부팅→degraded 페이지/가드 확인→지연 기동 프록시로 ASP 복구 시뮬→attempt 5에서 ready 자동 승격 확인.
+- [x] #03 (2026-07-04): SDK `serializeVtxo`는 **패키지 루트에서 export 안 됨**(내부 청크에만 존재; subpath export도 adapters/repositories 구현체뿐) → **자체 최소 직렬화로 확정**. exit에 필요한 필드만 명시적 컬럼으로 저장(value_sat, script, tap_tree hex, status, expires_at)하고 chain은 SDK `ChainTx[]` JSON 그대로 — SDK 직렬화 포맷 드리프트로부터 vault를 격리하는 부수 효과. 완전성(readiness)은 행 존재가 아니라 exit_proof_txs 조인으로 항상 재계산(부분 fetch 허용). GC의 참조 계산은 코드에서(정규화 ref 테이블은 솔로 지갑 스케일에 과설계).
 
 ## 8. 백로그 (에픽 스코프 밖)
 

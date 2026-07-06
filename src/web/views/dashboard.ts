@@ -1,6 +1,7 @@
 import type { WalletBalance } from '@arkade-os/sdk'
 import { html, raw, type RawHtml } from '../../lib/html'
 import type { RelayStatus } from '../../lib/relay_status'
+import type { ProofSyncSnapshot } from '../../exit/sync_service'
 import { qrSvg } from '../qr'
 import { layout } from './layout'
 
@@ -22,6 +23,44 @@ export function renderBalanceFragment(balance: WalletBalance | null): RawHtml {
 }
 
 /**
+ * Exit-readiness tile: could every current vtxo be unilaterally exited
+ * offline RIGHT NOW from the local vault? "N/M exit-ready" is the headline;
+ * the sub-line carries freshness + proof size, and sync gaps show loudly —
+ * a stale vault silently narrows what survives the ASP dying (EXIT_PLAN §6
+ * "증명 신선도 = 탈출 가능성"), so this is a first-class dashboard citizen.
+ */
+export function renderExitReadinessFragment(snap: ProofSyncSnapshot | null): RawHtml {
+  if (!snap) {
+    return html`<span class="muted">Loading…</span>`
+  }
+  const { stats, lastRun, running } = snap
+  if (stats.vtxoCount === 0 && !lastRun && !running) {
+    return html`<span class="muted">first sync pending</span>`
+  }
+  const headline =
+    stats.readyCount === stats.vtxoCount
+      ? html`<span class="ok">${stats.readyCount}/${stats.vtxoCount}</span>`
+      : html`<span class="bad">${stats.readyCount}/${stats.vtxoCount}</span>`
+  const agoSec = lastRun ? Math.max(0, Math.floor(Date.now() / 1000) - lastRun.at) : null
+  const freshness = running
+    ? 'syncing…'
+    : agoSec === null
+      ? 'never synced'
+      : agoSec < 90
+        ? `synced ${agoSec}s ago`
+        : `synced ${Math.floor(agoSec / 60)}m ago`
+  const gaps =
+    lastRun && lastRun.failed.length > 0
+      ? html`<div class="bad">${lastRun.failed.length} sync gap(s) — retrying</div>`
+      : html``
+  return html`${headline}
+    <div class="muted" style="font-size:0.55em; font-weight: normal;">
+      ${freshness} · proofs ${(stats.proofBytes / 1024).toFixed(0)} KB
+    </div>
+    ${gaps}`
+}
+
+/**
  * Render the ASP onboarding fee from its onchain-input intent-fee CEL program.
  * Flat configs (e.g. "1000.0") show the sat amount; anything amount-dependent
  * can't be a single number, and a missing program means getInfo failed at boot.
@@ -38,6 +77,7 @@ function renderOnboardingFee(program: string | undefined): string {
 
 export function dashboardView(args: {
   balance: WalletBalance | null
+  exitReadiness: ProofSyncSnapshot | null
   arkAddress: string
   boardingAddress: string
   onboardingFeeProgram?: string
@@ -58,6 +98,10 @@ export function dashboardView(args: {
       <div class="stat">
         <div class="stat-label">Balance</div>
         <div class="stat-value" data-balance>${renderBalanceFragment(args.balance)}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Exit readiness</div>
+        <div class="stat-value" data-exit-readiness>${renderExitReadinessFragment(args.exitReadiness)}</div>
       </div>
       <div class="stat">
         <div class="stat-label">Active connections</div>

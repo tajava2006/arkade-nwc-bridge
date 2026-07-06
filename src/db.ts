@@ -228,6 +228,75 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE clink_subdust_receipts ADD COLUMN zap_invoice TEXT;
     `,
   },
+  {
+    version: 10,
+    description: 'exit vault — locally persisted unilateral-exit proofs (EXIT_PLAN.md)',
+    // Unilateral exit must work with the ASP dead, but the SDK's unroll path
+    // fetches the pre-signed PSBTs from the ASP's indexer at exit time. These
+    // two tables are the offline mirror, kept fresh by ProofSync while the
+    // ASP is alive; the exit engine reads only from here (+ esplora).
+    //
+    // exit_proof_txs is keyed on txid: vtxo histories form a DAG, so one row
+    // per tx dedupes branches shared across vtxos (and within one vtxo's own
+    // history — mainnet measurement saw 119 chain refs → 107 unique txs on a
+    // single vtxo). Rows are immutable; a pre-signed PSBT for a txid never
+    // legitimately changes.
+    //
+    // exit_vtxos snapshots what the sweep step needs when no Wallet object
+    // exists (value + tap_tree for exit paths/witnessUtxo) plus the ordered
+    // chain exactly as the indexer returned it (SDK ChainTx[] JSON — the
+    // Unroll.Session input). Completeness is not enforced here: a vtxo row
+    // may momentarily reference proofs not yet fetched; readiness is always
+    // recomputed by joining against exit_proof_txs (src/exit/vault.ts).
+    sql: `
+      CREATE TABLE exit_proof_txs (
+        txid          TEXT    PRIMARY KEY,
+        type          TEXT    NOT NULL,    -- SDK ChainTxType string
+        psbt_base64   TEXT    NOT NULL,    -- verbatim getVirtualTxs payload
+        first_seen_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE exit_vtxos (
+        txid        TEXT    NOT NULL,
+        vout        INTEGER NOT NULL,
+        value_sat   INTEGER NOT NULL,
+        script      TEXT    NOT NULL,    -- pkScript hex (ownership cross-check)
+        tap_tree    TEXT    NOT NULL,    -- EncodedVtxoScript.tapTree hex
+        status      TEXT    NOT NULL,    -- virtualStatus.state snapshot (display only)
+        expires_at  INTEGER,             -- batch expiry, unix seconds — the exit deadline
+        chain_json  TEXT    NOT NULL,    -- ChainTx[] in indexer order
+        synced_at   INTEGER NOT NULL,
+        PRIMARY KEY (txid, vout)
+      );
+      CREATE INDEX idx_exit_vtxos_expires_at ON exit_vtxos(expires_at);
+    `,
+  },
+  {
+    version: 11,
+    description: 'exit_ops — unilateral-exit intent/progress records (EXIT_PLAN #09)',
+    // One row per vtxo the operator told the engine to exit. Deliberately a
+    // COARSE record: the fine-grained unroll progress is re-derived from
+    // chain state every time (Unroll.Session skips what is already onchain),
+    // so a crash mid-exit needs no precise replay — resume just re-runs the
+    // session. States: unrolling (broadcasting the pre-signed chain) →
+    // waiting (all confirmed, CSV timelock running) → sweepable (CSV
+    // elapsed) → swept (sweep tx broadcast, #10 sets sweep_txid). failed is
+    // retryable — startExit on a failed row resets it.
+    sql: `
+      CREATE TABLE exit_ops (
+        txid         TEXT    NOT NULL,
+        vout         INTEGER NOT NULL,
+        state        TEXT    NOT NULL,
+        dest_address TEXT,               -- sweep destination override; NULL = nsec P2TR
+        sweep_txid   TEXT,
+        error        TEXT,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        PRIMARY KEY (txid, vout)
+      );
+      CREATE INDEX idx_exit_ops_state ON exit_ops(state);
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

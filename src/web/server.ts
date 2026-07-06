@@ -17,6 +17,14 @@ import {
 } from '../nostr/connections'
 import type { NostrService } from '../nostr/service'
 import type { OfferService } from '../clink/offers'
+import type { ProofSyncService } from '../exit/sync_service'
+import type { ExitEngine } from '../exit/engine'
+import { estimateExit } from '../exit/estimate'
+import { isVtxoExitReady, listVaultVtxos } from '../exit/vault'
+import { getExitOp } from '../exit/ops'
+import { exitView, type ExitRow } from './views/exit'
+import { exitDetailView, exitSweepError } from './views/exit_detail'
+import { buildExitStepper } from '../exit/stepper'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
 import type { OutboxWatcher } from '../nostr/outbox'
@@ -35,6 +43,9 @@ import { walletHistoryView } from './views/history'
 import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
 import { settingsView } from './views/settings'
+import { degradedView } from './views/degraded'
+import { vaultStats } from '../exit/vault'
+
 import {
   sendView,
   sendConfirmView,
@@ -69,6 +80,22 @@ export interface SwrCaches {
 export type AppState =
   | { mode: 'setup' }
   | {
+      // Account exists but the full bring-up (wallet/boltz/nostr) failed —
+      // typically the ASP or Boltz being unreachable, which is exactly the
+      // scenario unilateral exit exists for (EXIT_PLAN #07). Everything here
+      // works without the ASP: the vault is sqlite, the onchain address is
+      // derived from the nsec. index.ts retries the full boot every 60s and
+      // promotes in place; open tabs reload on the 'mode-change' SSE event.
+      mode: 'degraded'
+      error: string
+      since: number
+      attempts: number
+      // nsec-derived plain P2TR — CPFP fuel + sweep destination (EXIT_PLAN §2.4)
+      onchainAddress: string
+      // exit engine runs in BOTH non-setup modes (vault + nsec + esplora only)
+      exitEngine: ExitEngine
+    }
+  | {
       mode: 'ready'
       wallet: Wallet
       swaps: ArkadeSwaps
@@ -88,6 +115,10 @@ export type AppState =
       // VTXO breakdown and offboard fee preview. A second RestArkProvider
       // alongside the wallet's internal one is fine — it's stateless REST.
       arkProvider: RestArkProvider
+      // Exit-proof mirroring scheduler (EXIT_PLAN #05) — the dashboard reads
+      // its snapshot for the readiness tile; live updates ride SSE.
+      proofSync: ProofSyncService
+      exitEngine: ExitEngine
     }
 
 /**
@@ -148,14 +179,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     })
   }
 
-  // All non-/setup routes funnel through this guard. If we're in setup
-  // mode, bounce to /setup; otherwise hand back the ready-mode handles so
-  // the caller doesn't have to re-narrow state.current.
+  // All ready-only routes funnel through this guard: setup mode bounces to
+  // /setup, degraded mode bounces to / (the degraded status page — the only
+  // meaningful place until the exit tab lands). Otherwise hand back the
+  // ready-mode handles so the caller doesn't have to re-narrow state.current.
   const requireReady = ():
     | { ok: true; ready: Extract<AppState, { mode: 'ready' }> }
     | { ok: false; response: Response } => {
-    if (state.current.mode !== 'ready') {
+    if (state.current.mode === 'setup') {
       return { ok: false, response: redirectToSetup() }
+    }
+    if (state.current.mode === 'degraded') {
+      return { ok: false, response: Response.redirect('/', 303) }
     }
     return { ok: true, ready: state.current }
   }
@@ -166,11 +201,11 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     routes: {
       '/setup': {
         GET: () => {
-          if (state.current.mode === 'ready') return Response.redirect('/', 303)
+          if (state.current.mode !== 'setup') return Response.redirect('/', 303)
           return htmlResponse(setupView())
         },
         POST: async (req) => {
-          if (state.current.mode === 'ready') return Response.redirect('/', 303)
+          if (state.current.mode !== 'setup') return Response.redirect('/', 303)
           const form = await req.formData()
           const mode = form.get('mode')
 
@@ -229,6 +264,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/': {
         GET: () => {
+          if (state.current.mode === 'degraded') {
+            return htmlResponse(degradedView({ state: state.current, stats: vaultStats(db) }))
+          }
           const r = requireReady()
           if (!r.ok) return r.response
           // SWR: hand back the last cached balance immediately, kick off
@@ -247,6 +285,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             dashboardView({
               balance,
+              exitReadiness: r.ready.proofSync.snapshot(),
               arkAddress: r.ready.arkAddress,
               boardingAddress: r.ready.boardingAddress,
               onboardingFeeProgram: r.ready.onboardingFeeProgram,
@@ -256,6 +295,97 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               totalTxCount: txCountRow?.c ?? 0,
             }),
           )
+        },
+      },
+      '/exit': {
+        GET: async () => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          // ready AND degraded — this page must hold with the ASP dead
+          const feeRate = await st.exitEngine.feeRate()
+          const nowSec = Math.floor(Date.now() / 1000)
+          const rows: ExitRow[] = listVaultVtxos(db).map((vtxo) => {
+            // one corrupt row must not 500 the emergency page — render it
+            // unpriced instead
+            let estimate = null
+            try {
+              estimate = estimateExit(db, vtxo.txid, vtxo.vout, feeRate)
+            } catch {
+              estimate = null
+            }
+            return {
+              vtxo,
+              ready: isVtxoExitReady(db, vtxo.txid, vtxo.vout),
+              estimate,
+              op: getExitOp(db, vtxo.txid, vtxo.vout),
+            }
+          })
+          const funding = await st.exitEngine.fundingStatus()
+          return htmlResponse(
+            exitView({
+              rows,
+              feeRate,
+              degraded: st.mode === 'degraded',
+              stats: vaultStats(db),
+              nowSec,
+              fundingAddress: funding.address,
+              fundingBalanceSat: funding.balanceSat,
+            }),
+          )
+        },
+      },
+      '/exit/:txid/:vout': {
+        GET: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          const explorer = await st.exitEngine.explorer()
+          const feeRate = await st.exitEngine.feeRate()
+          const stepper = await buildExitStepper({ db, explorer }, txid, vout, feeRate)
+          if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
+          let estimate = null
+          try {
+            estimate = estimateExit(db, txid, vout, feeRate)
+          } catch {
+            estimate = null
+          }
+          const funding = await st.exitEngine.fundingStatus()
+          return htmlResponse(
+            exitDetailView({ stepper, estimate, funding, degraded: st.mode === 'degraded' }),
+          )
+        },
+      },
+      '/exit/:txid/:vout/start': {
+        POST: (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          // fire-and-forget: the engine queues + drives the op, progress
+          // streams back over the exit-op SSE event
+          st.exitEngine.startExit(txid, vout)
+          return Response.redirect(`/exit/${txid}/${vout}`, 303)
+        },
+      },
+      '/exit/:txid/:vout/sweep': {
+        POST: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          try {
+            await st.exitEngine.sweep([{ txid, vout }])
+          } catch (err) {
+            return htmlResponse(
+              exitSweepError(txid, vout, err instanceof Error ? err.message : String(err)),
+              { status: 400 },
+            )
+          }
+          return Response.redirect(`/exit/${txid}/${vout}`, 303)
         },
       },
       '/connections': {
