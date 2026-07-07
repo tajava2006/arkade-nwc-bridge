@@ -202,28 +202,50 @@ verdict / `proofComplete`, feeding both the per-row cost column and the stepper.
   hard deadline — red under 48h, "dead paper" once passed), measured exit cost,
   a verdict (exitable / proofs-incomplete / exiting-loses-money /
   swept-cooperative-recovery-only), and op state. A compact exit-fuel line.
-- **`/exit/:txid/:vout` detail** — the stepper (§ requirement 10): broadcast
-  steps root→leaf with state + vsize, the CSV `have/need` countdown, the sweep,
-  each with redundant icon+text so state reads without color. Below it the
-  action panel (Start/Retry/Sweep, gated on proof-completeness and op state,
-  with the full cost beside the button and a short irreversibility confirm) and
-  the funding panel (nsec P2TR + QR + onchain balance, low-fuel warning against
-  the estimate).
+- **`/exit/:txid/:vout` detail** — the chain drawn as the DAG it is
+  (§ requirement 10): commitments (already onchain) across the top, spend
+  edges downward, the vtxo's own tx at the bottom, then the CSV `have/need`
+  countdown and the sweep as a short list. Node cards carry type + vsize +
+  state with redundant icon+text so state reads without color; edges are an
+  SVG overlay connected client-side after layout. Below it the action panel
+  (Start/Retry/Sweep, gated on proof-completeness and op state, with the full
+  cost beside the button and a short irreversibility confirm) and the funding
+  panel (nsec P2TR + QR + onchain balance, low-fuel warning against the
+  estimate).
+
+**Chain layout** (`chain_order.ts`, display only): arkd's getVtxoChain array
+is a BFS from the vtxo upward with each branch's tree+commitment inlined
+where the walk reached it, so a short branch's commitment lands mid-array.
+The array is nevertheless a **valid broadcast order back-to-front** — within
+a wave an ark tx precedes its own checkpoints and tree branches are emitted
+leaf→root→commitment, across waves a checkpoint's parent is always enqueued
+one wave deeper, and since outpoints have unique spenders (arkd's visited
+set is per-outpoint), shared ancestors get re-emitted at each depth instead
+of referenced backwards. `Unroll.Session` consumes exactly that shape (SDK
+unroll.ts scans from the array's end), so **the engine hands Session the raw
+chain untouched** — re-deriving the order would only add a failure mode.
+What the BFS shape lacks is readability: `chainGraph` recovers the picture
+from the `spends` DAG (checkpoints reference parents as "txid:vout"
+outpoints; duplicate emissions collapse to one node) and layers it by
+longest-path depth — commitments all on the top level, short branches
+bridging down with long edges, deep branches filling every level.
 
 The detail page renders **DB-only**, then fills in onchain state. A mainnet
 chain is 100+ entries, and the first cut probed each one serially *before*
 responding — long enough for Bun.serve's idleTimeout to kill the socket (the
 page "crashed" with nothing in the logs). Now the page ships instantly with
 every step defaulting to "not broadcast yet", and a ~30-line inline loop
-probes `/exit/:txid/:vout/step/:stepTxid` one tx at a time root→leaf, swapping
-in each server-rendered `<li>`. The first non-confirmed answer ends the scan:
-Session broadcasts in order and waits out each confirmation, so a chain always
-reads `[confirmed…][≤1 mempool][absent…]` — an untouched vtxo settles in one
-probe. Op states shortcut the rest: waiting/sweepable/swept exist only after
-Session DONE, so their statuses are final with zero probes ('waiting' probes
-the vtxo tx once, for the CSV countdown). One esplora read per request, capped
-at 4s, keeps every probe far under any socket timeout; a hung explorer
-degrades to "not broadcast yet" plus a "status check unavailable" note.
+probes `/exit/:txid/:vout/step/:stepTxid` one tx at a time in the engine's
+broadcast order (the stored chain, back-to-front), swapping in each
+server-rendered node. The first non-confirmed answer ends the scan: Session
+broadcasts in exactly that order and waits out each confirmation, so the
+sequence always reads `[confirmed…][≤1 mempool][absent…]` — an untouched
+vtxo settles in one probe. Op states shortcut the rest:
+waiting/sweepable/swept exist only after Session DONE, so their statuses are
+final with zero probes ('waiting' probes the vtxo tx once, for the CSV
+countdown). One esplora read per request, capped at 4s, keeps every probe far
+under any socket timeout; a hung explorer degrades to "not broadcast yet"
+plus a "status check unavailable" note.
 
 Live updates are coarse: the engine's per-op events broadcast an `exit-op` SSE
 carrying just the outpoint, and the client reloads if it's on the matching

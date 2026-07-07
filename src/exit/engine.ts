@@ -140,6 +140,10 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
         throw new Error('exit vault has no chain for this vtxo — it was never mirrored')
       }
       const { bumper, explorer } = await providers()
+      // Session gets the chain EXACTLY as the indexer returned it. arkd's
+      // BFS array is a valid broadcast order when scanned back-to-front
+      // (chain_order.ts spells out why) and it's the shape the SDK is tested
+      // against — re-deriving the order here would only add a failure mode.
       const session = new Unroll.Session({ txid, vout, chain: vtxo.chain }, bumper, explorer, indexer)
 
       log(`exit-engine: unrolling ${key} (${vtxo.chain.length} chain entries)`)

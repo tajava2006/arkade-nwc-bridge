@@ -50,6 +50,15 @@ const STYLES = `
   .relay-panel-list li { display: flex; gap: 0.4em; align-items: center; padding: 0.1em 0; }
   .relay-dot.ok { color: #00345e; }
   .relay-dot.down { color: #888; }
+  /* Exit-chain DAG: layered rows of node cards; the SVG underneath draws the
+     spend edges (positions computed client-side after layout). Cards carry a
+     solid background so lines never cross the text. */
+  .dag { position: relative; margin: 1em 0; }
+  .dag-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .dag-edges line { stroke: #ccc; stroke-width: 1.5; }
+  .dag-row { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 0.8em; margin-bottom: 1.4em; }
+  .dag-row:last-child { margin-bottom: 0; }
+  .dag-node { background: #fbfbfb; border: 1px solid #ddd; border-radius: 6px; padding: 0.3em 0.7em; font-size: 0.85em; white-space: nowrap; text-align: center; }
 `
 
 type Nav = 'dashboard' | 'send' | 'exit' | 'connections' | 'history' | 'settings' | 'setup'

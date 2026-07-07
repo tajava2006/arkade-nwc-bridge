@@ -33,8 +33,10 @@ src/
                                csv.ts (CSV-elapsed judgment), estimate.ts
                                (offline exit cost), engine.ts + ops.ts (drive
                                the session, exit_ops v11, sweep, funding),
-                               stepper.ts (per-vtxo visual model: DB-only
-                               build + one-tx-at-a-time status probes)
+                               chain_order.ts (spends-DAG layout for display —
+                               arkd's BFS array stays Session's input),
+                               stepper.ts (per-vtxo DAG model: DB-only build +
+                               one-tx-at-a-time status probes)
   polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
                                (bun async-ESM require trap) + EventSource shim
   index.ts                   — three-mode boot (setup / ready / degraded);

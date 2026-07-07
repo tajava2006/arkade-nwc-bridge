@@ -1,16 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { ChainTxType, SingleKey, type OnchainProvider } from '@arkade-os/sdk'
+import { ChainTxType, SingleKey, type ChainTx, type OnchainProvider } from '@arkade-os/sdk'
 import { openTempDb, type TempDb } from '../helpers/db'
 import { FIXTURE_CSV_BLOCKS, makeMockChain, makeSignedExitFixture } from '../helpers/exit'
 import { storeVtxoWithProofs } from '../../src/exit/vault'
 import { createOrRestartExitOp, setExitOpState } from '../../src/exit/ops'
-import {
-  buildExitStepper,
-  probeExitStep,
-  type BroadcastStep,
-  type SweepStep,
-  type WaitStep,
-} from '../../src/exit/stepper'
+import { buildExitStepper, probeExitStep } from '../../src/exit/stepper'
 
 const walletKey = SingleKey.fromPrivateKey(new Uint8Array(32).fill(7))
 
@@ -25,25 +19,62 @@ describe('exit stepper (DB-only build)', () => {
     temp.cleanup()
   })
 
-  test('no op: commitment confirmed, rest pending, probe covers the broadcast set', async () => {
+  test('no op: commitment level on top, rest pending, probe covers the broadcast set', async () => {
     const f = await makeSignedExitFixture(1, { identity: walletKey })
     storeVtxoWithProofs(temp.db, f.vtxo, f.proofs)
 
     const stepper = buildExitStepper({ db: temp.db }, f.txid, 0, 2)
     expect(stepper).not.toBeNull()
-    const steps = stepper!.steps
-    // display order root→leaf: commitment first, ark tx last (before wait/sweep)
-    const broadcasts = steps.filter((s): s is BroadcastStep => s.kind === 'broadcast')
-    expect(broadcasts[0]!.txType).toBe(ChainTxType.COMMITMENT)
-    expect(broadcasts[0]!.status).toBe('confirmed')
-    const arkStep = broadcasts.find((s) => s.txid === f.txid)!
+    // DAG layers: commitments first, the vtxo tx in the last level
+    expect(stepper!.levels[0]![0]!.txType).toBe(ChainTxType.COMMITMENT)
+    expect(stepper!.levels[0]![0]!.status).toBe('confirmed')
+    const flat = stepper!.levels.flat()
+    const arkStep = flat.find((s) => s.txid === f.txid)!
     expect(arkStep.status).toBe('pending')
     expect(arkStep.vsize).toBeGreaterThan(100) // measured, matches the estimate
-    expect((steps.find((s) => s.kind === 'wait') as WaitStep).status).toBe('pending')
-    expect((steps.find((s) => s.kind === 'sweep') as SweepStep).status).toBe('pending')
-    // broadcast order, commitment excluded — the client stops at the first
+    expect(stepper!.wait.status).toBe('pending')
+    expect(stepper!.sweep.status).toBe('pending')
+    // unroll order, commitment excluded — the client stops at the first
     // non-confirmed answer, so for an untouched vtxo one probe settles it
     expect(stepper!.probe).toEqual([f.txid])
+    expect(stepper!.edges).toContainEqual({ parent: f.parentTxid, child: f.txid })
+  })
+
+  test('two-branch chain (commitment mid-array): commitments top, probe follows the session scan', () => {
+    // the shape arkd's BFS emits when a short branch settles mid-walk — the
+    // display must recover the DAG, while the probe order stays glued to how
+    // Session actually scans the stored array (back-to-front)
+    const chain: ChainTx[] = [
+      { txid: 'v1', type: ChainTxType.ARK, expiresAt: '', spends: ['k1', 'k2'] },
+      { txid: 'k1', type: ChainTxType.CHECKPOINT, expiresAt: '', spends: ['t1:0'] },
+      { txid: 'k2', type: ChainTxType.CHECKPOINT, expiresAt: '', spends: ['b1:1'] },
+      { txid: 't1', type: ChainTxType.TREE, expiresAt: '', spends: ['c1'] },
+      { txid: 'c1', type: ChainTxType.COMMITMENT, expiresAt: '', spends: [] },
+      { txid: 'b1', type: ChainTxType.ARK, expiresAt: '', spends: ['k3'] },
+      { txid: 'k3', type: ChainTxType.CHECKPOINT, expiresAt: '', spends: ['t2:0'] },
+      { txid: 't2', type: ChainTxType.TREE, expiresAt: '', spends: ['c2'] },
+      { txid: 'c2', type: ChainTxType.COMMITMENT, expiresAt: '', spends: [] },
+    ]
+    storeVtxoWithProofs(
+      temp.db,
+      {
+        txid: 'v1',
+        vout: 0,
+        valueSat: 1000,
+        script: '5120' + 'ab'.repeat(32),
+        tapTree: 'c0de',
+        status: 'preconfirmed',
+        expiresAt: null,
+        chain,
+      },
+      [],
+    )
+
+    const stepper = buildExitStepper({ db: temp.db }, 'v1', 0, 2)!
+    const ids = stepper.levels.map((l) => l.map((s) => s.txid))
+    expect(ids).toEqual([['c1', 'c2'], ['t1', 't2'], ['k1', 'k3'], ['b1'], ['k2'], ['v1']])
+    // reverse of the stored array minus commitments = Session's broadcast order
+    expect(stepper.probe).toEqual(['t2', 'k3', 'b1', 't1', 'k2', 'k1', 'v1'])
   })
 
   test('op waiting: broadcasts confirmed from the op alone, CSV numbers deferred to one probe', async () => {
@@ -53,14 +84,11 @@ describe('exit stepper (DB-only build)', () => {
     setExitOpState(temp.db, f.txid, 0, 'waiting')
 
     const stepper = buildExitStepper({ db: temp.db }, f.txid, 0, 2)!
-    const arkStep = stepper.steps.find(
-      (s): s is BroadcastStep => s.kind === 'broadcast' && s.txid === f.txid,
-    )!
+    const arkStep = stepper.levels.flat().find((s) => s.txid === f.txid)!
     expect(arkStep.status).toBe('confirmed')
-    const wait = stepper.steps.find((s) => s.kind === 'wait') as WaitStep
-    expect(wait.status).toBe('running')
-    expect(wait.need).toBe(Number(FIXTURE_CSV_BLOCKS))
-    expect(wait.have).toBeNull() // countdown comes from the vtxo-tx probe
+    expect(stepper.wait.status).toBe('running')
+    expect(stepper.wait.need).toBe(Number(FIXTURE_CSV_BLOCKS))
+    expect(stepper.wait.have).toBeNull() // countdown comes from the vtxo-tx probe
     expect(stepper.probe).toEqual([f.txid])
   })
 
@@ -71,8 +99,8 @@ describe('exit stepper (DB-only build)', () => {
     setExitOpState(temp.db, f.txid, 0, 'sweepable')
 
     const stepper = buildExitStepper({ db: temp.db }, f.txid, 0, 2)!
-    expect((stepper.steps.find((s) => s.kind === 'wait') as WaitStep).status).toBe('sweepable')
-    expect((stepper.steps.find((s) => s.kind === 'sweep') as SweepStep).status).toBe('sweepable')
+    expect(stepper.wait.status).toBe('sweepable')
+    expect(stepper.sweep.status).toBe('sweepable')
     expect(stepper.probe).toEqual([])
   })
 
@@ -86,10 +114,9 @@ describe('exit stepper (DB-only build)', () => {
     })
 
     const stepper = buildExitStepper({ db: temp.db }, f.txid, 0, 2)!
-    const sweep = stepper.steps.find((s) => s.kind === 'sweep') as SweepStep
-    expect(sweep.status).toBe('done')
-    expect(sweep.sweepTxid).toBe('a'.repeat(64))
-    expect(sweep.destAddress).toBe('bc1pdest')
+    expect(stepper.sweep.status).toBe('done')
+    expect(stepper.sweep.sweepTxid).toBe('a'.repeat(64))
+    expect(stepper.sweep.destAddress).toBe('bc1pdest')
     expect(stepper.probe).toEqual([])
   })
 

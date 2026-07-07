@@ -20,12 +20,13 @@ const baseStepper = (over: Partial<ExitStepper> = {}): ExitStepper => ({
   valueSat: 10_000,
   op: null,
   proofComplete: true,
-  steps: [
-    { kind: 'broadcast', txid: 'c'.repeat(64), txType: ChainTxType.COMMITMENT, vsize: null, status: 'confirmed' },
-    { kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'pending' },
-    { kind: 'wait', status: 'pending', need: 0, have: 0, unit: 'blocks' },
-    { kind: 'sweep', status: 'pending', destAddress: null, sweepTxid: null },
+  levels: [
+    [{ kind: 'broadcast', txid: 'c'.repeat(64), txType: ChainTxType.COMMITMENT, vsize: null, status: 'confirmed' }],
+    [{ kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'pending' }],
   ],
+  edges: [{ parent: 'c'.repeat(64), child: 'a'.repeat(64) }],
+  wait: { kind: 'wait', status: 'pending', need: 0, have: 0, unit: 'blocks' },
+  sweep: { kind: 'sweep', status: 'pending', destAddress: null, sweepTxid: null },
   probe: ['a'.repeat(64)],
   ...over,
 })
@@ -109,11 +110,11 @@ describe('exit controls (view)', () => {
   test('sweepable op shows the Sweep button, not Start', () => {
     const stepper = baseStepper({
       op: op('sweepable'),
-      steps: [
-        { kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'confirmed' },
-        { kind: 'wait', status: 'sweepable', need: 10, have: 10, unit: 'blocks' },
-        { kind: 'sweep', status: 'sweepable', destAddress: null, sweepTxid: null },
+      levels: [
+        [{ kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'confirmed' }],
       ],
+      wait: { kind: 'wait', status: 'sweepable', need: 10, have: 10, unit: 'blocks' },
+      sweep: { kind: 'sweep', status: 'sweepable', destAddress: null, sweepTxid: null },
     })
     const html = render(stepper, estimate(), 5_000)
     expect(html).toContain('Sweep now')
