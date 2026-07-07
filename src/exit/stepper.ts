@@ -1,26 +1,31 @@
 import type { Database } from 'bun:sqlite'
-import { ChainTxType, type OnchainProvider } from '@arkade-os/sdk'
+import { ChainTxType, type ChainTx, type OnchainProvider } from '@arkade-os/sdk'
 import { getVaultVtxo, proofTxidsOf, type VaultVtxo } from './vault'
 import { getExitOp, type ExitOp } from './ops'
 import { estimateExit, storedTxVsize } from './estimate'
 import { csvPathStatuses } from './csv'
+import { chainGraph, type ChainEdge } from './chain_order'
 
-// The visual model behind requirement 10: a vertical stepper that answers
-// "how many broadcasts, where am I, how much longer". Broadcast steps run
-// root→leaf (commitment, always onchain → … → the vtxo tx), each tagged with
-// its measured vsize (same numbers the #11 estimate sums).
+// The visual model behind requirement 10: the pre-signed chain as the DAG it
+// really is — commitments (already onchain) across the top, spend edges
+// downward, the vtxo's own tx at the bottom — followed by the CSV wait and
+// the sweep. Layers come from chain_order's longest-path depths (display
+// only; the engine keeps broadcasting the raw chain — see chain_order.ts).
+// Each broadcast node carries its measured vsize (the same numbers the #11
+// estimate sums).
 //
 // The initial build is DB-only — a mainnet chain is 100+ entries, and one
 // serial esplora read per entry used to hold the response past Bun.serve's
 // idleTimeout, killing the socket before any HTML went out. Onchain statuses
 // arrive after render instead: the page probes steps one at a time
-// (probeExitStep, root→leaf) and stops at the first non-confirmed tx. The
-// early stop is sound because Unroll.Session broadcasts strictly in order and
-// waits out each confirmation (SDK unroll.ts next()), so a chain always reads
-// [confirmed…][≤1 mempool][absent…]. The op row narrows the unknowns further:
-// waiting/sweepable/swept exist only after Session DONE (= every chain tx
-// confirmed), so those states skip status probing entirely — 'waiting' probes
-// the vtxo tx once, for the CSV countdown numbers.
+// (probeExitStep, in the engine's broadcast order = the stored chain scanned
+// back-to-front) and stops at the first non-confirmed tx. The early stop is
+// sound because Session broadcasts in exactly that order, waiting out each
+// confirmation, so the sequence always reads [confirmed…][≤1 mempool][absent…].
+// The op row narrows the unknowns further: waiting/sweepable/swept exist
+// only after Session DONE (= every chain tx confirmed), so those states skip
+// status probing entirely — 'waiting' probes the vtxo tx once, for the CSV
+// countdown numbers.
 
 export type StepStatus = 'confirmed' | 'mempool' | 'pending' | 'running' | 'sweepable' | 'done'
 
@@ -56,8 +61,13 @@ export interface ExitStepper {
   valueSat: number
   op: ExitOp | null
   proofComplete: boolean
-  steps: ExitStep[]
-  /** txids for the client to probe in order, stopping at the first non-confirmed */
+  /** broadcast DAG, layered: levels[0] = the commitments … last = the vtxo tx */
+  levels: BroadcastStep[][]
+  /** parent → child spend edges, for drawing the DAG */
+  edges: ChainEdge[]
+  wait: WaitStep
+  sweep: SweepStep
+  /** txids for the client to probe in unroll order, stopping at the first non-confirmed */
   probe: string[]
 }
 
@@ -121,36 +131,34 @@ export function buildExitStepper(
   const unrolled =
     op?.state === 'waiting' || op?.state === 'sweepable' || op?.state === 'swept'
 
-  // chain is indexer order [vtxo tx … commitment]; display root→leaf
-  const broadcastOrder = [...vtxo.chain].reverse()
+  const graph = chainGraph(vtxo.chain)
 
-  const steps: ExitStep[] = []
-  for (const c of broadcastOrder) {
+  const toStep = (c: ChainTx): BroadcastStep => {
     if (c.type === ChainTxType.COMMITMENT) {
-      steps.push({ kind: 'broadcast', txid: c.txid, txType: c.type, vsize: null, status: 'confirmed' })
-      continue
+      return { kind: 'broadcast', txid: c.txid, txType: c.type, vsize: null, status: 'confirmed' }
     }
-    steps.push({
+    return {
       kind: 'broadcast',
       txid: c.txid,
       txType: c.type,
       vsize: vsizeOf.get(c.txid) ?? null,
       status: unrolled && c.type !== ChainTxType.UNSPECIFIED ? 'confirmed' : 'pending',
-    })
+    }
   }
+  const levels = graph.levels.map((level) => level.map(toStep))
 
   const waitStep = buildWaitStep(vtxo, op)
-  steps.push(waitStep)
-  steps.push(buildSweepStep(op, waitStep.status))
 
-  // Session never broadcasts UNSPECIFIED entries, so probing one would
-  // falsely stop the scan — probe exactly the set the session broadcasts
-  // (proofTxidsOf), in broadcast order
+  // Probe in the engine's actual broadcast order — Session scans the stored
+  // chain back-to-front — so "first non-confirmed ends the scan" mirrors the
+  // unroll exactly. proofTxidsOf drops COMMITMENT/UNSPECIFIED (Session never
+  // broadcasts those; probing one would falsely stop the scan) and the Set
+  // collapses arkd's occasional duplicate entries (chain_order.ts).
   const probe = unrolled
     ? op?.state === 'waiting'
       ? [vtxo.txid] // countdown numbers only — statuses are already final
       : []
-    : proofTxidsOf(broadcastOrder)
+    : [...new Set(proofTxidsOf([...vtxo.chain].reverse()))]
 
   return {
     txid,
@@ -158,7 +166,10 @@ export function buildExitStepper(
     valueSat: vtxo.valueSat,
     op,
     proofComplete: est?.proofComplete ?? false,
-    steps,
+    levels,
+    edges: graph.edges,
+    wait: waitStep,
+    sweep: buildSweepStep(op, waitStep.status),
     probe,
   }
 }

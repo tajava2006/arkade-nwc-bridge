@@ -92,10 +92,11 @@ function fundingPanel(funding: FundingStatus, est: ExitEstimate | null): RawHtml
   `
 }
 
-// Requirement 10 made visual: a vertical stepper for one vtxo. Broadcast
-// steps (root→leaf) show state + vsize, then the CSV countdown, then the
-// sweep. Icons and text are redundant channels so the state reads without
-// relying on color.
+// Requirement 10 made visual: the pre-signed chain drawn as the DAG it is —
+// commitments (already onchain) across the top, spend edges downward, the
+// vtxo's own tx at the bottom — then the CSV countdown and the sweep as a
+// short list underneath. Icons and text are redundant channels so the state
+// reads without relying on color.
 
 function icon(status: string): string {
   switch (status) {
@@ -126,8 +127,9 @@ const TYPE_LABEL: Record<string, string> = {
 }
 
 // Exported for the per-step status endpoint: a probe result re-renders the
-// exact li the initial page carried, so the client only swaps nodes by their
-// data-step key — no client-side templating.
+// exact node the initial page carried, so the client only swaps elements by
+// their data-step key — no client-side templating. Broadcast steps are DAG
+// node cards; wait/sweep stay list items below the graph.
 export function stepLine(step: ExitStep): RawHtml {
   if (step.kind === 'broadcast') {
     const vsize = step.vsize !== null ? html` · <span class="muted">${step.vsize} vB</span>` : html``
@@ -137,10 +139,11 @@ export function stepLine(step: ExitStep): RawHtml {
         : step.status === 'mempool'
           ? 'in mempool — waiting for a block'
           : 'not broadcast yet'
-    return html`<li data-step="${step.txid}">
+    return html`<div class="dag-node" data-step="${step.txid}">
       ${icon(step.status)} <strong>${TYPE_LABEL[step.txType] ?? 'tx'}</strong>
-      <code>${short(step.txid)}</code>${vsize} — ${state}
-    </li>`
+      <code>${short(step.txid)}</code>${vsize}<br />
+      <span class="muted">${state}</span>
+    </div>`
   }
   if (step.kind === 'wait') {
     if (step.status === 'sweepable') {
@@ -168,26 +171,70 @@ export function stepLine(step: ExitStep): RawHtml {
 }
 
 export function renderStepperFragment(stepper: ExitStepper): RawHtml {
-  const doneCount = stepper.steps.filter(
-    (s) => s.status === 'confirmed' || s.status === 'done',
-  ).length
+  const broadcasts = stepper.levels.flat()
+  const all = [...broadcasts, stepper.wait, stepper.sweep]
+  const doneCount = all.filter((s) => s.status === 'confirmed' || s.status === 'done').length
   return html`
     <p class="muted">
-      ${doneCount}/${stepper.steps.length} steps complete · state:
+      ${doneCount}/${all.length} steps complete · state:
       <strong>${stepper.op?.state ?? 'not started'}</strong>
       ${stepper.proofComplete ? html`` : html` · <span class="bad">proofs incomplete</span>`}
     </p>
+    <div class="dag" data-dag>
+      <svg class="dag-edges" aria-hidden="true"></svg>
+      ${stepper.levels.map(
+        (level) => html`<div class="dag-row">${level.map(stepLine)}</div>`,
+      )}
+    </div>
     <ol style="list-style:none; padding-left:0; line-height:2;">
-      ${stepper.steps.map(stepLine)}
+      ${stepLine(stepper.wait)}${stepLine(stepper.sweep)}
     </ol>
   `
 }
 
+// Spend edges drawn client-side: node positions only exist after layout, so
+// the server ships the edge list and ~20 lines of JS connect the boxes.
+// Redraws on resize and after every probe swap (status text changes node
+// geometry).
+function dagScript(s: ExitStepper): RawHtml {
+  const pairs = s.edges.map((e) => [e.parent, e.child])
+  return html`<script>
+    ;(function () {
+      var edges = ${raw(JSON.stringify(pairs))}
+      function draw() {
+        var dag = document.querySelector('[data-dag]')
+        var svg = dag ? dag.querySelector('.dag-edges') : null
+        if (!dag || !svg) return
+        var box = dag.getBoundingClientRect()
+        svg.setAttribute('width', box.width)
+        svg.setAttribute('height', box.height)
+        var out = ''
+        for (var i = 0; i < edges.length; i++) {
+          var p = dag.querySelector('[data-step="' + edges[i][0] + '"]')
+          var c = dag.querySelector('[data-step="' + edges[i][1] + '"]')
+          if (!p || !c) continue
+          var pb = p.getBoundingClientRect()
+          var cb = c.getBoundingClientRect()
+          out +=
+            '<line x1="' + (pb.left + pb.width / 2 - box.left) +
+            '" y1="' + (pb.bottom - box.top) +
+            '" x2="' + (cb.left + cb.width / 2 - box.left) +
+            '" y2="' + (cb.top - box.top) + '"></line>'
+        }
+        svg.innerHTML = out
+      }
+      draw()
+      window.addEventListener('resize', draw)
+      window.__drawDag = draw
+    })()
+  </script>`
+}
+
 // Onchain statuses arrive after render — the initial page is DB-only so a
-// 100+ entry chain can't stall it. Steps are probed one at a time root→leaf
-// and the first non-confirmed answer ends the scan: Session broadcasts in
-// order, so nothing past that point can be onchain. Rows keep their
-// server-rendered "not broadcast yet" default; only probed rows get swapped.
+// 100+ entry chain can't stall it. Steps are probed one at a time in the
+// engine's broadcast order and the first non-confirmed answer ends the scan:
+// nothing past that point can be onchain. Nodes keep their server-rendered
+// "not broadcast yet" default; only probed nodes get swapped.
 function statusFillIn(s: ExitStepper): RawHtml {
   if (s.probe.length === 0) return html``
   return html`
@@ -221,6 +268,7 @@ function statusFillIn(s: ExitStepper): RawHtml {
               swap(probe[i], d.stepHtml)
               swap('wait', d.waitHtml)
               swap('sweep', d.sweepHtml)
+              if (window.__drawDag) window.__drawDag()
               i = i + 1
               if (d.status === 'confirmed') next()
               else set('')
@@ -264,6 +312,7 @@ export function exitDetailView(args: {
         : html``}
       <p><strong>${s.valueSat.toLocaleString()} sats</strong> · <code>${s.txid}:${s.vout}</code></p>
       <div data-exit-stepper="${s.txid}:${s.vout}">${renderStepperFragment(s)}</div>
+      ${dagScript(s)}
       ${statusFillIn(s)}
 
       <h2>Action</h2>
