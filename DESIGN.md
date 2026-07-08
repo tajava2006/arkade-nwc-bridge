@@ -221,23 +221,38 @@ send), so reporting only `available` under-counts. The arkade.money
 UI collapses these two buckets in its main balance number for the
 same reason.
 
-### `make_invoice` (LN → Ark) — REMOVED (not supported)
-> Dropped: receiving is funneled through the CLINK noffer (a public static
-> receive code, `src/clink/`), so the bridge advertises one receive path, not
-> two. `make_invoice` now returns `NOT_IMPLEMENTED`. The flow below is kept for
-> historical context (the ≥dust mechanics still describe how CLINK-offer reverse
-> swaps work via `createLightningInvoice`).
+### `make_invoice` (LN → Ark)
+> Dropped 2026-06-28 ("one receive path, less surface"), revived once the
+> receive core was extracted: `issueInvoice` (`src/ln_receive.ts`) serves both
+> the CLINK noffer and `make_invoice`, so the sub-dust branch exists exactly
+> once and the NWC entry point only adds its own bookkeeping.
 
-1. msat → sat; reject non-multiple-of-1000.
-2. `swaps.createLightningInvoice({ amount, description })` →
-   BOLT11 + payment_hash + expiry. `result.amount` is the post-fee
-   on-Ark amount that will land in the wallet.
+1. msat → sat; reject non-multiple-of-1000. Optional `description_hash`
+   (64-hex) passes through to the invoice — a client serving its own
+   LNURL/zap flow can commit its descriptionHash. A plaintext `description`
+   is dropped on the sub-dust branch (boltz's plain route takes only
+   amount/address/descriptionHash — same trade-off CLINK makes).
+2. `issueInvoice` — ≥330 sats: `swaps.createLightningInvoice` reverse swap
+   (BOLT11 + payment_hash + expiry; `result.amount` is the post-fee on-Ark
+   amount). <330 sats: POST `/v2/subdust/receive` mints a plain invoice
+   boltz collects itself; on settlement boltz plain-sends 1:1 to the wallet
+   address (non-atomic — the payer trusts boltz; below dust there is no
+   atomic alternative).
 3. Write a pending `transactions` row with `amount_msat = receivedMsat`
-   and `fees_paid_msat = invoice nominal − receivedMsat`.
+   (= nominal on the sub-dust branch), `fees_paid_msat` the gap, and
+   `swap_id` only on the swap branch — `swap_id IS NULL` is how the
+   reconciler recognizes sub-dust rows.
 4. Return the invoice immediately. Settlement is asynchronous:
-   - Boltz drops a VHTLC at our swap address once the LN side is paid.
-   - `SwapManager`'s auto-claim loop claims it into the Ark wallet.
-   - `onSwapCompleted` listener flips the row to `settled`.
+   - swap branch: Boltz drops a VHTLC once the LN side is paid; the
+     `SwapManager` auto-claims it; `onSwapCompleted` → `syncSwapToDb` flips
+     the row (boot backstop: `reconcilePendingIncoming`).
+   - sub-dust branch: no swap object → no settlement event, ever. The vtxo
+     just arrives in the wallet. `reconcileSubdustReceives`
+     (`src/ln_receive.ts`, same 30s cadence as the CLINK ack reconciler)
+     polls `/v2/subdust/receive/status`: settled → row `settled`
+     (+preimage); unsettled past the BOLT11 expiry (+15 min HTLC grace) →
+     `expired`. Clients observe it through `lookup_invoice` /
+     `list_transactions` polling (we advertise no notifications).
 
 ### `pay_invoice` (Ark → LN)
 1. `decodeInvoice` for amount/payment_hash. Reject 0-amount invoices

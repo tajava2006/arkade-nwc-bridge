@@ -18,6 +18,7 @@ import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
+import { reconcileSubdustReceives } from './ln_receive'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
@@ -151,9 +152,10 @@ async function main(): Promise<void> {
     }
   }, RELAY_WATCHDOG_INTERVAL_MS)
 
-  // CLINK ack reconciler interval — assigned once bootReady runs (needs the
-  // account key + swaps). Cleared on shutdown.
-  let ackReconcilerInterval: ReturnType<typeof setInterval> | undefined
+  // Receive-side reconciler interval (CLINK acks + NWC sub-dust invoice rows)
+  // — assigned once bootReady runs (needs the account key + swaps). Cleared on
+  // shutdown.
+  let receiveReconcilerInterval: ReturnType<typeof setInterval> | undefined
 
   // Exit-proof mirroring — assigned in bootReady, torn down on shutdown.
   let proofSync: ProofSyncService | undefined
@@ -263,13 +265,20 @@ async function main(): Promise<void> {
       console.log(`  noffer         ${offers.snapshot().noffer}`)
       undo.push(() => offers.stop())
 
-      // Restart-safe CLINK acks: catch up on receipts the live onReverseSettled
-      // missed (swaps that settled while we were down) + drive sub-dust acks.
+      // Restart-safe receive reconcile, boot + every 30s. Two passes: CLINK
+      // acks the live onReverseSettled missed (swaps that settled while we
+      // were down) + sub-dust acks, and NWC make_invoice sub-dust rows — those
+      // have no settlement event at all (no swap object), so this poll is the
+      // only thing that ever flips them (see ln_receive.ts).
       const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: cfg.boltzApiUrl }
-      void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile (boot) failed:', err))
-      ackReconcilerInterval = setInterval(() => {
+      const reconcileReceives = (): void => {
         void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
-      }, 30_000)
+        void reconcileSubdustReceives({ db, boltzApiUrl: cfg.boltzApiUrl }).catch((err) =>
+          console.error('nwc: sub-dust invoice reconcile failed:', err),
+        )
+      }
+      reconcileReceives()
+      receiveReconcilerInterval = setInterval(reconcileReceives, 30_000)
 
       // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
       // Stateless REST; the wallet keeps its own internal one for signing.
@@ -394,9 +403,9 @@ async function main(): Promise<void> {
       proofSync = undefined
       stopIncomingFunds?.()
       stopIncomingFunds = undefined
-      if (ackReconcilerInterval) {
-        clearInterval(ackReconcilerInterval)
-        ackReconcilerInterval = undefined
+      if (receiveReconcilerInterval) {
+        clearInterval(receiveReconcilerInterval)
+        receiveReconcilerInterval = undefined
       }
       for (const step of undo.reverse()) {
         try {
@@ -473,7 +482,7 @@ async function main(): Promise<void> {
     console.log(`\n${signal} received, shutting down`)
     clearInterval(watchdog)
     clearInterval(eventPrune)
-    if (ackReconcilerInterval) clearInterval(ackReconcilerInterval)
+    if (receiveReconcilerInterval) clearInterval(receiveReconcilerInterval)
     proofSync?.stop()
     stopIncomingFunds?.()
     if (bootRetryTimer) clearTimeout(bootRetryTimer)

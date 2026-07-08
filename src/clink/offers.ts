@@ -3,7 +3,6 @@ import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, getPublicKey, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
 import {
   NetworkError,
-  decodeInvoice,
   isReverseFinalStatus,
   isReverseSuccessStatus,
   type ArkadeSwaps,
@@ -13,6 +12,7 @@ import {
 import type { Wallet } from '@arkade-os/sdk'
 
 import { CLINK_OFFER_ID } from '../defaults'
+import { issueInvoice, subdustReceiveStatus, type IssuedInvoice } from '../ln_receive'
 import { decryptContent, encryptContent } from '../nostr/crypto'
 import { openPersistentSub, type PersistentSub } from '../nostr/persistent_sub'
 import { normalizeRelayUrl, type OutboxWatcher } from '../nostr/outbox'
@@ -39,12 +39,6 @@ import { validateZapRequest, zapDescriptionHash, publishZapReceipt } from './zap
 
 const OFFER_KIND = 21001
 const CLINK_VERSION = '1'
-
-// Bitcoin P2TR standard dust. Below this a Boltz reverse swap can't settle: the
-// vHTLC lockup vtxo is sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the
-// claim's spend, so the swap strands. Sub-dust receives take the operator's
-// plain-invoice path instead (see handleOfferRequest + boltz-subdust-receive.patch).
-const DUST_SATS = 330
 
 // CLINK is NIP-44 only (unlike NWC, which also speaks legacy nip04).
 const SCHEME = 'nip44_v2' as const
@@ -196,39 +190,6 @@ interface HandlerCtx {
   relay: string
 }
 
-/**
- * Sub-dust receive via Boltz's plain-invoice path (server side:
- * patches/boltz-subdust-receive.patch). Boltz issues a plain invoice it
- * collects and, on settlement, sends `amount` to `address` as a plain
- * off-chain vtxo — 1:1, no swap, no swap fee.
- *
- * This drops the reverse swap's atomicity: the external payer settles a real
- * invoice with no on-chain guarantee, trusting Boltz to deliver the vtxo
- * afterward. The counterparty risk is the payer's; it does not depend on who
- * runs the ASP/Boltz. Below dust there is no atomic alternative anyway (the
- * vHTLC claim is impossible), and the amounts are tiny.
- */
-async function requestSubdustInvoice(
-  boltzApiUrl: string,
-  amount: number,
-  address: string,
-  descriptionHash?: string,
-): Promise<string> {
-  const res = await fetch(`${boltzApiUrl}/v2/subdust/receive`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    // descriptionHash (hex) present iff this is a zap: Boltz mints a plain
-    // invoice committing it, so the 9735 we publish on settlement verifies.
-    body: JSON.stringify({ amount, address, ...(descriptionHash ? { descriptionHash } : {}) }),
-  })
-  if (!res.ok) {
-    throw new Error(`subdust/receive ${res.status}: ${await res.text().catch(() => '')}`)
-  }
-  const body = (await res.json()) as { invoice?: string }
-  if (!body.invoice) throw new Error('subdust/receive: response had no invoice')
-  return body.invoice
-}
-
 async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<void> {
   // A response to a kind-21001 request reuses kind 21001 with an `e` tag —
   // ignore those so we never answer our own (or a peer's) responses.
@@ -286,52 +247,17 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
       ? payload.description
       : undefined
 
-  // Sub-dust receive: a Boltz reverse swap can't settle below dust (the vHTLC
-  // lockup vtxo is sub-dust → arkd VTXO_RECOVERABLE → claim strands). Fall back
-  // to Boltz's non-atomic plain-invoice path: the payer settles a real invoice
-  // with no on-chain guarantee, trusting Boltz to deliver the vtxo afterward.
-  // There's no swap, so we persist the ack info keyed on the invoice payment
-  // hash; reconcileClinkAcks later asks boltz whether it settled and sends the
-  // CLINK receipt (with preimage) — see below.
-  if (amount < DUST_SATS) {
-    let invoice: string
-    try {
-      const address = await ctx.wallet.getAddress()
-      invoice = await requestSubdustInvoice(ctx.boltzApiUrl, amount, address, zap?.descriptionHash)
-    } catch (err) {
-      await respond(ctx, event, { error: 'Temporary Failure', code: ERR_TEMPORARY })
-      console.error('clink: sub-dust receive failed:', err)
-      return
-    }
-    const paymentHash = decodeInvoice(invoice).paymentHash
-    ctx.db
-      .query(
-        `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING`,
-      )
-      .run(
-        paymentHash,
-        event.pubkey,
-        event.id,
-        ctx.relay,
-        zap?.request ?? null,
-        zap ? invoice : null,
-        Math.floor(Date.now() / 1000),
-      )
-    await respond(ctx, event, { bolt11: invoice })
-    console.log(`clink: issued sub-dust invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`)
-    return
-  }
-
-  let invoice: string
-  let swapId: string
+  // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: a Boltz
+  // reverse swap ≥ dust (auto-claimed by the SwapManager; tracked in
+  // boltz_swaps, so the ack reconciler can look it up — no transactions row),
+  // boltz's non-atomic plain-invoice path below it. Which branch we got
+  // decides where the ack bookkeeping lands.
+  let issued: IssuedInvoice
   try {
-    // ≥dust: a Boltz reverse swap → on payment the SwapManager (boltz.ts)
-    // auto-claims the VHTLC into the Ark wallet. Tracked in the swap repo
-    // (boltz_swaps), so the ack reconciler can look it up; no transactions row.
-    const result = await ctx.swaps.createLightningInvoice({ amount, description, descriptionHash: zap?.descriptionHash })
-    invoice = result.invoice
-    swapId = result.pendingSwap.id
+    issued = await issueInvoice(
+      { swaps: ctx.swaps, wallet: ctx.wallet, boltzApiUrl: ctx.boltzApiUrl },
+      { amountSats: amount, description, descriptionHash: zap?.descriptionHash },
+    )
   } catch (err) {
     if (err instanceof NetworkError) {
       // Boltz rejected — usually amount outside reverse-swap limits. (Range
@@ -341,29 +267,51 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
       return
     }
     await respond(ctx, event, { error: 'Temporary Failure', code: ERR_TEMPORARY })
-    console.error('clink: createLightningInvoice failed:', err)
+    console.error('clink: invoice issue failed:', err)
     return
   }
 
-  // Remember whom to ack once this swap settles (CLINK Payment Receipt).
-  // Keyed on swap id; the settlement hook (sendOfferReceipt) consumes it.
-  ctx.db
-    .query(
-      `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(swap_id) DO NOTHING`,
-    )
-    .run(
-      swapId,
-      event.pubkey,
-      event.id,
-      ctx.relay,
-      zap?.request ?? null,
-      zap ? invoice : null,
-      Math.floor(Date.now() / 1000),
-    )
+  if (issued.kind === 'subdust') {
+    // No swap to key the ack on — persist it on the invoice payment hash;
+    // reconcileClinkAcks asks boltz whether it settled and sends the CLINK
+    // receipt (with preimage).
+    ctx.db
+      .query(
+        `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING`,
+      )
+      .run(
+        issued.paymentHash,
+        event.pubkey,
+        event.id,
+        ctx.relay,
+        zap?.request ?? null,
+        zap ? issued.invoice : null,
+        Math.floor(Date.now() / 1000),
+      )
+  } else {
+    // Remember whom to ack once this swap settles (CLINK Payment Receipt).
+    // Keyed on swap id; the settlement hook (sendOfferReceipt) consumes it.
+    ctx.db
+      .query(
+        `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(swap_id) DO NOTHING`,
+      )
+      .run(
+        issued.swapId,
+        event.pubkey,
+        event.id,
+        ctx.relay,
+        zap?.request ?? null,
+        zap ? issued.invoice : null,
+        Math.floor(Date.now() / 1000),
+      )
+  }
 
-  await respond(ctx, event, { bolt11: invoice })
-  console.log(`clink: issued invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`)
+  await respond(ctx, event, { bolt11: issued.invoice })
+  console.log(
+    `clink: issued ${issued.kind === 'subdust' ? 'sub-dust ' : ''}invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`,
+  )
 }
 
 interface ReceiptRow {
@@ -447,15 +395,6 @@ interface SubdustReceiptRow {
 // were abandoned). The status endpoint only reports `settled`, so age is the
 // backstop. Generous so a still-payable invoice is never dropped early.
 const SUBDUST_ACK_TTL_SECONDS = 24 * 60 * 60
-
-async function subdustReceiveStatus(
-  boltzApiUrl: string,
-  paymentHash: string,
-): Promise<{ settled: boolean; preimage?: string }> {
-  const res = await fetch(`${boltzApiUrl}/v2/subdust/receive/status?paymentHash=${paymentHash}`)
-  if (!res.ok) throw new Error(`subdust status ${res.status}: ${await res.text().catch(() => '')}`)
-  return (await res.json()) as { settled: boolean; preimage?: string }
-}
 
 /**
  * Boot + periodic CLINK ack reconciler — makes acks restart-safe for BOTH

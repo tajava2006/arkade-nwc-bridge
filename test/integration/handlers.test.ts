@@ -5,10 +5,12 @@ import { handleGetBalance } from '../../src/handlers/get_balance'
 import { handleGetInfo } from '../../src/handlers/get_info'
 import { handleListTransactions } from '../../src/handlers/list_transactions'
 import { handleLookupInvoice } from '../../src/handlers/lookup_invoice'
+import { handleMakeInvoice } from '../../src/handlers/make_invoice'
 import { handlePayInvoice } from '../../src/handlers/pay_invoice'
 import { createConnection, type Connection } from '../../src/nostr/connections'
 import { openTempDb, type TempDb } from '../helpers/db'
 import {
+  INVOICE_2000_SAT,
   emptyBalance,
   fakeInvoiceResponse,
   fakeSpendableVtxo,
@@ -46,7 +48,7 @@ describe('handlers', () => {
       const r = handleGetInfo({ cfg: CFG }) as { network: string; methods: string[] }
       expect(r.network).toBe('mainnet')
       expect(r.methods).toContain('pay_invoice')
-      expect(r.methods).not.toContain('make_invoice') // receive is CLINK-noffer only
+      expect(r.methods).toContain('make_invoice')
     })
 
     test('mutinynet maps to "signet"', () => {
@@ -77,13 +79,116 @@ describe('handlers', () => {
     })
   })
 
-  describe('pay_invoice', () => {
-    // 20μBTC = 2000 sat mainnet invoice with a valid bech32 checksum,
-    // borrowed from light-bolt11-decoder's own test vectors. Already
-    // expired — we only need it to decode, never to be paid.
-    const INVOICE_2000_SAT =
-      'lnbc20u1p3y0x3hpp5743k2g0fsqqxj7n8qzuhns5gmkk4djeejk3wkp64ppevgekvc0jsdqcve5kzar2v9nr5gpqd4hkuetesp5ez2g297jduwc20t6lmqlsg3man0vf2jfd8ar9fh8fhn2g8yttfkqxqy9gcqcqzys9qrsgqrzjqtx3k77yrrav9hye7zar2rtqlfkytl094dsp0ms5majzth6gt7ca6uhdkxl983uywgqqqqlgqqqvx5qqjqrzjqd98kxkpyw0l9tyy8r8q57k7zpy9zjmh6sez752wj6gcumqnj3yxzhdsmg6qq56utgqqqqqqqqqqqeqqjq7jd56882gtxhrjm03c93aacyfy306m4fq0tskf83c0nmet8zc2lxyyg3saz8x6vwcp26xnrlagf9semau3qm2glysp7sv95693fphvsp54l567'
+  describe('make_invoice', () => {
+    // issueInvoice's sub-dust branch talks to boltz over plain fetch —
+    // intercept per-test and restore so other suites see the real one.
+    const realFetch = globalThis.fetch
+    afterEach(() => {
+      globalThis.fetch = realFetch
+    })
 
+    test('rejects non-positive amounts with OTHER', async () => {
+      const conn = newConn(temp)
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-a', wallet: makeWalletStub(), boltzApiUrl: '' }
+      await expect(handleMakeInvoice(deps, { amount: -1 })).rejects.toMatchObject({
+        code: 'OTHER',
+      })
+      await expect(handleMakeInvoice(deps, {})).rejects.toMatchObject({ code: 'OTHER' })
+    })
+
+    test('rejects sub-sat amounts (non-multiple of 1000 msat) with OTHER', async () => {
+      const conn = newConn(temp)
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b', wallet: makeWalletStub(), boltzApiUrl: '' }
+      await expect(handleMakeInvoice(deps, { amount: 1500 })).rejects.toMatchObject({
+        code: 'OTHER',
+      })
+    })
+
+    test('rejects a malformed description_hash with OTHER', async () => {
+      const conn = newConn(temp)
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b2', wallet: makeWalletStub(), boltzApiUrl: '' }
+      await expect(
+        handleMakeInvoice(deps, { amount: 1_000_000, description_hash: 'not-hex' }),
+      ).rejects.toMatchObject({ code: 'OTHER' })
+    })
+
+    test('≥dust inserts a pending swap row and returns wallet-movement amounts', async () => {
+      const conn = newConn(temp)
+      // Client asks for 1000 sat. Boltz takes 10 sat fee, 990 sat lands on Ark.
+      const swaps = makeSwapsStub({
+        createLightningInvoice: async (args) => {
+          expect(args.amount).toBe(1000)
+          return fakeInvoiceResponse({
+            amount: 990,
+            invoice: 'lnbc10u',
+            paymentHash: 'aa'.repeat(32),
+          })
+        },
+      })
+      const r = (await handleMakeInvoice(
+        { swaps, db: temp.db, conn, eventId: 'evt-c', wallet: makeWalletStub(), boltzApiUrl: '' },
+        { amount: 1_000_000, description: 'tea' },
+      )) as Record<string, unknown>
+
+      expect(r.type).toBe('incoming')
+      expect(r.state).toBe('pending')
+      expect(r.invoice).toBe('lnbc10u')
+      expect(r.amount).toBe(990_000) // on-Ark movement, not nominal
+      expect(r.fees_paid).toBe(10_000)
+      expect(r.description).toBe('tea')
+      expect(r.payment_hash).toBe('aa'.repeat(32))
+
+      const row = temp.db
+        .query<
+          { state: string; amount_msat: number; fees_paid_msat: number; description: string; swap_id: string | null; expires_at: number | null },
+          []
+        >(
+          `SELECT state, amount_msat, fees_paid_msat, description, swap_id, expires_at FROM transactions`,
+        )
+        .get()
+      expect(row?.state).toBe('pending')
+      expect(row?.amount_msat).toBe(990_000)
+      expect(row?.fees_paid_msat).toBe(10_000)
+      expect(row?.description).toBe('tea')
+      // syncSwapToDb (boltz.ts) flips this row on settlement via the swap id.
+      expect(row?.swap_id).toBe('swap-id-fake')
+      expect(typeof row?.expires_at).toBe('number')
+    })
+
+    test('sub-dust routes through the boltz plain path — NULL swap_id row for the reconciler', async () => {
+      const conn = newConn(temp)
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        expect(String(url)).toBe('http://boltz/v2/subdust/receive')
+        expect(JSON.parse(String(init?.body))).toEqual({ amount: 21, address: 'tark1stub' })
+        return Response.json({ invoice: INVOICE_2000_SAT })
+      }) as unknown as typeof fetch
+
+      // Default swaps stub throws on createLightningInvoice — proves the
+      // reverse-swap path is never touched below dust.
+      const r = (await handleMakeInvoice(
+        { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-sd', wallet: makeWalletStub(), boltzApiUrl: 'http://boltz' },
+        { amount: 21_000 },
+      )) as Record<string, unknown>
+
+      expect(r.state).toBe('pending')
+      expect(r.invoice).toBe(INVOICE_2000_SAT)
+      expect(r.amount).toBe(21_000) // 1:1 — the plain path takes no swap fee
+      expect(r.fees_paid).toBeUndefined()
+
+      const row = temp.db
+        .query<
+          { swap_id: string | null; amount_msat: number; fees_paid_msat: number; expires_at: number | null },
+          []
+        >(`SELECT swap_id, amount_msat, fees_paid_msat, expires_at FROM transactions`)
+        .get()
+      expect(row?.swap_id).toBeNull()
+      expect(row?.amount_msat).toBe(21_000)
+      expect(row?.fees_paid_msat).toBe(0)
+      expect(typeof row?.expires_at).toBe('number')
+    })
+  })
+
+  describe('pay_invoice', () => {
     test('rejects missing/invalid invoice with OTHER', async () => {
       const conn = newConn(temp)
       const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-d', wallet: makeWalletStub(), boltzApiUrl: '' }

@@ -148,6 +148,7 @@ NIP-47 methods implemented:
 
 - `get_info`
 - `get_balance`
+- `make_invoice` (Lightning → Ark via Boltz reverse swap; sub-dust via the plain path)
 - `pay_invoice` (Ark → Lightning via Boltz submarine swap)
 - `lookup_invoice`
 - `list_transactions`
@@ -157,16 +158,17 @@ clients fall back to polling, which is fine for the zap use case.
 
 ### Receiving
 
-There is no `make_invoice` — NWC clients **send** only. Receiving runs
-through a single static [CLINK noffer](RECEIVE_DESIGN.md) (Lightning),
-shown on the dashboard alongside the Ark address (offchain L2) and the
-onchain boarding address. A payer scans the noffer, names an amount, and
-the invoice settles onto Ark.
+`make_invoice` and the static [CLINK noffer](RECEIVE_DESIGN.md) share one
+LN-receive core (`src/ln_receive.ts`) — a Boltz reverse swap at ≥330 sats,
+boltz's plain sub-dust path below — so a connected NWC client and a noffer
+payer get identical behavior, sub-dust included, and there's only one side
+to change when the Boltz config moves.
 
-Why one receive path instead of per-client NWC invoices: sub-dust
-send/receive needs custom Boltz config, so funneling every receive
-through one place means there's only one side to change and far less
-surface to get wrong. See [`RECEIVE_DESIGN.md`](RECEIVE_DESIGN.md) §3.
+The noffer stays the public handle: shown on the dashboard alongside the
+Ark address (offchain L2) and the onchain boarding address, a payer scans
+it, names an amount, and the invoice settles onto Ark. `make_invoice`
+covers clients that want per-invoice receive over their own private
+connection.
 
 ### Sub-dust amounts
 
