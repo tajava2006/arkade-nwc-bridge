@@ -273,5 +273,54 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
     TIMEOUT_MS,
   )
 
+  // make_invoice tests are kept last: the invoices are never paid, so the
+  // only side effect is an expiring reverse swap / plain invoice — free.
+  test(
+    'make_invoice ≥dust creates a real reverse swap (unpaid → expires free)',
+    async () => {
+      const r = await nwcRequest(harness!, 'make_invoice', { amount: 1_000_000 }) // 1000 sats
+      expect(r.error).toBeFalsy()
+      const result = r.result as {
+        type: string
+        state: string
+        invoice: string
+        payment_hash: string
+        amount: number
+      }
+      expect(result.type).toBe('incoming')
+      expect(result.state).toBe('pending')
+      expect(result.invoice.startsWith('lnbc')).toBe(true)
+      expect(result.payment_hash).toMatch(/^[0-9a-f]{64}$/)
+      // Boltz's reverse-swap fee can eat most of a small invoice — don't
+      // assert the exact on-Ark amount, just that the field came back.
+      expect(typeof result.amount).toBe('number')
+    },
+    TIMEOUT_MS * 2,
+  )
+
+  test(
+    'make_invoice sub-dust routes through the boltz plain path (unpaid → free)',
+    async () => {
+      const r = await nwcRequest(harness!, 'make_invoice', { amount: 21_000 }) // 21 sats
+      expect(r.error).toBeFalsy()
+      const result = r.result as {
+        state: string
+        invoice: string
+        amount: number
+        fees_paid?: number
+      }
+      expect(result.state).toBe('pending')
+      expect(result.invoice.startsWith('lnbc')).toBe(true)
+      expect(result.amount).toBe(21_000) // plain path is 1:1 — no swap fee
+      expect(result.fees_paid).toBeUndefined()
+      // The row is visible to lookup_invoice right away (pending until the
+      // reconciler sees it settle or expire).
+      const lookup = await nwcRequest(harness!, 'lookup_invoice', { invoice: result.invoice })
+      expect(lookup.error).toBeFalsy()
+      expect((lookup.result as { state: string }).state).toBe('pending')
+    },
+    TIMEOUT_MS * 2,
+  )
+
 })
 
