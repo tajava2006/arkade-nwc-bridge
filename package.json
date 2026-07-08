@@ -18,13 +18,13 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@arkade-os/boltz-swap": "^0.3.46",
-    "@arkade-os/sdk": "^0.4.41",
+    "@arkade-os/boltz-swap": "^0.3.48",
+    "@arkade-os/sdk": "^0.4.43",
     "@scure/base": "^2.0.0",
     "@scure/btc-signer": "2.0.1",
     "eventsource": "^4.1.0",
     "light-bolt11-decoder": "^3.2.0",
-    "nostr-tools": "^2.23.5",
+    "nostr-tools": "^2.23.9",
     "qr": "^0.6.0"
   }
 }
