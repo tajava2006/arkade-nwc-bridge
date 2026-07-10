@@ -56,10 +56,12 @@ src/
                                (getOutboxSource reports which); exposes that +
                                bootstrap / outbox relay status snapshots
     persistent_sub.ts        — self-healing subscription wrapper: one
-                               sub per relay, re-issues the REQ after
+                               sub per relay, re-issues the REQ when
                                nostr-tools permanently kills a socket's
-                               subs (failed reconnect); cross-relay
-                               event dedupe via alreadyHaveEvent
+                               subs (initial-connect failure; mid-outage
+                               reconnects are healed upstream since
+                               nostr-tools 2.23.9, our #538 fix);
+                               cross-relay event dedupe via alreadyHaveEvent
     service.ts               — takes the shared SimplePool, one SubCloser
                                per connection over conn.relays;
                                registerConnection/unregisterConnection for
@@ -207,21 +209,23 @@ row exists. Logs go to stdout; when running in background pipe to
   no race. Outbox updates affect *new* connections only — existing
   ones keep their relays for life, even if the operator's NIP-65
   list changes underneath. `cfg.nwcRelays` doesn't exist.
-- **`enableReconnect` gives up — and takes the subs with it.** A
-  failed reconnect after a transient drop sets `skipReconnection=true`
-  inside nostr-tools, which *permanently closes every subscription
-  on that socket* and removes the relay from the pool, so
-  `listConnectionStatus` forgets about it. The 5s `ensureRelay`
-  watchdog in `index.ts` resurrects entries (bootstrap ∪ current
-  outbox ∪ active connections' relays) so a relay coming back
-  online recovers within one tick — but a resurrected relay starts
-  with zero subscriptions, so the socket alone is deaf. Subscription
-  recovery is [`src/nostr/persistent_sub.ts`](src/nostr/persistent_sub.ts)'s
+- **`enableReconnect` still gives up on the *initial* connect — and
+  takes the subs with it.** Since nostr-tools 2.23.9 (our upstream
+  fix, nbd-wtf/nostr-tools#538) a failed *retry* no longer sets
+  `skipReconnection=true`: mid-outage reconnects keep backing off
+  (last backoff entry repeats) and every sub re-REQs when the relay
+  returns. What still permanently closes a socket's subs is a failure
+  on the first connection attempt (`reconnectAttempts === 0`) — e.g.
+  the relay is down when a sub is first attached, including right
+  after the 5s `ensureRelay` watchdog in `index.ts` resurrects a
+  relay that nostr-tools dropped from the pool (a resurrected relay
+  starts with zero subscriptions, so the socket alone is deaf).
+  Recovery for that path is
+  [`src/nostr/persistent_sub.ts`](src/nostr/persistent_sub.ts)'s
   job: one sub per (connection, relay), `onclose` marks it dead, a
   5s retry re-issues the REQ (`since` resumed from the death time,
-  capped). Long-lived subs MUST go through `openPersistentSub`,
-  never raw `pool.subscribeMany` — a raw sub dies forever on the
-  first failed reconnect.
+  capped). Long-lived subs still MUST go through `openPersistentSub`,
+  never raw `pool.subscribeMany`.
 - **URL canonicalization.** `SimplePool` parses relay URLs via
   WHATWG URL (`wss://nos.lol` → `wss://nos.lol/`), and pool
   callbacks emit the canonical form. Use `normalizeRelayUrl` from
