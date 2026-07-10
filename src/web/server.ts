@@ -8,6 +8,7 @@ import { createAccount, generatePrivateKey, loadAccount, parseNsecInput } from '
 import { nip19 } from 'nostr-tools'
 import { getPublicKey } from 'nostr-tools/pure'
 import type { SimplePool } from 'nostr-tools/pool'
+import { cycleSpentMsat, parseBudgetRenewal, type BudgetRenewal } from '../lib/budget'
 import { html, htmlResponse } from '../lib/html'
 import {
   createConnection,
@@ -421,14 +422,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           if (!r.ok) return r.response
           const { active, revoked } = listAllConnections(db)
           const connectionStatuses = new Map<number, RelayStatus[]>()
+          const spentNowMsat = new Map<number, number>()
+          const now = new Date()
           for (const c of active) {
             connectionStatuses.set(c.id, r.ready.nostr.getRelayStatus(c.relays))
+            spentNowMsat.set(c.id, cycleSpentMsat(db, c, now))
           }
           return htmlResponse(
             connectionsListView({
               active,
               revoked,
               connectionStatuses,
+              spentNowMsat,
               outboxPanel: {
                 bootstrap: outbox.getBootstrapRelayStatus(),
                 outbox: outbox.getOutboxRelayStatus(),
@@ -464,11 +469,36 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                   error: 'budget must be a non-negative integer (sats)',
                   label: label ?? undefined,
                   budgetSats: budgetSatsStr,
+                  budgetRenewal:
+                    typeof form.get('budget_renewal') === 'string'
+                      ? (form.get('budget_renewal') as string)
+                      : undefined,
                 }),
                 { status: 400 },
               )
             }
             budgetMsat = n * 1000
+          }
+
+          // Renewal is meaningless without a cap — unlimited connections are
+          // stored as 'never' regardless of what the form said. Missing/empty
+          // field also defaults to 'never' (lenient for hand-rolled POSTs);
+          // only an explicit unknown value is rejected.
+          const rawRenewal = form.get('budget_renewal')
+          let budgetRenewal: BudgetRenewal = 'never'
+          if (budgetMsat !== null && typeof rawRenewal === 'string' && rawRenewal !== '') {
+            const parsed = parseBudgetRenewal(rawRenewal)
+            if (parsed === null) {
+              return htmlResponse(
+                newConnectionForm({
+                  error: 'budget renewal must be one of: never, daily, weekly, monthly',
+                  label: label ?? undefined,
+                  budgetSats: budgetSatsStr ?? undefined,
+                }),
+                { status: 400 },
+              )
+            }
+            budgetRenewal = parsed
           }
 
           const { connection, uri } = createConnection(db, {
@@ -478,6 +508,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             // outbox list changes later.
             relays: outbox.getOutboxRelays(),
             budgetMsat,
+            budgetRenewal,
           })
           // Publish the info event and start listening for requests
           // immediately — without this, the client wouldn't see kind 13194
@@ -510,6 +541,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             connectionDetailView({
               conn,
+              spentNowMsat: cycleSpentMsat(db, conn, new Date()),
               transactions,
               relays: r.ready.nostr.getRelayStatus(conn.relays),
             }),

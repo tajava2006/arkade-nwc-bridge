@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import { generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 import { bytesToHex, hexToBytes } from 'nostr-tools/utils'
+import { parseBudgetRenewal, type BudgetRenewal } from '../lib/budget'
 
 export interface Connection {
   id: number
@@ -16,6 +17,12 @@ export interface Connection {
    */
   relays: string[]
   budgetMsat: number | null
+  budgetRenewal: BudgetRenewal
+  /**
+   * Lifetime wallet movement (fee-inclusive) on this connection. Budget
+   * source of truth for 'never'; periodic renewals ignore it and sum
+   * `transactions` over the current window instead (src/lib/budget.ts).
+   */
   spentMsat: number
   expiresAt: number | null
   createdAt: number
@@ -30,6 +37,7 @@ interface ConnectionRow {
   client_pubkey_hex: string
   relays_json: string
   budget_msat: number | null
+  budget_renewal: string
   spent_msat: number
   expires_at: number | null
   created_at: number
@@ -56,6 +64,9 @@ function rowToConnection(row: ConnectionRow): Connection {
     clientPubkeyHex: row.client_pubkey_hex,
     relays,
     budgetMsat: row.budget_msat,
+    // Hand-edited garbage falls back to 'never' — the most restrictive
+    // reading (spend never comes back), same spirit as the relays parse.
+    budgetRenewal: parseBudgetRenewal(row.budget_renewal) ?? 'never',
     spentMsat: row.spent_msat,
     expiresAt: row.expires_at,
     createdAt: row.created_at,
@@ -81,6 +92,8 @@ export function createConnection(
     relays: string[]
     /** Per-connection spending cap in msats. null = unlimited. */
     budgetMsat?: number | null
+    /** How often the cap's window rolls over. Default 'never' = lifetime. */
+    budgetRenewal?: BudgetRenewal
   },
 ): NewConnectionResult {
   if (args.relays.length === 0) {
@@ -96,11 +109,11 @@ export function createConnection(
   const row = db
     .query<
       ConnectionRow,
-      [string | null, string, string, string, string, number | null, number]
+      [string | null, string, string, string, string, number | null, string, number]
     >(
       `INSERT INTO connections (
-         label, service_secret_hex, service_pubkey_hex, client_pubkey_hex, relays_json, budget_msat, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         label, service_secret_hex, service_pubkey_hex, client_pubkey_hex, relays_json, budget_msat, budget_renewal, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING *`,
     )
     .get(
@@ -110,6 +123,7 @@ export function createConnection(
       clientPubkey,
       JSON.stringify(args.relays),
       args.budgetMsat ?? null,
+      args.budgetRenewal ?? 'never',
       createdAt,
     )
 

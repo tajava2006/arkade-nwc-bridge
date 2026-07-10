@@ -143,6 +143,13 @@ accounts (
 -- for the connection's whole lifetime, so an outbox list change
 -- later doesn't silently break clients that baked the old set
 -- into their URI.
+-- Budget windows are computed, never stored: src/lib/budget.ts
+-- derives the current window from (budget_renewal, now) — local
+-- calendar-aligned — and sums `transactions` inside it, so there
+-- is no reset job, no last-reset column, and nothing to catch up
+-- on after downtime. 'never' is the one unbounded window; it reads
+-- the O(1) spent_msat counter instead (fee-inclusive wallet
+-- movement since v13), which stays maintained for every renewal.
 connections (
   id                  INTEGER PRIMARY KEY,
   label               TEXT,
@@ -151,7 +158,8 @@ connections (
   client_pubkey_hex   TEXT    NOT NULL,
   relays_json         TEXT    NOT NULL DEFAULT '[]',
   budget_msat         INTEGER,                    -- null = unlimited
-  spent_msat          INTEGER NOT NULL DEFAULT 0,
+  budget_renewal      TEXT    NOT NULL DEFAULT 'never',  -- daily|weekly|monthly|never
+  spent_msat          INTEGER NOT NULL DEFAULT 0, -- lifetime, fee-inclusive
   expires_at          INTEGER,
   created_at          INTEGER NOT NULL,
   revoked_at          INTEGER
@@ -257,7 +265,10 @@ same reason.
 ### `pay_invoice` (Ark → LN)
 1. `decodeInvoice` for amount/payment_hash. Reject 0-amount invoices
    (we don't yet honor NIP-47's `params.amount`).
-2. Budget check against `connection.budget_msat`.
+2. Budget check: `cycleSpentMsat` (current-window spend, pending rows
+   included so in-flight payments reserve budget) + this invoice against
+   `budget_msat`. No await between the check and the INSERT below, so
+   concurrent requests can't jointly overshoot the cap.
 3. Insert pending `transactions` row with `amount_msat = invoiceMsat`
    as a placeholder.
 4. `swaps.sendLightningPayment({ invoice })` — one-shot: creates
@@ -266,7 +277,9 @@ same reason.
 5. On success: `UPDATE` `amount_msat = paidMsat` (the on-Ark amount
    that actually left the wallet, including the swap fee) and
    `fees_paid_msat = paidMsat − invoiceMsat`. Bump
-   `connections.spent_msat`. Return preimage.
+   `connections.spent_msat` by `paidMsat` in the same sqlite
+   transaction (the row leaving 'pending' and the counter gaining it
+   must be atomic — see pay_invoice.ts). Return preimage.
 
 ### `lookup_invoice` / `list_transactions`
 Read-only against `transactions`. **Scoped to the calling connection**

@@ -247,7 +247,76 @@ describe('handlers', () => {
           'SELECT spent_msat FROM connections WHERE id = ?',
         )
         .get(conn.id)
-      expect(spent?.spent_msat).toBe(2_000_000) // budget tracks invoice nominal
+      expect(spent?.spent_msat).toBe(2_005_000) // budget tracks wallet movement, fee included
+    })
+
+    test('periodic renewal: spend from a previous window does not count', async () => {
+      // 2500 sat daily budget with 1000 sats spent two days ago — lifetime
+      // total (3000) would bust the cap, the daily window (2000) does not.
+      const r = createConnection(temp.db, {
+        label: null,
+        relays: ['wss://r'],
+        budgetMsat: 2_500_000,
+        budgetRenewal: 'daily',
+      })
+      const conn = r.connection
+      temp.db
+        .query(
+          `INSERT INTO transactions (
+             connection_id, type, request_event_id, invoice, payment_hash,
+             amount_msat, state, created_at
+           ) VALUES (?, 'outgoing', 'evt-old', 'lnbc1', 'hash-old', ?, 'settled', ?)`,
+        )
+        .run(conn.id, 1_000_000, Math.floor(Date.now() / 1000) - 2 * 86_400)
+      temp.db.query('UPDATE connections SET spent_msat = ? WHERE id = ?').run(1_000_000, conn.id)
+
+      const swaps = makeSwapsStub({
+        createSubmarineSwap: async () => fakeSubmarineSwap({ expectedAmount: 2005 }),
+        waitForSwapSettlement: async () => ({ preimage: 'be'.repeat(32) }),
+      })
+      const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
+      const res = (await handlePayInvoice(
+        { swaps, db: temp.db, conn, eventId: 'evt-window', wallet, boltzApiUrl: '' },
+        { invoice: INVOICE_2000_SAT },
+      )) as Record<string, unknown>
+      expect(res.preimage).toBe('be'.repeat(32))
+    })
+
+    test("never renewal: the same lifetime spend still busts the cap", async () => {
+      const r = createConnection(temp.db, {
+        label: null,
+        relays: ['wss://r'],
+        budgetMsat: 2_500_000,
+        budgetRenewal: 'never',
+      })
+      const conn = r.connection
+      temp.db.query('UPDATE connections SET spent_msat = ? WHERE id = ?').run(1_000_000, conn.id)
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-life', wallet: makeWalletStub(), boltzApiUrl: '' }
+      await expect(
+        handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
+      ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' })
+    })
+
+    test('pending payments reserve budget', async () => {
+      const r = createConnection(temp.db, {
+        label: null,
+        relays: ['wss://r'],
+        budgetMsat: 2_500_000,
+        budgetRenewal: 'daily',
+      })
+      const conn = r.connection
+      temp.db
+        .query(
+          `INSERT INTO transactions (
+             connection_id, type, request_event_id, invoice, payment_hash,
+             amount_msat, state, created_at
+           ) VALUES (?, 'outgoing', 'evt-inflight', 'lnbc1', 'hash-p', ?, 'pending', ?)`,
+        )
+        .run(conn.id, 1_000_000, Math.floor(Date.now() / 1000))
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-reserve', wallet: makeWalletStub(), boltzApiUrl: '' }
+      await expect(
+        handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
+      ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' })
     })
 
     test('SDK failure marks the row failed and throws PAYMENT_FAILED', async () => {

@@ -317,6 +317,30 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_transactions_conn_created ON transactions(connection_id, created_at);
     `,
   },
+  {
+    version: 13,
+    description:
+      'connections.budget_renewal + spent_msat redefined as fee-inclusive wallet movement',
+    // Budget windows are computed, never stored — src/lib/budget.ts derives
+    // the current window from (budget_renewal, now) and sums `transactions`
+    // inside it, so there is no reset job and no last-reset column. 'never'
+    // is the one renewal whose window is unbounded; it keeps the spent_msat
+    // counter (O(1) forever) instead of a SUM that grows with lifetime
+    // traffic. The counter stays maintained for every renewal type so a row
+    // can later switch to 'never' without losing history.
+    //
+    // spent_msat also changes meaning here: it used to accumulate the
+    // invoice nominal, but budgets now track what actually left the wallet
+    // (invoice + swap fee), matching transactions.amount_msat. The backfill
+    // recomputes existing counters under the new definition.
+    sql: `
+      ALTER TABLE connections ADD COLUMN budget_renewal TEXT NOT NULL DEFAULT 'never';
+      UPDATE connections SET spent_msat = (
+        SELECT COALESCE(SUM(amount_msat), 0) FROM transactions
+        WHERE connection_id = connections.id AND type = 'outgoing' AND state = 'settled'
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

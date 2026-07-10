@@ -77,6 +77,10 @@ src/
     lookup_invoice.ts        — connection-scoped SELECT
     list_transactions.ts     — connection-scoped, from/until/limit/offset
   lib/
+    budget.ts                — budget renewal windows (computed from
+                               (renewal, now), never stored) + cycleSpentMsat
+                               ('never' reads the spent_msat counter,
+                               periodic sums transactions in-window)
     cache.ts                 — AsyncCache: SWR with dedupe + debounce + listeners
     errors.ts                — NwcError + NIP-47 error code union
     html.ts                  — auto-escaping tagged-template HTML + raw()

@@ -1,7 +1,21 @@
+import { BUDGET_RENEWALS, type BudgetRenewal } from '../../lib/budget'
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 
-export function newConnectionForm(args?: { error?: string; label?: string; budgetSats?: string }): RawHtml {
+const RENEWAL_LABELS: Record<BudgetRenewal, string> = {
+  never: 'never — lifetime cap',
+  daily: 'daily — resets at midnight',
+  weekly: 'weekly — resets Monday 00:00',
+  monthly: 'monthly — resets on the 1st',
+}
+
+export function newConnectionForm(args?: {
+  error?: string
+  label?: string
+  budgetSats?: string
+  budgetRenewal?: string
+}): RawHtml {
+  const renewal = args?.budgetRenewal ?? 'never'
   return layout({
     title: 'New connection',
     current: 'connections',
@@ -15,6 +29,14 @@ export function newConnectionForm(args?: { error?: string; label?: string; budge
         <label>
           Budget in sats (optional, leave empty for unlimited)
           <input type="number" name="budget_sats" min="0" placeholder="" value="${args?.budgetSats ?? ''}" />
+        </label>
+        <label>
+          Budget renewal (ignored when no budget is set)
+          <select name="budget_renewal">
+            ${BUDGET_RENEWALS.map(
+              (r) => html`<option value="${r}" ${r === renewal ? raw('selected') : ''}>${RENEWAL_LABELS[r]}</option>`,
+            )}
+          </select>
         </label>
         <button type="submit">Create</button>
       </form>

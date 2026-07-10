@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
 import { NetworkError, decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
 
+import { cycleSpentMsat } from '../lib/budget'
 import { NwcError } from '../lib/errors'
 import { sendLightning } from '../ln_send'
 import { satsToMsats } from '../lib/msat'
@@ -39,7 +40,12 @@ export async function handlePayInvoice(
   const invoiceMsat = satsToMsats(decoded.amountSats)
 
   if (deps.conn.budgetMsat !== null) {
-    if (deps.conn.spentMsat + invoiceMsat > deps.conn.budgetMsat) {
+    // Recomputed here (not the dispatch-time Connection snapshot) and
+    // pending-inclusive, with no await between this check and the INSERT
+    // below — so concurrent payments can't jointly overshoot the budget:
+    // the second request's sum always sees the first one's pending row.
+    const spent = cycleSpentMsat(deps.db, deps.conn, new Date())
+    if (spent + invoiceMsat > deps.conn.budgetMsat) {
       throw new NwcError('QUOTA_EXCEEDED', 'connection budget exceeded')
     }
   }
@@ -82,15 +88,23 @@ export async function handlePayInvoice(
   const feesPaidMsat = Math.max(0, paidMsat - invoiceMsat)
   const settledAt = Math.floor(Date.now() / 1000)
 
-  deps.db
-    .query(
-      `UPDATE transactions SET state = 'settled', preimage = ?, amount_msat = ?, fees_paid_msat = ?, settled_at = ?
-       WHERE request_event_id = ?`,
-    )
-    .run(result.preimage, paidMsat, feesPaidMsat, settledAt, deps.eventId)
-  deps.db
-    .query(`UPDATE connections SET spent_msat = spent_msat + ? WHERE id = ?`)
-    .run(invoiceMsat, deps.conn.id)
+  // One transaction: the 'never' budget path reads counter + pending rows,
+  // so flipping the row out of 'pending' and bumping the counter must be
+  // atomic — a crash in between would release the pending reservation
+  // without ever landing it in the counter, permanently under-counting the
+  // payment. The counter adds paidMsat (wallet movement, fee included),
+  // matching what the settled row now says left the wallet.
+  deps.db.transaction(() => {
+    deps.db
+      .query(
+        `UPDATE transactions SET state = 'settled', preimage = ?, amount_msat = ?, fees_paid_msat = ?, settled_at = ?
+         WHERE request_event_id = ?`,
+      )
+      .run(result.preimage, paidMsat, feesPaidMsat, settledAt, deps.eventId)
+    deps.db
+      .query(`UPDATE connections SET spent_msat = spent_msat + ? WHERE id = ?`)
+      .run(paidMsat, deps.conn.id)
+  })()
 
   return {
     preimage: result.preimage,
