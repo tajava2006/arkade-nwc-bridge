@@ -414,19 +414,22 @@ skips wallet/boltz/nostr disposal (nothing to dispose yet).
   not — even on restart. If a customer's connection stops working
   because every relay it baked in died, the operator has to
   revoke + reissue. No auto-migration.
-- **nostr-tools `enableReconnect` gives up**: after a transient
-  disconnect, nostr-tools retries with backoff (10s, 10s, 10s,
-  20s, 20s, 30s, 60s) — but if a retry attempt *also* fails
-  (relay still down), it sets `skipReconnection=true` and
-  removes the relay from `pool.relays` entirely, after which
-  `listConnectionStatus` no longer reports the URL at all. The
+- **nostr-tools `enableReconnect` gives up on the initial connect**:
+  since 2.23.9 (our upstream fix, nbd-wtf/nostr-tools#538) a retry
+  that fails mid-outage no longer sets `skipReconnection=true` — the
+  backoff (10s, 10s, 10s, 20s, 20s, 30s, 60s, last value repeating)
+  keeps running and every sub re-REQs when the relay returns. A
+  failure on the *first* connection attempt still sets it, closes
+  the socket's subs and drops the relay from `pool.relays`, after
+  which `listConnectionStatus` no longer reports the URL at all. The
   5-second `ensureRelay` watchdog in [`src/index.ts`](src/index.ts)
   exists to resurrect these — it iterates the bridge's
   bootstrap ∪ current outbox ∪ active-connection relays union and
   calls `pool.ensureRelay(url)` on each. ensureRelay is a free
   no-op for connected relays; for removed ones it re-adds and
-  retries. Without that loop, a relay that drops for longer than
-  the internal backoff stays "offline" in the UI forever.
+  retries. A resurrected relay starts with zero subscriptions, which
+  is why long-lived subs go through `persistent_sub.ts` (re-REQ +
+  capped `since` resume) rather than raw `pool.subscribeMany`.
 - **Relay URL canonicalization**: `SimplePool` parses URLs through
   WHATWG URL (`wss://nos.lol` → `wss://nos.lol/`) and pool
   callbacks emit the canonical form. Constants in

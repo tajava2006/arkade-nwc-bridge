@@ -60,7 +60,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 describe('openPersistentSub', () => {
   test(
-    're-subscribes after nostr-tools permanently kills a relay sub; raw subscribeMany stays deaf',
+    'a failed reconnect no longer kills subs (upstream #538): both subs re-attach on relay return',
     async () => {
       const PORT = 48911
       const URL = `ws://127.0.0.1:${PORT}`
@@ -85,9 +85,9 @@ describe('openPersistentSub', () => {
         { onevent: (e) => rawGot.push(e.content) },
       )
 
-      // Shrink nostr-tools' internal reconnect backoff (default 10s) so
-      // the "reconnect attempt also fails → permanent sub death" path
-      // triggers fast enough for a test.
+      // Shrink nostr-tools' internal reconnect backoff (default 10s; the
+      // last entry repeats forever) so the failed-reconnect path triggers
+      // fast enough for a test.
       const abstractRelay = await pool.ensureRelay(URL)
       ;(abstractRelay as unknown as { resubscribeBackoff: number[] }).resubscribeBackoff = [50]
 
@@ -99,20 +99,30 @@ describe('openPersistentSub', () => {
       expect(persistentGot).toEqual(['A'])
       expect(rawGot).toEqual(['A'])
 
-      // Drop the relay; the 50ms reconnect attempt hits a closed port →
-      // skipReconnection=true → every sub on the socket permanently closed.
+      // Drop the relay; the 50ms reconnect attempts hit a closed port.
+      // nostr-tools < 2.23.9 set skipReconnection=true on the first failed
+      // retry and permanently closed every sub on the socket — the bug that
+      // motivated persistent_sub. Upstream nbd-wtf/nostr-tools#538 (our
+      // fix, shipped in 2.23.9) gates that on the initial connection only,
+      // so mid-outage retries keep backing off and every sub re-REQs when
+      // the relay returns; the persistent wrapper never even sees an
+      // onclose here. If reqCount drops back to 1, upstream has regressed
+      // and persistent_sub is load-bearing for outages again. What #538
+      // does NOT fix — and persistent_sub still owns — is a relay that is
+      // down at first attach (initial connect failure still kills the
+      // socket's subs), plus the capped `since` resume.
       relay.stop()
       await sleep(600)
 
       relay = startMockRelay(PORT)
-      await sleep(1000) // > retryIntervalMs, persistent sub re-attaches
+      await sleep(1000)
 
-      expect(relay.reqCount()).toBe(1) // persistent only — raw is dead for good
+      expect(relay.reqCount()).toBe(2) // both re-attached by upstream
 
       relay.broadcast(makeEvent('B'))
       await sleep(300)
       expect(persistentGot).toEqual(['A', 'B'])
-      expect(rawGot).toEqual(['A'])
+      expect(rawGot).toEqual(['A', 'B'])
 
       psub.close()
       rawSub.close()
