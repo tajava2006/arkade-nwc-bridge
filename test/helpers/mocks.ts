@@ -95,16 +95,12 @@ export function makeArkProviderStub(
 /**
  * Build SwrCaches around a wallet stub and seed them with the same
  * snapshot the real bootReady would seed at boot. Tests that drive the
- * web server need ready-state caches so `/` and `/history` don't render
+ * web server need ready-state caches so `/` doesn't render
  * "Loading…" placeholders.
  */
 export function makeSwrCaches(wallet: Wallet, balance: WalletBalance): SwrCaches {
   const caches: SwrCaches = {
     balance: new AsyncCache({ label: 'test-balance', fetcher: () => wallet.getBalance() }),
-    history: new AsyncCache({
-      label: 'test-history',
-      fetcher: () => wallet.getTransactionHistory(),
-    }),
     sendData: new AsyncCache<SendData>({
       label: 'test-send-data',
       // fees carries enough shape for drainHint should a test ever render a

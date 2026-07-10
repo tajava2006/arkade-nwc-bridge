@@ -297,6 +297,26 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_exit_ops_state ON exit_ops(state);
     `,
   },
+  {
+    version: 12,
+    description: 'transactions index cleanup — composite (connection_id, created_at), drop redundant singles',
+    // Every read of this table is connection-scoped and ordered by
+    // created_at DESC (list_transactions, connection-detail page,
+    // lookup_invoice); the composite serves all three, so the standalone
+    // connection_id index is dead weight. type is never queried alone (always
+    // paired with state='pending' in the reconcilers, which state covers), and
+    // there is no cross-connection created_at consumer — the ark-side history
+    // view was removed, so its unqualified time-ordered scan is gone too. state
+    // stays: the 30s incoming reconciler and the boot recovery scan filter on
+    // state='pending', which is a tiny, high-selectivity slice at any moment.
+    // payment_hash stays for lookup_invoice's hash lookup.
+    sql: `
+      DROP INDEX IF EXISTS idx_transactions_connection;
+      DROP INDEX IF EXISTS idx_transactions_type;
+      DROP INDEX IF EXISTS idx_transactions_created_at;
+      CREATE INDEX idx_transactions_conn_created ON transactions(connection_id, created_at);
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

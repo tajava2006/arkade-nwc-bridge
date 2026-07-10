@@ -61,7 +61,7 @@ const STYLES = `
   .dag-node { background: #fbfbfb; border: 1px solid #ddd; border-radius: 6px; padding: 0.3em 0.7em; font-size: 0.85em; white-space: nowrap; text-align: center; }
 `
 
-type Nav = 'dashboard' | 'send' | 'exit' | 'connections' | 'history' | 'settings' | 'setup'
+type Nav = 'dashboard' | 'send' | 'exit' | 'connections' | 'settings' | 'setup'
 
 export function layout(args: {
   title: string
@@ -80,7 +80,6 @@ export function layout(args: {
           ${tab('send', '/send', 'Send')}
           ${tab('exit', '/exit', 'Exit')}
           ${tab('connections', '/connections', 'Connections')}
-          ${tab('history', '/history', 'History')}
           ${tab('settings', '/settings', 'Settings')}
         </nav>`
   return html`
@@ -136,7 +135,6 @@ const LIVE_SCRIPT = `<script>
   })
   on('balance-status', function (d) { swap('[data-balance]', d.html) })
   on('exit-readiness', function (d) { swap('[data-exit-readiness]', d.html) })
-  on('history-status', function (d) { swap('[data-history]', d.html) })
   on('send-breakdown', function (d) { swap('[data-breakdown]', d.html) })
   on('offboards-update', function (d) { swap('[data-offboards]', d.html) })
   // Degraded ↔ ready flips restructure the whole page — reload instead of

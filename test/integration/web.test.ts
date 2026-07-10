@@ -170,11 +170,6 @@ describe('web server', () => {
     expect(body.toLowerCase()).toContain('label')
   })
 
-  test('history page renders empty list without crashing', async () => {
-    const res = await fetch(`${base}/history`)
-    expect(res.status).toBe(200)
-  })
-
   test('settings page shows npub and the backupable nsec with a warning', async () => {
     // Deterministic, valid (non-zero, < n) secp256k1 key for stable assertions.
     const sk = new Uint8Array(32).fill(7)
@@ -480,7 +475,7 @@ describe('web server — degraded mode', () => {
   })
 
   test('ready-only routes bounce to the status page', async () => {
-    for (const path of ['/send', '/connections', '/history', '/settings']) {
+    for (const path of ['/send', '/connections', '/settings']) {
       const res = await fetch(`${base}${path}`, { redirect: 'manual' })
       expect(res.status).toBe(303)
       expect(res.headers.get('location')).toBe('/')

@@ -145,15 +145,17 @@ row exists. Logs go to stdout; when running in background pipe to
   per-connection rows can disagree on whether a relay is up.
 - **Connection isolation.** `lookup_invoice` / `list_transactions`
   MUST filter on `connection_id` — a client can only see its own
-  activity. The `/history` page is a separate concern (ark-side
-  wallet view), wired to `wallet.getTransactionHistory()`.
+  activity. This is the only transaction-history surface; there is no
+  ark-side web history view (`wallet.getTransactionHistory()` is a full
+  recompute per call with no pagination, so it was removed rather than
+  shipped as an unbounded page).
 - **Live UI = SSE fragments.** Pool callbacks fire in `index.ts` and
   dispatch named events through `SseHub` (`outbox-update`,
-  `connection-update`, `balance-status`, `history-status`). Layout
+  `connection-update`, `balance-status`). Layout
   JS swaps `innerHTML` on `[data-outbox-panel]` /
   `[data-connection-relay-summary="<id>"]` /
-  `[data-connection-relay-detail="<id>"]` /  `[data-balance]` /
-  `[data-history]`. Pre-rendered HTML on the server keeps the
+  `[data-connection-relay-detail="<id>"]` /  `[data-balance]`.
+  Pre-rendered HTML on the server keeps the
   client script ~20 lines; no client-side templating.
 
 ## Hot footguns

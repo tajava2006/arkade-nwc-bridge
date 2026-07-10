@@ -299,7 +299,7 @@ export function sendResultView(args: {
         ${args.ok ? 'Sent' : 'Failed'} · ${args.label}
       </p>
       <pre>${args.detail}</pre>
-      <p><a href="/send">Back to send</a> · <a href="/history">History</a></p>
+      <p><a href="/send">Back to send</a></p>
     `,
   })
 }
@@ -313,8 +313,8 @@ export function submittedView(args: { title: string; lines: RawHtml }): RawHtml 
       <p class="pill pending" style="display:inline-block">${args.title}</p>
       ${args.lines}
       <p class="muted">
-        This waits for a settlement round to commit — it can take several minutes. Balance and
-        History update live once the round finalizes.
+        This waits for a settlement round to commit — it can take several minutes. Balance
+        updates live once the round finalizes.
       </p>
       <p><a href="/send">Back to send</a></p>
     `,

@@ -1,7 +1,7 @@
 // SWR-style async cache. Holds the last successful value, dedupes
 // in-flight fetches, and emits to listeners when fresh data lands.
 //
-// Used by the dashboard/history routes: hand back whatever we last had
+// Used by the dashboard/send routes: hand back whatever we last had
 // (instant render), then kick off a refresh in the background and push
 // the new value over SSE when the upstream call returns. Avoids polling
 // — fetches only fire when someone actually visits the page.

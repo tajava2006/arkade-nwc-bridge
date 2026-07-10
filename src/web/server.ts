@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite'
-import type { Wallet, WalletBalance, ArkTransaction, RestArkProvider } from '@arkade-os/sdk'
+import type { Wallet, WalletBalance, RestArkProvider } from '@arkade-os/sdk'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import type { Config } from '../config'
@@ -39,7 +39,6 @@ import type { TransactionRow } from '../lib/transaction'
 import { dashboardView } from './views/dashboard'
 import { connectionsListView } from './views/connections'
 import { newConnectionForm, newConnectionResultView } from './views/new_connection'
-import { walletHistoryView } from './views/history'
 import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
 import { settingsView } from './views/settings'
@@ -72,7 +71,6 @@ import {
 
 export interface SwrCaches {
   balance: AsyncCache<WalletBalance>
-  history: AsyncCache<ArkTransaction[]>
   // ArkInfo + VTXOs for the /send breakdown, fetched together (SEND_DESIGN §7).
   sendData: AsyncCache<SendData>
 }
@@ -548,19 +546,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return Response.redirect('/', 303)
         },
       },
-      '/history': {
-        GET: () => {
-          const r = requireReady()
-          if (!r.ok) return r.response
-          // SWR: same pattern as dashboard. getTransactionHistory is the
-          // slowest read in the bridge (full ark-side scan), so serving
-          // the cached list while a fresh fetch runs in the background
-          // is the biggest UX win in this PR.
-          const { value: txs } = r.ready.caches.history.snapshot()
-          void r.ready.caches.history.refresh()
-          return htmlResponse(walletHistoryView(txs))
-        },
-      },
       '/settings': {
         GET: () => {
           // Gated on ready: the nsec only exists once the account row
@@ -768,7 +753,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 destination,
               )
               void ready.caches.balance.refresh()
-              void ready.caches.history.refresh()
               void ready.caches.sendData.refresh()
               return htmlResponse(
                 sendResultView({
@@ -791,7 +775,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             try {
               const txid = await ready.wallet.send({ address: destination, amount })
               void ready.caches.balance.refresh()
-              void ready.caches.history.refresh()
               void ready.caches.sendData.refresh()
               return htmlResponse(
                 sendResultView({ label: 'ark', ok: true, detail: `arkTxid ${txid}` }),
@@ -854,7 +837,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }
             broadcastOffboards()
             void ready.caches.balance.refresh()
-            void ready.caches.history.refresh()
             void ready.caches.sendData.refresh()
           })()
 
@@ -873,7 +855,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         // Consolidate-all: wallet.settle() with no params folds every VTXO
         // (incl. sub-dust + swept) + confirmed boarding into one fresh VTXO.
         // Also a settlement round, so fire-and-forget like offboard. Not a
-        // money-out action, so no durable row — balance/history reflect the
+        // money-out action, so no durable row — balance reflects the
         // result over SSE and failures are logged.
         POST: () => {
           const r = requireReady()
@@ -887,7 +869,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               console.error(`refresh failed: ${errMsg(err)}`)
             }
             void ready.caches.balance.refresh()
-            void ready.caches.history.refresh()
             void ready.caches.sendData.refresh()
           })()
           return htmlResponse(

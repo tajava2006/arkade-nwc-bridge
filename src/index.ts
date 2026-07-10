@@ -29,7 +29,6 @@ import {
   outboxPanelPayload,
 } from './lib/relay_status'
 import { renderBalanceFragment, renderExitReadinessFragment } from './web/views/dashboard'
-import { renderHistoryFragment } from './web/views/history'
 import { renderBreakdownFragment } from './web/views/send'
 
 async function main(): Promise<void> {
@@ -286,18 +285,13 @@ async function main(): Promise<void> {
 
       // SWR caches for the slow ark-side reads. minIntervalMs keeps
       // back-to-back page visits from hammering the upstream — opening
-      // dashboard, history, dashboard within a few seconds only refetches
+      // dashboard, send, dashboard within a few seconds only refetches
       // once each. Listeners fan out fresh values over SSE so any open
       // browser tab updates in place.
       const caches: SwrCaches = {
         balance: new AsyncCache({
           label: 'balance',
           fetcher: () => wallet.getBalance(),
-          minIntervalMs: 2000,
-        }),
-        history: new AsyncCache({
-          label: 'history',
-          fetcher: () => wallet.getTransactionHistory(),
           minIntervalMs: 2000,
         }),
         // /send's breakdown needs ArkInfo (dust + fee programs), the full VTXO
@@ -321,16 +315,11 @@ async function main(): Promise<void> {
       caches.balance.onUpdate(({ value }) => {
         sseHub.broadcast('balance-status', { html: renderBalanceFragment(value).value })
       })
-      caches.history.onUpdate(({ value }) => {
-        sseHub.broadcast('history-status', { html: renderHistoryFragment(value).value })
-      })
       caches.sendData.onUpdate(({ value }) => {
         sseHub.broadcast('send-breakdown', { html: renderBreakdownFragment(value).value })
       })
       // Seed the balance cache with the snapshot we already fetched above
       // so the first dashboard visit doesn't pay the round-trip again.
-      // Skipping equivalent seeding for history — that read is the slow
-      // one and there's no boot-time consumer that already has the data.
       caches.balance.seed(balance)
 
       // Exit-proof mirroring (EXIT_PLAN #04/#05): keep the vault able to
