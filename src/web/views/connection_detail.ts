@@ -1,3 +1,4 @@
+import { nextRenewalSec } from '../../lib/budget'
 import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import type { Connection } from '../../nostr/connections'
@@ -13,20 +14,24 @@ function formatDate(unix: number): string {
   return new Date(unix * 1000).toLocaleString()
 }
 
-function formatBudget(c: Connection): string {
-  if (c.budgetMsat === null) return '∞ (unlimited)'
+function formatBudget(c: Connection, spentNowMsat: number): string {
+  const spentSats = Math.floor(spentNowMsat / 1000)
+  if (c.budgetMsat === null) return `${spentSats.toLocaleString()} sats spent · ∞ (unlimited)`
   const sats = Math.floor(c.budgetMsat / 1000)
-  const spentSats = Math.floor(c.spentMsat / 1000)
-  return `${spentSats.toLocaleString()} / ${sats.toLocaleString()} sats`
+  const base = `${spentSats.toLocaleString()} / ${sats.toLocaleString()} sats`
+  return c.budgetRenewal === 'never' ? base : `${base} · ${c.budgetRenewal}`
 }
 
 export function connectionDetailView(args: {
   conn: Connection
+  /** Current-window spend (lib/budget cycleSpentMsat). */
+  spentNowMsat: number
   transactions: TransactionRow[]
   relays: RelayStatus[]
 }): RawHtml {
   const { conn, transactions, relays } = args
   const isRevoked = conn.revokedAt !== null
+  const renewsAt = isRevoked ? null : nextRenewalSec(conn.budgetRenewal, new Date())
 
   return layout({
     title: `Connection #${conn.id}${conn.label ? ` — ${conn.label}` : ''}`,
@@ -41,7 +46,10 @@ export function connectionDetailView(args: {
           ? html`<span class="pill failed">revoked at ${formatDate(conn.revokedAt!)}</span>`
           : html`<span class="pill settled">active</span>`}</td></tr>
         <tr><th>Created</th><td class="muted">${formatDate(conn.createdAt)}</td></tr>
-        <tr><th>Spent / budget</th><td>${formatBudget(conn)}</td></tr>
+        <tr><th>Spent / budget</th><td>${formatBudget(conn, args.spentNowMsat)}</td></tr>
+        ${renewsAt !== null
+          ? html`<tr><th>Budget resets</th><td class="muted">${formatDate(renewsAt)}</td></tr>`
+          : null}
         <tr><th>Service pubkey</th><td><code>${conn.servicePubkeyHex}</code></td></tr>
         <tr><th>Client pubkey</th><td><code>${conn.clientPubkeyHex}</code></td></tr>
       </table>

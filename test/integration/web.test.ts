@@ -220,6 +220,60 @@ describe('web server', () => {
     expect(body).toContain('budget')
   })
 
+  test('POST /connections/new rejects an unknown budget renewal with 400', async () => {
+    const form = new FormData()
+    form.set('budget_sats', '1000')
+    form.set('budget_renewal', 'hourly')
+    const res = await fetch(`${base}/connections/new`, { method: 'POST', body: form })
+    expect(res.status).toBe(400)
+    const body = await res.text()
+    expect(body).toContain('renewal')
+  })
+
+  test('POST /connections/new persists the chosen renewal; unlimited forces never', async () => {
+    const form = new FormData()
+    form.set('budget_sats', '1000')
+    form.set('budget_renewal', 'weekly')
+    let res = await fetch(`${base}/connections/new`, { method: 'POST', body: form })
+    expect(res.status).toBe(200)
+    let row = temp.db
+      .query<{ budget_renewal: string }, []>(
+        `SELECT budget_renewal FROM connections ORDER BY id DESC LIMIT 1`,
+      )
+      .get()
+    expect(row?.budget_renewal).toBe('weekly')
+
+    // no budget → the renewal select is ignored, stored as 'never'
+    const unlimited = new FormData()
+    unlimited.set('budget_renewal', 'daily')
+    res = await fetch(`${base}/connections/new`, { method: 'POST', body: unlimited })
+    expect(res.status).toBe(200)
+    row = temp.db
+      .query<{ budget_renewal: string }, []>(
+        `SELECT budget_renewal FROM connections ORDER BY id DESC LIMIT 1`,
+      )
+      .get()
+    expect(row?.budget_renewal).toBe('never')
+  })
+
+  test('list and detail render the renewal + window spend', async () => {
+    const form = new FormData()
+    form.set('label', 'renewal-render')
+    form.set('budget_sats', '1000')
+    form.set('budget_renewal', 'weekly')
+    await fetch(`${base}/connections/new`, { method: 'POST', body: form })
+    const row = temp.db
+      .query<{ id: number }, []>(`SELECT id FROM connections ORDER BY id DESC LIMIT 1`)
+      .get()
+
+    const list = await (await fetch(`${base}/connections`)).text()
+    expect(list).toContain('0 / 1,000 sats · weekly')
+
+    const detail = await (await fetch(`${base}/connections/${row?.id}`)).text()
+    expect(detail).toContain('0 / 1,000 sats · weekly')
+    expect(detail).toContain('Budget resets')
+  })
+
   test('GET /send renders the form + breakdown', async () => {
     const res = await fetch(`${base}/send`)
     expect(res.status).toBe(200)

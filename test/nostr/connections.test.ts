@@ -32,6 +32,18 @@ describe('connections', () => {
     expect(r.clientSecretHex).toMatch(/^[0-9a-f]{64}$/)
     expect(r.connection.revokedAt).toBeNull()
     expect(r.connection.spentMsat).toBe(0)
+    expect(r.connection.budgetRenewal).toBe('never')
+  })
+
+  test('budgetRenewal round-trips through the row', () => {
+    const r = createConnection(temp.db, {
+      label: null,
+      relays: RELAYS,
+      budgetMsat: 5_000,
+      budgetRenewal: 'weekly',
+    })
+    expect(r.connection.budgetRenewal).toBe('weekly')
+    expect(findConnectionById(temp.db, r.connection.id)?.budgetRenewal).toBe('weekly')
   })
 
   test('URI follows the NIP-47 format: nostr+walletconnect://<svcpk>?relay=...&secret=...', () => {

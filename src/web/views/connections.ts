@@ -8,13 +8,16 @@ import {
 } from '../../lib/relay_status'
 import type { OutboxSource } from '../../nostr/outbox'
 
-function formatBudget(c: Connection): string {
-  if (c.budgetMsat === null) return '∞'
+function formatBudget(c: Connection, spentNowMsat: number): string {
+  const spentSats = Math.floor(spentNowMsat / 1000)
+  if (c.budgetMsat === null) return `${spentSats.toLocaleString()} sats`
   const sats = Math.floor(c.budgetMsat / 1000)
-  const spentSats = Math.floor(c.spentMsat / 1000)
-  return `${spentSats.toLocaleString()} / ${sats.toLocaleString()} sats`
+  const base = `${spentSats.toLocaleString()} / ${sats.toLocaleString()} sats`
+  return c.budgetRenewal === 'never' ? base : `${base} · ${c.budgetRenewal}`
 }
 
+// Revoked rows show the lifetime counter — "what this connection spent in
+// total", not the current window it can no longer spend in.
 function formatSpent(c: Connection): string {
   return `${Math.floor(c.spentMsat / 1000).toLocaleString()} sats`
 }
@@ -28,6 +31,8 @@ export function connectionsListView(args: {
   revoked: Connection[]
   /** Live status of each active connection's relays, keyed by connection id. */
   connectionStatuses: Map<number, RelayStatus[]>
+  /** Current-window spend per active connection (lib/budget cycleSpentMsat). */
+  spentNowMsat: Map<number, number>
   outboxPanel: {
     bootstrap: RelayStatus[]
     outbox: RelayStatus[]
@@ -41,7 +46,7 @@ export function connectionsListView(args: {
         <td><a href="/connections/${c.id}">#${c.id}</a></td>
         <td>${c.label ?? html`<span class="muted">(no label)</span>`}</td>
         <td class="muted">${formatDate(c.createdAt)}</td>
-        <td class="num">${c.budgetMsat === null ? formatSpent(c) : formatBudget(c)}</td>
+        <td class="num">${formatBudget(c, args.spentNowMsat.get(c.id) ?? 0)}</td>
         <td><span data-connection-relay-summary="${c.id}">${renderRelayBadge(status)}</span></td>
         <td>
           <form action="/connections/${c.id}/revoke" method="post" style="display:inline; margin:0">
