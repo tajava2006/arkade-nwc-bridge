@@ -253,7 +253,15 @@ async function main(): Promise<void> {
         `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
       )
 
-      const nostr = await startNostrService({ cfg, db, wallet, swaps, pool })
+      const nostr = await startNostrService({
+        cfg,
+        db,
+        wallet,
+        swaps,
+        pool,
+        onClientRequest: (conn) =>
+          sseHub.broadcast('connection-seen', { connectionId: conn.id }),
+      })
       undo.push(() => nostr.stop())
 
       // CLINK Offers: serve the static noffer receive code under the account

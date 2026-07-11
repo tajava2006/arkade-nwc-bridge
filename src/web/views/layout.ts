@@ -24,6 +24,10 @@ const STYLES = `
   .stat { display: inline-block; margin-right: 2.5em; vertical-align: top; }
   .stat-value { font-size: 1.6em; font-weight: 600; }
   .stat-label { color: #888; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em; }
+  .spinner { display: inline-block; width: 0.85em; height: 0.85em; border: 2px solid #ccc; border-top-color: #06c; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -0.1em; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .uri-row { display: flex; gap: 0.6em; align-items: flex-start; }
+  .uri-row pre { flex: 1; margin: 0; }
   .qr-box { max-width: 280px; background: white; padding: 0.5em; border: 1px solid #ddd; border-radius: 4px; }
   .qr-box svg { width: 100%; height: auto; }
   .receive-grid { display: flex; flex-wrap: wrap; gap: 1.5em; align-items: flex-start; }
@@ -132,6 +136,14 @@ const LIVE_SCRIPT = `<script>
     var id = String(d.connectionId)
     swap('[data-connection-relay-summary="' + id + '"]', d.summaryHtml)
     swap('[data-connection-relay-detail="' + id + '"]', d.detailHtml)
+  })
+  // New-connection page: any authenticated request from the client proves
+  // the URI landed — flip the waiting slot and return to the list.
+  on('connection-seen', function (d) {
+    var el = document.querySelector('[data-connection-wait="' + String(d.connectionId) + '"]')
+    if (!el) return
+    el.innerHTML = '<span class="ok">Connected!</span> <span class="muted">returning to connections…</span>'
+    setTimeout(function () { location.href = '/connections' }, 1500)
   })
   on('balance-status', function (d) { swap('[data-balance]', d.html) })
   on('exit-readiness', function (d) { swap('[data-exit-readiness]', d.html) })
