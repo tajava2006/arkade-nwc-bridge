@@ -185,6 +185,24 @@ Verify onchain:
 node regtest.mjs rpc gettxout <sweep-txid> 0
 ```
 
+### Boost drill (automated, no browser)
+
+`regtest-e2e/boost-drill.sh` is the existence proof for the fee re-boost
+(EXIT_DESIGN §5 Boost): it runs the whole exit flow above unattended in
+**blocks mode** — where nothing mines, so the first 1P1C package is stuck in
+the mempool *by construction* — then boosts it and verifies against bitcoind
+directly that the old CPFP child was evicted, the replacement is in with a
+higher fee, and the parent never moved. The sweep leg repeats the trick:
+sweep, leave it stuck, boost-sweep, verify the RBF, mine it in. The fuel P2TR
+deliberately gets ONE confirmed coin so the boost must reclaim the stuck
+child's own prevout (the hard path). ~4 minutes, exit code 0 = proven.
+First green run 2026-07-12: child 278 sats → 433 sats, sweep 148 → 287, both
+replacements accepted by bitcoind.
+
+```bash
+regtest-e2e/boost-drill.sh   # brings the stack up itself (wipes previous)
+```
+
 ### 7. Tear down
 
 The bridge is a plain `bun` process, separate from the docker stack — `down.sh`
