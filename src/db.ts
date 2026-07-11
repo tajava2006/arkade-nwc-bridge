@@ -341,6 +341,21 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 14,
+    description: 'exit_vtxos quarantine — evidence-gated GC keeps unexplained disappearances',
+    // A vtxo the ASP drops from the live set is no longer deleted on the
+    // server's word alone: ProofSync now demands verifiable evidence (our own
+    // signature on the spending tx, or a locally-judged expiry) before GC.
+    // Rows that fail that demand are quarantined instead — proofs retained,
+    // so the pre-signed exit chain stays usable until batch expiry (deleting
+    // it would let the server's lie destroy the escape hatch). quarantined_at
+    // keeps the FIRST quarantine time across passes; reason is refreshed.
+    sql: `
+      ALTER TABLE exit_vtxos ADD COLUMN quarantined_at INTEGER;
+      ALTER TABLE exit_vtxos ADD COLUMN quarantine_reason TEXT;
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

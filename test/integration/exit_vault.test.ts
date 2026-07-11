@@ -2,17 +2,20 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { ChainTxType, type ChainTx } from '@arkade-os/sdk'
 import { openTempDb, type TempDb } from '../helpers/db'
 import {
-  gcVault,
+  clearQuarantine,
+  gcOrphanProofs,
   getProofPsbts,
   getVaultVtxo,
   isVtxoExitReady,
   listVaultVtxos,
   missingProofTxids,
   proofTxidsOf,
+  quarantineVtxo,
+  removeVtxo,
   storeVtxoWithProofs,
   vaultStats,
   type VaultProofTx,
-  type VaultVtxo,
+  type VaultVtxoSnapshot,
 } from '../../src/exit/vault'
 
 const tx = (txid: string, type: ChainTxType, spends: string[] = []): ChainTx => ({
@@ -43,7 +46,7 @@ const chainB: ChainTx[] = [
   tx('commitment-1', ChainTxType.COMMITMENT),
 ]
 
-const vtxo = (txid: string, chain: ChainTx[], value = 1000): Omit<VaultVtxo, 'syncedAt'> => ({
+const vtxo = (txid: string, chain: ChainTx[], value = 1000): VaultVtxoSnapshot => ({
   txid,
   vout: 0,
   valueSat: value,
@@ -113,20 +116,61 @@ describe('exit vault', () => {
     expect(missingProofTxids(temp.db, chainA)).toEqual([])
   })
 
-  test('gc drops dead vtxos and their exclusive proofs, keeps shared ones', () => {
+  test('removeVtxo + gcOrphanProofs drop exclusive proofs, keep shared ones', () => {
     storeVtxoWithProofs(temp.db, vtxo('a-ark', chainA), proofsFor(chainA))
     storeVtxoWithProofs(temp.db, vtxo('b-ark', chainB), proofsFor(chainB))
 
-    // a-ark got spent/refreshed away; only b-ark is still live
-    const removed = gcVault(temp.db, [{ txid: 'b-ark', vout: 0 }])
-    expect(removed.removedVtxos).toBe(1)
-    expect(removed.removedProofTxs).toBe(1) // a-ark's own ark tx; shared branch stays
+    // a-ark's disappearance was evidence-verified upstream; drop it
+    expect(removeVtxo(temp.db, 'a-ark', 0)).toBe(true)
+    expect(gcOrphanProofs(temp.db)).toBe(1) // a-ark's own ark tx; shared branch stays
 
     expect(getVaultVtxo(temp.db, 'a-ark', 0)).toBeNull()
     expect(isVtxoExitReady(temp.db, 'b-ark', 0)).toBe(true)
     const psbts = getProofPsbts(temp.db, ['a-ark', 'shared-checkpoint', 'shared-tree', 'b-ark'])
     expect(psbts.has('a-ark')).toBe(false)
     expect(psbts.has('shared-checkpoint')).toBe(true)
+  })
+
+  test('quarantine keeps the row, its proofs, and the FIRST flag time', () => {
+    storeVtxoWithProofs(temp.db, vtxo('a-ark', chainA), proofsFor(chainA))
+
+    quarantineVtxo(temp.db, 'a-ark', 0, 'first reason')
+    const first = getVaultVtxo(temp.db, 'a-ark', 0)!
+    expect(first.quarantinedAt).not.toBeNull()
+    expect(first.quarantineReason).toBe('first reason')
+
+    // re-quarantine on a later pass: reason refreshes, timestamp does not
+    quarantineVtxo(temp.db, 'a-ark', 0, 'second reason')
+    const again = getVaultVtxo(temp.db, 'a-ark', 0)!
+    expect(again.quarantinedAt).toBe(first.quarantinedAt)
+    expect(again.quarantineReason).toBe('second reason')
+
+    // proofs untouched — the row still counts as a reference
+    expect(gcOrphanProofs(temp.db)).toBe(0)
+    expect(isVtxoExitReady(temp.db, 'a-ark', 0)).toBe(true)
+
+    // stats: out of the live/ready math, into its own counter — and the
+    // bucket depends on whether the exit window is still open
+    const stats = vaultStats(temp.db, 1700000000) // before fixture expiry
+    expect(stats.vtxoCount).toBe(0)
+    expect(stats.readyCount).toBe(0)
+    expect(stats.quarantinedCount).toBe(1)
+    expect(stats.expiredCount).toBe(0)
+    // …but the expiry clock still counts it (exit-before-expiry pressure)
+    expect(stats.soonestExpiresAt).toBe(1783431985)
+    // once the window closes, the same row reads as expired-for-review
+    const later = vaultStats(temp.db, 1783431986)
+    expect(later.quarantinedCount).toBe(0)
+    expect(later.expiredCount).toBe(1)
+
+    // snapshot refresh (upsert) must not wipe the flag
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), status: 'spent' }, [])
+    expect(getVaultVtxo(temp.db, 'a-ark', 0)!.quarantinedAt).toBe(first.quarantinedAt)
+
+    expect(clearQuarantine(temp.db, 'a-ark', 0)).toBe(true)
+    expect(getVaultVtxo(temp.db, 'a-ark', 0)!.quarantinedAt).toBeNull()
+    expect(clearQuarantine(temp.db, 'a-ark', 0)).toBe(false) // idempotent signal
+    expect(vaultStats(temp.db, 1700000000).quarantinedCount).toBe(0)
   })
 
   test('upsert replaces the vtxo snapshot in place', () => {

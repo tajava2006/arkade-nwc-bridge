@@ -125,18 +125,72 @@ half-mirrored VTXO reads as not-ready rather than as a silently broken exit.
 **ProofSync** (`proof_sync.ts` + `sync_service.ts`) keeps it current. One pass:
 diff live VTXOs against the vault → fetch chains (paged) only for incomplete
 ones → fetch only the PSBTs the vault lacks (paged, batched) → store atomically
-per VTXO → GC rows the live set no longer references. Fetched PSBTs are keyed by
-their **decoded txid, never response order** — a mislabeled proof would surface
-as a broken exit at the worst possible time, so the label comes from the payload
-itself. Ancestry is immutable, so a proof-complete VTXO costs zero network
-traffic on later passes. The scheduler collapses trigger bursts into one pass,
-escalates retry while a pass reports gaps (absorbing the post-settle
-availability lag), and polls every ~10 min as the missed-event safety net.
+per VTXO → evidence-gated GC over rows the live set dropped (below). Fetched
+PSBTs are keyed by their **decoded txid, never response order** — a mislabeled
+proof would surface as a broken exit at the worst possible time, so the label
+comes from the payload itself. Ancestry is immutable, so a proof-complete VTXO
+costs zero network traffic on later passes. The scheduler collapses trigger
+bursts into one pass, escalates retry while a pass reports gaps (absorbing the
+post-settle availability lag), and polls every ~10 min as the missed-event
+safety net.
+
+**Evidence-gated GC** (`evidence.ts`, migration v14). GC used to trust the
+server's live list outright — but a vault row's proofs ARE the exit
+capability, so "the server said it's gone" deleting them means the server's
+lie can destroy the very escape hatch built against it (the denial-of-funds
+sibling of proof withholding, which the dashboard's proven/claimed check
+covers). A dropped row is resolved strictly by verdict — and **nothing is
+ever deleted silently**:
+
+- **spent-verified** — the indexer names `spentBy` (set for offchain sends
+  AND settlement forfeits — spike-confirmed against arkd, `test/spike/
+  spend_evidence.spike.ts`) and serves that tx, whose input consuming our
+  outpoint carries a schnorr signature that verifies against **our own
+  x-only pubkey** (sighash recomputed from the PSBT itself; labelled
+  `tapScriptSig` first, finalized witness stack as fallback). Keying on the
+  signature rather than a local spend journal means a spend made from
+  *another wallet holding the same nsec* verifies identically — no false
+  alarms from the multi-client case.
+- **expired** — batch expiry passed by the local clock against the locally
+  stored `expires_at`. Post-expiry the server sweeps without our signature
+  legitimately, and the pre-signed chain is dead paper anyway. NOT deleted
+  though: the lapse is the user's (no refresh before the deadline), but funds
+  don't get to vanish without a word — the row is flagged with that story
+  (its own dashboard line + /exit notice, distinct from the betrayal tone)
+  and waits for a manual *forget*. Only fires when the server has also
+  dropped the vtxo; a server that keeps returning an expired-but-recoverable
+  vtxo (the refresh mercy) is a live-set member and GC never touches it.
+  The stored deadline is **monotonic** (an outpoint's batch never changes,
+  so its expiry never legitimately shrinks) — a server that shortens the
+  reported expiry while the vtxo is live can neither fast-forward this
+  verdict nor re-dress a betrayal drop as a user-fault lapse; the shortened
+  value is simply not stored. A server that lies *from first sight* is the
+  residual: that shows as an anomalously short countdown on /exit from day
+  one rather than being cryptographically caught.
+- **our own exit** — checked before the server is asked: an exit op in
+  flight (unrolling/waiting/sweepable) keeps the row untouched — the vtxo
+  leaves the live list the moment it's unrolled onchain, but the sweep still
+  reads the vault (the old unconditional GC could strand a ready-mode exit
+  here). A completed op (swept) is its own evidence and the row is removed
+  without any server round-trip.
+- **unproven** — everything else: the row is **quarantined**
+  (`quarantined_at`/`quarantine_reason`, first-flag time preserved), proofs
+  retained, still exitable from the /exit tab until expiry. Quarantine
+  self-heals in both directions — a re-listed VTXO is released, late-arriving
+  evidence deletes. Network failure during the check is *indeterminate*, not
+  unproven: the row stays un-flagged and the retry/poll re-asks, so our own
+  connectivity can't cry wolf. The operator can `forget` a quarantined row
+  from its detail page (e.g. a spend made in a way the bridge can't verify) —
+  destructive, confirm-gated, quarantine-only.
+
+Quarantined rows leave `vtxoCount`/`readyCount` (the server no longer claims
+them, so counting them as ready would inflate proven-vs-claimed) and get their
+own loud counter on the dashboard tile and the /exit tab.
 
 **Exit readiness is a first-class dashboard citizen** because proof freshness
 *is* exit possibility: if the ASP dies after the last sync, VTXOs received in
-the gap can't leave. The tile shows N/M exit-ready, last-sync freshness, and
-proof size, with gaps in red.
+the gap can't leave. The tile shows proven/ASP-claimed, last-sync freshness,
+and proof size, with shortfalls, sync gaps and quarantines in red.
 
 ## 4. Degraded boot
 

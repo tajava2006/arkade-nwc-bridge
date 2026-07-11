@@ -39,6 +39,21 @@ export function expiryCountdown(expiresAt: number | null, nowSec: number): RawHt
     : html`<span>${label} left</span>`
 }
 
+// Quarantine is orthogonal to exitability — a quarantined vtxo with complete
+// proofs is exactly the row you want to exit NOW, so the flag rides next to
+// the verdict instead of replacing it. Once the window has closed the label
+// flips: nothing exitable remains, the ask is "review & forget", and calling
+// an unrefreshed lapse a QUARANTINE would dress user fault up as betrayal.
+function quarantinePill(v: VaultVtxo, nowSec: number): RawHtml {
+  if (v.quarantinedAt === null) return html``
+  const windowClosed = v.expiresAt !== null && v.expiresAt <= nowSec
+  return html`<span
+    class="pill failed"
+    title="${v.quarantineReason ?? 'ASP dropped this vtxo without evidence'}"
+    >${windowClosed ? 'EXPIRED — REVIEW' : 'QUARANTINED'}</span
+  > `
+}
+
 function verdict(row: ExitRow): RawHtml {
   if (row.vtxo.status === 'swept') {
     // §2.7: the ASP already spent the tree root — complete proofs or not,
@@ -79,7 +94,7 @@ export function renderExitRows(rows: ExitRow[], nowSec: number): RawHtml {
         <td class="num">${fmtSats(row.vtxo.valueSat)}</td>
         <td>${expiryCountdown(row.vtxo.expiresAt, nowSec)}</td>
         <td>${estimateCell(row.estimate)}</td>
-        <td>${verdict(row)}</td>
+        <td>${quarantinePill(row.vtxo, nowSec)}${verdict(row)}</td>
         <td>${opPill(row.op)}</td>
       </tr>
     `,
@@ -103,6 +118,21 @@ export function exitView(args: {
       ${args.degraded
         ? html`<p class="bad">Degraded mode — the ASP is unreachable. Everything on this
             page works from the local vault and esplora only.</p>`
+        : html``}
+      ${stats.quarantinedCount > 0
+        ? html`<p class="bad">
+            ⚠ ${stats.quarantinedCount} vtxo(s) quarantined: the ASP dropped them from the
+            live set without verifiable evidence (no spend signed by your key, not expired).
+            Their pre-signed proofs are kept — if the server is cheating, exiting them below
+            is the recourse, and it only works until expiry.
+          </p>`
+        : html``}
+      ${stats.expiredCount > 0
+        ? html`<p class="bad">
+            ${stats.expiredCount} vtxo(s) expired before a refresh and the ASP has dropped
+            them. That lapse is on this wallet's side — but nothing gets deleted silently:
+            open each row below and use <em>Forget</em> once you've made peace with it.
+          </p>`
         : html``}
       <p class="muted">
         ${stats.readyCount}/${stats.vtxoCount} vtxos exit-ready · proofs

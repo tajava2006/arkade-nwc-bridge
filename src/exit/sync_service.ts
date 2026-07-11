@@ -53,6 +53,8 @@ export function startProofSync(deps: {
   db: Database
   indexer: ProofSyncIndexer
   listVtxos: () => Promise<ExtendedVirtualCoin[]>
+  /** our x-only pubkey — evidence-gated GC verifies spend signatures against it */
+  xOnlyPubkey: Uint8Array
   timing?: Partial<ProofSyncTiming>
   log?: (msg: string) => void
 }): ProofSyncService {
@@ -92,8 +94,21 @@ export function startProofSync(deps: {
     try {
       const vtxos = await deps.listVtxos()
       claim = { total: vtxos.length, at: Math.floor(Date.now() / 1000) }
-      const result = await syncProofs(deps.db, deps.indexer, vtxos)
+      const result = await syncProofs(deps.db, deps.indexer, vtxos, deps.xOnlyPubkey)
       lastRun = { ...result, at: Math.floor(Date.now() / 1000), reason }
+      if (result.gc.quarantined.length > 0) {
+        log(
+          `exit-sync: ⚠ ${result.gc.quarantined.length} vtxo(s) QUARANTINED — dropped by the ASP without evidence: ${result.gc.quarantined.join(', ')}`,
+        )
+      }
+      if (result.gc.expired.length > 0) {
+        log(
+          `exit-sync: ${result.gc.expired.length} vtxo(s) expired unrefreshed and dropped by the ASP — kept for review (forget them on /exit): ${result.gc.expired.join(', ')}`,
+        )
+      }
+      if (result.gc.released.length > 0) {
+        log(`exit-sync: quarantine released (re-listed): ${result.gc.released.join(', ')}`)
+      }
       if (result.failed.length > 0) {
         const delay = timing.retryDelaysMs[Math.min(retryCount, timing.retryDelaysMs.length - 1)]!
         retryCount++
@@ -116,7 +131,7 @@ export function startProofSync(deps: {
         synced: [],
         skipped: 0,
         failed: [{ outpoint: '*', error: err instanceof Error ? err.message : String(err) }],
-        gc: { removedVtxos: 0, removedProofTxs: 0 },
+        gc: { removedVtxos: 0, removedProofTxs: 0, quarantined: [], expired: [], released: [] },
         at: Math.floor(Date.now() / 1000),
         reason,
       }
