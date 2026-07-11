@@ -24,7 +24,7 @@ import { recordBroadcast } from './broadcasts'
 import {
   boostStep,
   boostSweep,
-  esploraTxInfo,
+  esploraReader,
   stepBoostInfo,
   sweepBoostInfo,
   type BoostDeps,
@@ -32,7 +32,7 @@ import {
   type FuelSource,
   type StepBoostInfo,
   type SweepBoostInfo,
-  type TxInfoFn,
+  type EsploraReader,
 } from './boost'
 
 // The emergency half of unilateral exit (EXIT_PLAN #09): drives the SDK's
@@ -95,9 +95,9 @@ export interface ExitEngineDeps {
   providers?: {
     bumper: AnchorBumper
     explorer: OnchainProvider
-    /** boost-path extras; production derives both (fuel = the OnchainWallet bumper, txInfo = raw esplora reads) */
+    /** boost-path extras; production derives both (fuel = the OnchainWallet bumper, reader = raw esplora reads) */
     fuel?: FuelSource
-    txInfo?: TxInfoFn
+    reader?: EsploraReader
   }
   /** waiting→sweepable re-check cadence; CSV clocks tick in blocks, so minutes are plenty */
   pollIntervalMs?: number
@@ -123,14 +123,14 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     bumper: AnchorBumper
     explorer: OnchainProvider
     fuel: FuelSource | null
-    txInfo: TxInfoFn | null
+    reader: EsploraReader | null
   }
   let providersPromise: Promise<Providers> | null = deps.providers
     ? Promise.resolve({
         bumper: deps.providers.bumper,
         explorer: deps.providers.explorer,
         fuel: deps.providers.fuel ?? null,
-        txInfo: deps.providers.txInfo ?? null,
+        reader: deps.providers.reader ?? null,
       })
     : null
   const providers = (): Promise<Providers> => {
@@ -151,7 +151,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
           bumper,
           explorer: picked.provider,
           fuel: bumper,
-          txInfo: esploraTxInfo(picked.url),
+          reader: esploraReader(picked.url),
         }
       })()
     }
@@ -160,7 +160,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
 
   const boostDeps = async (): Promise<BoostDeps> => {
     const p = await providers()
-    if (!p.fuel || !p.txInfo) {
+    if (!p.fuel || !p.reader) {
       throw new Error('boost unavailable — no fuel wallet / tx info source configured')
     }
     return {
@@ -169,7 +169,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
       network: deps.network,
       explorer: p.explorer,
       fuel: p.fuel,
-      txInfo: p.txInfo,
+      reader: p.reader,
     }
   }
 

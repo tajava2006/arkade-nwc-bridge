@@ -270,12 +270,25 @@ SDK's `bumpP2A` would silently fail:
   are first-choice fuel — esplora's UTXO endpoint hides them while the stuck
   child sits on them, but a replacement may reuse the replaced tx's inputs.
   They come from the raw `/tx/:txid` read (fee, weight, prevouts — no SDK
-  method exists, `esploraTxInfo`), with the anchor spender found live via the
-  parent's outspends (anyone can spend an anchor; a stored child txid could
-  lie).
+  method exists, `EsploraReader`), with the anchor spender found live via
+  the parent's outspends (anyone can spend an anchor; a stored child txid
+  could lie). mempool.arkade-style backends report the outspend as spent
+  but **omit the spender txid** (regtest drill hit this live, and mainnet
+  mempool.arkade.sh behaves the same) — the fallback scans the fuel
+  address's unconfirmed txs for the one spending the anchor outpoint, which
+  always finds OUR child because its change pays back to the fuel address.
+- **No blind boosts**: a package sitting in the mempool always has a
+  fee-paying child; if that child can't be read (esplora index lag), a
+  rebuild has no floor — it comes out at the SAME fee, which is the same
+  txid, which the node dedupes into a silent no-op (drill-observed). The
+  boost refuses loudly instead; only an evicted package may rebuild
+  floor-less.
 - **Errors surface**: `bumpP2A` swallows broadcast failures in a
   `finally`-return; the boost path throws, because a silent no-op here costs
-  the user blocks.
+  the user blocks. And because `/txs/package` can wrap a submitpackage
+  rejection inside an HTTP 200 (the SDK reads only the status), success is
+  only reported after the replacement is **positively observed in the
+  mempool** (`confirmInMempool`).
 - The parent hex is **re-derived from the vault PSBT** with the session's own
   finalize rules (`finalizeProofTx`) — byte-identical to what was broadcast,
   no second copy to drift. The only persisted fact is the tip height at

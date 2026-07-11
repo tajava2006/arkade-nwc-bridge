@@ -26,20 +26,24 @@ const walletKey = SingleKey.fromPrivateKey(new Uint8Array(32).fill(7))
 
 // Boost needs a state makeMockChain can't express: a tx the explorer KNOWS
 // but hasn't confirmed (in mempool). Everything is a hand-set map so tests
-// dial in exactly the stuck scenario they mean.
+// dial in exactly the stuck scenario they mean. Broadcast hexes land in the
+// mempool set (the post-broadcast presence check reads it back) unless
+// swallowBroadcasts simulates a node that took the POST and dropped the tx.
 function mockMempoolExplorer(args: {
   mempool?: string[]
   confirmed?: Record<string, { height: number; time: number }>
   outspends?: Record<string, { spent: boolean; txid?: string }[]>
   feeRate?: number
   tipHeight?: number
+  swallowBroadcasts?: boolean
 }) {
+  const mempool = new Set(args.mempool ?? [])
   const broadcasts: string[][] = []
   const explorer = {
     async getTxStatus(txid: string) {
       const c = args.confirmed?.[txid]
       if (c) return { confirmed: true, blockHeight: c.height, blockTime: c.time }
-      if (args.mempool?.includes(txid)) return { confirmed: false }
+      if (mempool.has(txid)) return { confirmed: false }
       throw new Error('not found')
     },
     async getTxOutspends(txid: string) {
@@ -49,6 +53,16 @@ function mockMempoolExplorer(args: {
     },
     async broadcastTransaction(...txs: string[]) {
       broadcasts.push(txs)
+      if (!args.swallowBroadcasts) {
+        for (const h of txs) {
+          mempool.add(
+            Transaction.fromRaw(hex.decode(h), {
+              allowUnknownOutputs: true,
+              allowUnknownInputs: true,
+            }).id,
+          )
+        }
+      }
       return 'ok'
     },
     async getChainTip() {
@@ -98,6 +112,7 @@ describe('exit boost', () => {
     feeRate?: number
     tipHeight?: number
     confirmed?: boolean
+    swallowBroadcasts?: boolean
   }) {
     const f = await makeSignedExitFixture(1, { identity: walletKey })
     storeVtxoWithProofs(temp.db, f.vtxo, f.proofs)
@@ -114,6 +129,7 @@ describe('exit boost', () => {
       },
       feeRate: args.feeRate,
       tipHeight: args.tipHeight,
+      swallowBroadcasts: args.swallowBroadcasts,
     })
     const oldChild =
       args.oldChild === null
@@ -137,7 +153,11 @@ describe('exit boost', () => {
       network: 'bitcoin',
       explorer: mock.explorer,
       fuel,
-      txInfo: async (txid) => (txid === OLD_CHILD ? oldChild : null),
+      reader: {
+        tx: async (txid: string) => (txid === OLD_CHILD ? oldChild : null),
+        spenderFromAddress: async () => null,
+      },
+      confirmRetry: { attempts: 2, delayMs: 10 },
     }
     return { f, fuel, mock, deps, oldChild }
   }
@@ -260,6 +280,72 @@ describe('exit boost', () => {
     expect(spent.has('cc'.repeat(32))).toBe(false) // unconfirmed coin excluded
   })
 
+  test('boostStep finds the child via the address scan when outspends omits the spender txid', async () => {
+    // mempool.arkade-style backends answer {spent:true} with no txid — the
+    // regtest drill hit this live and the boost lost both the RBF floor and
+    // the reclaimable prevout (the only fuel). The fallback must recover it.
+    const f = await makeSignedExitFixture(1, { identity: walletKey })
+    storeVtxoWithProofs(temp.db, f.vtxo, f.proofs)
+    const fuel = await fuelSource([]) // esplora shows NO utxos — reclaim or die
+    const mock = mockMempoolExplorer({
+      mempool: [f.txid],
+      outspends: { [f.txid]: [{ spent: false }, { spent: true }] }, // txid omitted
+      feeRate: 20,
+    })
+    const oldChild = {
+      feeSat: 200,
+      vsize: 120,
+      confirmed: false,
+      inputs: [{ txid: FUEL_B, vout: 0, valueSat: 30_000, scriptHex: hex.encode(fuel.script) }],
+    }
+    const deps: BoostDeps = {
+      db: temp.db,
+      identity: walletKey,
+      network: 'bitcoin',
+      explorer: mock.explorer,
+      fuel,
+      reader: {
+        tx: async (txid: string) => (txid === OLD_CHILD ? oldChild : null),
+        spenderFromAddress: async (address: string, parentTxid: string, vout: number) =>
+          address === fuel.address && parentTxid === f.txid && vout === 1 ? OLD_CHILD : null,
+      },
+    }
+
+    const res = await boostStep(deps, f.txid, 0, f.txid)
+
+    // floor honored (child identified) and the reclaimed prevout paid for it
+    expect(res.feeSat).toBeGreaterThan(oldChild.feeSat)
+    const child = Transaction.fromRaw(hex.decode(mock.broadcasts[0]![1]!), {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+    })
+    const spent = new Set<string>()
+    for (let i = 0; i < child.inputsLength; i++) {
+      spent.add(hex.encode(child.getInput(i).txid!))
+    }
+    expect(spent.has(FUEL_B)).toBe(true)
+  })
+
+  test('boostStep refuses a blind boost when the in-mempool child is unreadable', async () => {
+    // parent demonstrably in the mempool + child unidentifiable (outspends
+    // omits the txid AND the address scan misses — the exact esplora-lag
+    // combination the regtest drill produced). A rebuild would carry no RBF
+    // floor → same fee → same txid → silent no-op. Must refuse instead.
+    const { f, mock, deps } = await stuckFixture({ oldChild: null })
+    ;(mock as { explorer: OnchainProvider }).explorer.getTxOutspends = async () => [
+      { spent: false },
+      { spent: true }, // txid omitted
+    ]
+    expect(boostStep(deps, f.txid, 0, f.txid)).rejects.toThrow('could not be read')
+  })
+
+  test('boostStep surfaces a broadcast the node silently dropped', async () => {
+    // /txs/package can wrap a submitpackage rejection in a 200 — the only
+    // proof of acceptance is the replacement showing up in the mempool
+    const { f, deps } = await stuckFixture({ feeRate: 20, swallowBroadcasts: true })
+    expect(boostStep(deps, f.txid, 0, f.txid)).rejects.toThrow('did not appear in the mempool')
+  })
+
   test('boostStep throws when confirmed fuel cannot cover the fee', async () => {
     const { f, deps } = await stuckFixture({
       feeRate: 20,
@@ -285,9 +371,12 @@ describe('exit boost', () => {
     })
     recordBroadcast(temp.db, oldSweep, f.txid, 0, 990)
 
-    const chain = makeMockChain()
-    chain.confirm(f.txid)
-    chain.advance(Number(FIXTURE_CSV_BLOCKS))
+    // vtxo tx confirmed 10 blocks ago → CSV (10) elapsed at the mock tip
+    const mock = mockMempoolExplorer({
+      confirmed: { [f.txid]: { height: 900, time: 900 * 600 } },
+      tipHeight: 900 + Number(FIXTURE_CSV_BLOCKS),
+      feeRate: 2,
+    })
 
     const fuel = await fuelSource([])
     // old sweep pays 500 sats over ~110 vB — the floor (500 + 110 + 1) beats
@@ -296,17 +385,21 @@ describe('exit boost', () => {
       db: temp.db,
       identity: walletKey,
       network: 'bitcoin',
-      explorer: chain.explorer as unknown as OnchainProvider,
+      explorer: mock.explorer,
       fuel,
-      txInfo: async (txid) =>
-        txid === oldSweep ? { feeSat: 500, vsize: 110, confirmed: false, inputs: [] } : null,
+      reader: {
+        tx: async (txid: string) =>
+          txid === oldSweep ? { feeSat: 500, vsize: 110, confirmed: false, inputs: [] } : null,
+        spenderFromAddress: async () => null,
+      },
+      confirmRetry: { attempts: 2, delayMs: 10 },
     }
 
     const res = await boostSweep(deps, f.txid, 0)
 
     expect(res.feeSat).toBe(500 + 110 + 1)
-    expect(chain.broadcasts).toHaveLength(1)
-    expect(chain.broadcasts[0]).toHaveLength(1) // single tx, not a package
+    expect(mock.broadcasts).toHaveLength(1)
+    expect(mock.broadcasts[0]).toHaveLength(1) // single tx, not a package
 
     const op = getExitOp(temp.db, f.txid, 0)
     expect(op?.state).toBe('swept')
@@ -330,7 +423,10 @@ describe('exit boost', () => {
       network: 'bitcoin',
       explorer: chain.explorer as unknown as OnchainProvider,
       fuel: await fuelSource([]),
-      txInfo: async () => ({ feeSat: 100, vsize: 100, confirmed: true, inputs: [] }),
+      reader: {
+        tx: async () => ({ feeSat: 100, vsize: 100, confirmed: true, inputs: [] }),
+        spenderFromAddress: async () => null,
+      },
     }
     expect(boostSweep(deps, f.txid, 0)).rejects.toThrow('already confirmed')
   })
@@ -350,7 +446,10 @@ describe('exit boost', () => {
       network: 'bitcoin',
       explorer: mock.explorer,
       fuel: await fuelSource([]),
-      txInfo: async () => ({ feeSat: 110, vsize: 110, confirmed: false, inputs: [] }),
+      reader: {
+        tx: async () => ({ feeSat: 110, vsize: 110, confirmed: false, inputs: [] }),
+        spenderFromAddress: async () => null,
+      },
     }
 
     const info = await sweepBoostInfo(deps, f.txid, 0)

@@ -50,7 +50,7 @@ export interface FuelSource {
   getCoins(): Promise<Coin[]>
 }
 
-/** what the boost path reads off one mempool tx — see esploraTxInfo */
+/** what the boost path reads off one mempool tx — see EsploraReader.tx */
 export interface MempoolTxInfo {
   feeSat: number
   vsize: number
@@ -59,55 +59,90 @@ export interface MempoolTxInfo {
   inputs: { txid: string; vout: number; valueSat: number; scriptHex: string }[]
 }
 
-export type TxInfoFn = (txid: string) => Promise<MempoolTxInfo | null>
-
 /**
- * Fee/weight/prevouts of a single tx via the raw esplora endpoint — the SDK
- * provider has no method for this. null on any failure: fee context degrades
- * to "unknown", it never blocks the page.
+ * Raw esplora reads the SDK provider has no methods for. Every method
+ * returns null on failure: fee context degrades to "unknown", it never
+ * blocks the page.
  */
-export function esploraTxInfo(baseUrl: string, timeoutMs = 5_000): TxInfoFn {
-  return async (txid) => {
-    try {
-      const res = await fetch(`${baseUrl}/tx/${txid}`, {
-        signal: AbortSignal.timeout(timeoutMs),
-      })
-      if (!res.ok) return null
-      const j = (await res.json()) as {
-        fee?: number
-        weight?: number
-        status?: { confirmed?: boolean }
-        vin?: {
+export interface EsploraReader {
+  /** fee/weight/prevouts of one tx */
+  tx(txid: string): Promise<MempoolTxInfo | null>
+  /**
+   * The unconfirmed tx of `address` spending parentTxid:vout. Fallback for
+   * finding the anchor child when `/outspends` says spent:true but omits
+   * the spender txid (mempool.arkade-style backends do — regtest-verified).
+   * Works because OUR child always pays its change to the fuel address.
+   */
+  spenderFromAddress(address: string, parentTxid: string, vout: number): Promise<string | null>
+}
+
+export function esploraReader(baseUrl: string, timeoutMs = 5_000): EsploraReader {
+  return {
+    async tx(txid) {
+      try {
+        const res = await fetch(`${baseUrl}/tx/${txid}`, {
+          signal: AbortSignal.timeout(timeoutMs),
+        })
+        if (!res.ok) return null
+        const j = (await res.json()) as {
+          fee?: number
+          weight?: number
+          status?: { confirmed?: boolean }
+          vin?: {
+            txid?: string
+            vout?: number
+            prevout?: { scriptpubkey?: string; value?: number } | null
+          }[]
+        }
+        if (typeof j.fee !== 'number' || typeof j.weight !== 'number') return null
+        const inputs = (j.vin ?? []).flatMap((v) =>
+          typeof v.txid === 'string' &&
+          typeof v.vout === 'number' &&
+          typeof v.prevout?.value === 'number' &&
+          typeof v.prevout?.scriptpubkey === 'string'
+            ? [
+                {
+                  txid: v.txid,
+                  vout: v.vout,
+                  valueSat: v.prevout.value,
+                  scriptHex: v.prevout.scriptpubkey,
+                },
+              ]
+            : [],
+        )
+        return {
+          feeSat: j.fee,
+          vsize: Math.ceil(j.weight / 4),
+          confirmed: Boolean(j.status?.confirmed),
+          inputs,
+        }
+      } catch {
+        return null
+      }
+    },
+
+    async spenderFromAddress(address, parentTxid, vout) {
+      try {
+        const res = await fetch(`${baseUrl}/address/${address}/txs`, {
+          signal: AbortSignal.timeout(timeoutMs),
+        })
+        if (!res.ok) return null
+        const txs = (await res.json()) as {
           txid?: string
-          vout?: number
-          prevout?: { scriptpubkey?: string; value?: number } | null
+          status?: { confirmed?: boolean }
+          vin?: { txid?: string; vout?: number }[]
         }[]
+        for (const t of txs) {
+          if (!t?.txid || t.status?.confirmed) continue
+          if ((t.vin ?? []).some((v) => v.txid === parentTxid && v.vout === vout)) {
+            return t.txid
+          }
+        }
+        return null
+      } catch {
+        return null
       }
-      if (typeof j.fee !== 'number' || typeof j.weight !== 'number') return null
-      const inputs = (j.vin ?? []).flatMap((v) =>
-        typeof v.txid === 'string' &&
-        typeof v.vout === 'number' &&
-        typeof v.prevout?.value === 'number' &&
-        typeof v.prevout?.scriptpubkey === 'string'
-          ? [
-              {
-                txid: v.txid,
-                vout: v.vout,
-                valueSat: v.prevout.value,
-                scriptHex: v.prevout.scriptpubkey,
-              },
-            ]
-          : [],
-      )
-      return {
-        feeSat: j.fee,
-        vsize: Math.ceil(j.weight / 4),
-        confirmed: Boolean(j.status?.confirmed),
-        inputs,
-      }
-    } catch {
-      return null
-    }
+    },
   }
 }
 
@@ -117,7 +152,9 @@ export interface BoostDeps {
   network: Network
   explorer: OnchainProvider
   fuel: FuelSource
-  txInfo: TxInfoFn
+  reader: EsploraReader
+  /** post-broadcast mempool-presence poll — overridable so tests don't sleep */
+  confirmRetry?: { attempts: number; delayMs: number }
 }
 
 /** fee context of one in-mempool 1P1C package — everything the boost UI shows */
@@ -153,6 +190,38 @@ async function tipHeightOrNull(explorer: OnchainProvider): Promise<number | null
   } catch {
     return null
   }
+}
+
+async function txPresence(
+  explorer: OnchainProvider,
+  txid: string,
+): Promise<'confirmed' | 'mempool' | 'unknown'> {
+  try {
+    return (await explorer.getTxStatus(txid)).confirmed ? 'confirmed' : 'mempool'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * A 200 from `/txs/package` does not prove acceptance — submitpackage
+ * rejections can ride inside the body and the SDK reads only the status
+ * (regtest drill: an equal-fee duplicate came back 200 and changed nothing).
+ * Positively confirm the node took the replacement before reporting success.
+ */
+async function confirmInMempool(
+  deps: Pick<BoostDeps, 'explorer' | 'confirmRetry'>,
+  txid: string,
+  what: string,
+): Promise<void> {
+  const { attempts, delayMs } = deps.confirmRetry ?? { attempts: 5, delayMs: 1_000 }
+  for (let i = 0; i < attempts; i++) {
+    if ((await txPresence(deps.explorer, txid)) !== 'unknown') return
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+  throw new Error(
+    `${what} ${txid} did not appear in the mempool after broadcast — the node likely rejected the replacement; retry (a higher-fee attempt is safe)`,
+  )
 }
 
 function anchorIndexOf(tx: Transaction): number {
@@ -195,22 +264,32 @@ function loadProofTx(
   return { type: entry.type, psbtB64 }
 }
 
-/** the CPFP child currently riding the parent's anchor, found live via the outspend */
+/**
+ * The CPFP child currently riding the parent's anchor. Primary source is the
+ * anchor outspend; when the backend reports spent:true but omits the spender
+ * txid (mempool.arkade-style — regtest drill hit this live), fall back to
+ * scanning the fuel address's unconfirmed txs for the one spending the
+ * anchor outpoint. A miss on both (third-party bump on an omitting backend)
+ * degrades to "no fee context" instead of guessing.
+ */
 async function currentChild(
-  deps: Pick<BoostDeps, 'explorer' | 'txInfo'>,
+  deps: Pick<BoostDeps, 'explorer' | 'reader' | 'fuel'>,
   stepTxid: string,
   anchorIdx: number,
 ): Promise<{ txid: string; info: MempoolTxInfo | null } | null> {
+  let spenderTxid: string | null = null
   try {
-    const outspends = await deps.explorer.getTxOutspends(stepTxid)
-    const spend = outspends[anchorIdx]
-    // some esploras omit the spender txid — treat as unidentifiable, the
-    // caller then degrades to "no fee context" instead of guessing
-    if (!spend?.spent || !spend.txid) return null
-    return { txid: spend.txid, info: await deps.txInfo(spend.txid) }
+    const spend = (await deps.explorer.getTxOutspends(stepTxid))[anchorIdx]
+    if (!spend?.spent) return null
+    spenderTxid = spend.txid ?? null
   } catch {
-    return null
+    // outspends unavailable — the address scan below may still know
   }
+  if (!spenderTxid) {
+    spenderTxid = await deps.reader.spenderFromAddress(deps.fuel.address, stepTxid, anchorIdx)
+  }
+  if (!spenderTxid) return null
+  return { txid: spenderTxid, info: await deps.reader.tx(spenderTxid) }
 }
 
 /**
@@ -344,12 +423,9 @@ export async function boostStep(
   const parentVb = parent.vsize
   const anchorIdx = anchorIndexOf(parent)
 
-  try {
-    const status = await deps.explorer.getTxStatus(stepTxid)
-    if (status.confirmed) throw new Error(`${stepTxid} is already confirmed — nothing to boost`)
-  } catch (err) {
-    if (err instanceof Error && err.message.includes('already confirmed')) throw err
-    // not found = evicted; the package resubmit below recovers it
+  const presence = await txPresence(deps.explorer, stepTxid)
+  if (presence === 'confirmed') {
+    throw new Error(`${stepTxid} is already confirmed — nothing to boost`)
   }
 
   const child = await currentChild(deps, stepTxid, anchorIdx)
@@ -357,6 +433,18 @@ export async function boostStep(
     throw new Error(`anchor spender ${child.txid} is already confirmed — nothing to boost`)
   }
   const oldInfo = child?.info ?? null
+
+  // A package sitting in the mempool ALWAYS has a fee-paying child (a
+  // zero-fee parent can't be there alone). If we can't read that child, a
+  // rebuild has no RBF floor — it comes out at the same fee as the original
+  // and the node dedupes or rejects it, both wrapped in a 200 (regtest
+  // drill hit this via an esplora address-index lag). Refuse loudly; only
+  // an evicted package ('unknown') may rebuild floor-less.
+  if (presence === 'mempool' && !oldInfo) {
+    throw new Error(
+      `the package is in the mempool but its current CPFP child could not be read from esplora — boosting blind would change nothing; retry in a few seconds`,
+    )
+  }
 
   const targetRate = await nextBlockRate(deps.explorer)
   const pool = await fuelPool(deps.fuel, oldInfo)
@@ -411,6 +499,7 @@ export async function boostStep(
   for (let i = 1; i < signed.inputsLength; i++) signed.finalizeIdx(i)
 
   await deps.explorer.broadcastTransaction(parent.hex, signed.hex)
+  await confirmInMempool(deps, signed.id, 'replacement child')
 
   return {
     childTxid: signed.id,
@@ -442,7 +531,7 @@ export async function sweepBoostInfo(
 ): Promise<SweepBoostInfo | null> {
   const op = getExitOp(deps.db, txid, vout)
   if (!op?.sweepTxid) return null
-  const info = await deps.txInfo(op.sweepTxid)
+  const info = await deps.reader.tx(op.sweepTxid)
   if (!info) return null
 
   const targetRate = await nextBlockRate(deps.explorer)
@@ -473,9 +562,23 @@ export async function boostSweep(deps: BoostDeps, txid: string, vout: number): P
   if (op?.state !== 'swept' || !op.sweepTxid) {
     throw new Error(`${txid}:${vout} has no sweep to boost (state: ${op?.state ?? 'no exit op'})`)
   }
-  const oldInfo = await deps.txInfo(op.sweepTxid)
+  const oldInfo = await deps.reader.tx(op.sweepTxid)
   if (oldInfo?.confirmed) {
     throw new Error(`sweep ${op.sweepTxid} is already confirmed — nothing to boost`)
+  }
+  if (!oldInfo) {
+    // same blind-RBF trap as the unroll boost: unreadable-but-present means
+    // no floor, and a same-fee rebuild is the SAME txid — a silent no-op
+    const presence = await txPresence(deps.explorer, op.sweepTxid)
+    if (presence === 'confirmed') {
+      throw new Error(`sweep ${op.sweepTxid} is already confirmed — nothing to boost`)
+    }
+    if (presence === 'mempool') {
+      throw new Error(
+        `the sweep is in the mempool but its fee could not be read from esplora — boosting blind would change nothing; retry in a few seconds`,
+      )
+    }
+    // unknown = evicted → a fresh rebuild at the current rate is correct
   }
 
   const batch = listOpsBySweepTxid(deps.db, op.sweepTxid)
@@ -492,6 +595,7 @@ export async function boostSweep(deps: BoostDeps, txid: string, vout: number): P
     minFee,
   )
   await deps.explorer.broadcastTransaction(result.hex)
+  await confirmInMempool(deps, result.txid, 'replacement sweep')
 
   for (const o of ops) {
     setExitOpState(deps.db, o.txid, o.vout, 'swept', { sweepTxid: result.txid, destAddress: dest })
