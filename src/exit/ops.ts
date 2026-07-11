@@ -87,6 +87,14 @@ export function getExitOp(db: Database, txid: string, vout: number): ExitOp | nu
   return row ? rowToOp(row) : null
 }
 
+/** Every op settled by one (possibly batched) sweep tx — an RBF replaces it for all of them at once. */
+export function listOpsBySweepTxid(db: Database, sweepTxid: string): ExitOp[] {
+  return db
+    .query<Row, [string]>(`SELECT * FROM exit_ops WHERE sweep_txid = ? ORDER BY txid, vout`)
+    .all(sweepTxid)
+    .map(rowToOp)
+}
+
 export function listExitOps(db: Database, states?: ExitOpState[]): ExitOp[] {
   if (!states || states.length === 0) {
     return db

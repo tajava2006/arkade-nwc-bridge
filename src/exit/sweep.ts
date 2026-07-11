@@ -90,14 +90,17 @@ async function resolveInput(deps: SweepDeps, txid: string, vout: number): Promis
 }
 
 /**
- * Build, sign and broadcast the sweep transaction for one or more
- * fully-unrolled, CSV-elapsed vtxos. Throws before broadcasting if any
- * input isn't actually spendable yet or the net amount would be dust.
+ * Build and sign the sweep transaction without broadcasting. minFeeSat is
+ * the RBF path: a replacement must beat the stuck tx's absolute fee plus
+ * incremental relay, which can exceed what the current rate estimate says —
+ * the fee is raised to the floor, never lowered. Throws if any input isn't
+ * actually spendable yet or the net amount would be dust.
  */
-export async function sweepVtxos(
+export async function buildSweepTx(
   deps: SweepDeps,
   outpoints: { txid: string; vout: number }[],
   destAddress: string,
+  minFeeSat?: bigint,
 ): Promise<SweepResult> {
   if (outpoints.length === 0) throw new Error('nothing to sweep')
 
@@ -128,7 +131,8 @@ export async function sweepVtxos(
   if (!feeRate || feeRate < MIN_FEE_RATE) feeRate = MIN_FEE_RATE
   // esplora can report fractional sat/vB; round up so we always pay at
   // least the advertised rate (same guard as the SDK)
-  const feeSat = estimator.vsize().fee(BigInt(Math.ceil(feeRate)))
+  let feeSat = estimator.vsize().fee(BigInt(Math.ceil(feeRate)))
+  if (minFeeSat !== undefined && feeSat < minFeeSat) feeSat = minFeeSat
   if (feeSat >= totalSat) {
     throw new Error(
       `sweep fee (${feeSat} sats) would consume the entire value (${totalSat} sats)`,
@@ -143,7 +147,6 @@ export async function sweepVtxos(
   const signed = await deps.identity.sign(tx)
   signed.finalize()
 
-  await deps.explorer.broadcastTransaction(signed.hex)
   return {
     txid: signed.id,
     hex: signed.hex,
@@ -151,4 +154,18 @@ export async function sweepVtxos(
     amountSat: Number(amountSat),
     feeSat: Number(feeSat),
   }
+}
+
+/**
+ * Build, sign and broadcast the sweep transaction for one or more
+ * fully-unrolled, CSV-elapsed vtxos.
+ */
+export async function sweepVtxos(
+  deps: SweepDeps,
+  outpoints: { txid: string; vout: number }[],
+  destAddress: string,
+): Promise<SweepResult> {
+  const result = await buildSweepTx(deps, outpoints, destAddress)
+  await deps.explorer.broadcastTransaction(result.hex)
+  return result
 }

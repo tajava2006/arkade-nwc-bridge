@@ -2,6 +2,7 @@ import { html, raw, type RawHtml } from '../../lib/html'
 import { ChainTxType } from '@arkade-os/sdk'
 import type { ExitStep, ExitStepper } from '../../exit/stepper'
 import type { ExitEstimate } from '../../exit/estimate'
+import type { StepBoostInfo, SweepBoostInfo } from '../../exit/boost'
 import { qrSvg } from '../qr'
 import { layout } from './layout'
 
@@ -126,11 +127,44 @@ const TYPE_LABEL: Record<string, string> = {
   [ChainTxType.UNSPECIFIED]: 'tx',
 }
 
+// Fee context + boost affordance for a stuck step, filled in by the probe
+// endpoints (the initial page render is DB-only, so it never carries these).
+// One activation rule, no fee picker: the button exists exactly when the
+// package rate sits below the next-block estimate — "waiting N blocks" is
+// reference material, not a trigger (a well-priced package that waits is
+// luck, not something more sats can fix).
+export interface StepBoostView {
+  txid: string
+  vout: number
+  info: StepBoostInfo
+}
+
+function feeContextLine(args: {
+  rate: number | null
+  targetRate: number
+  blocksWaiting: number | null
+}): RawHtml {
+  if (args.rate === null) return html``
+  const waiting =
+    args.blocksWaiting !== null && args.blocksWaiting > 0
+      ? html` · waiting ${args.blocksWaiting} block${args.blocksWaiting === 1 ? '' : 's'}`
+      : html``
+  return html`<br /><span class="muted">${args.rate} sat/vB · next block ~${args.targetRate} sat/vB${waiting}</span>`
+}
+
+function boostForm(action: string, confirmMsg: string, projectedFeeSat: number | null): RawHtml {
+  return html`<form method="post" action="${action}" onsubmit="return confirm('${confirmMsg}');">
+    <button type="submit">⚡ Boost fee${
+      projectedFeeSat !== null ? html` (≈ ${projectedFeeSat.toLocaleString()} sats)` : html``
+    }</button>
+  </form>`
+}
+
 // Exported for the per-step status endpoint: a probe result re-renders the
 // exact node the initial page carried, so the client only swaps elements by
 // their data-step key — no client-side templating. Broadcast steps are DAG
 // node cards; wait/sweep stay list items below the graph.
-export function stepLine(step: ExitStep): RawHtml {
+export function stepLine(step: ExitStep, boost?: StepBoostView | null): RawHtml {
   if (step.kind === 'broadcast') {
     const vsize = step.vsize !== null ? html` · <span class="muted">${step.vsize} vB</span>` : html``
     const state =
@@ -139,10 +173,29 @@ export function stepLine(step: ExitStep): RawHtml {
         : step.status === 'mempool'
           ? 'in mempool — waiting for a block'
           : 'not broadcast yet'
+    const info = step.status === 'mempool' ? (boost?.info ?? null) : null
+    const feeCtx = info
+      ? feeContextLine({
+          rate: info.pkgRateSatVb,
+          targetRate: info.targetRateSatVb,
+          blocksWaiting: info.blocksWaiting,
+        })
+      : html``
+    const boostUi = info
+      ? info.boostable
+        ? boostForm(
+            `/exit/${boost!.txid}/${boost!.vout}/boost/${step.txid}`,
+            `Boost this package to ~${info.targetRateSatVb} sat/vB? A replacement CPFP child paying about ${info.projectedFeeSat ?? '?'} sats is broadcast from your exit fuel.`,
+            info.projectedFeeSat,
+          )
+        : info.pkgRateSatVb !== null
+          ? html`<br /><span class="ok">fee is competitive — should confirm soon</span>`
+          : html``
+      : html``
     return html`<div class="dag-node" data-step="${step.txid}">
       ${icon(step.status)} <strong>${TYPE_LABEL[step.txType] ?? 'tx'}</strong>
       <code>${short(step.txid)}</code>${vsize}<br />
-      <span class="muted">${state}</span>
+      <span class="muted">${state}</span>${feeCtx}${boostUi}
     </div>`
   }
   if (step.kind === 'wait') {
@@ -170,6 +223,43 @@ export function stepLine(step: ExitStep): RawHtml {
   </li>`
 }
 
+// The sweep-status endpoint's fragment: the DB-only page renders a swept op
+// as plain "swept", this corrects it live — confirmed gets the checkmark
+// annotated, a stuck sweep gets the same fee context + one-button boost the
+// unroll steps get (the sweep pays its own fee, so the replacement's extra
+// sats come out of the swept amount, not the fuel).
+export function sweepStatusLine(
+  txid: string,
+  vout: number,
+  step: ExitStep,
+  info: SweepBoostInfo,
+): RawHtml {
+  if (step.kind !== 'sweep') throw new Error('sweepStatusLine wants the sweep step')
+  if (info.confirmed) {
+    return html`<li data-step="sweep">
+      ✅ <strong>swept</strong> → <code>${step.destAddress ?? '—'}</code>
+      <br /><span class="muted">tx <code>${short(info.sweepTxid)}</code> · confirmed</span>
+    </li>`
+  }
+  const boostUi = info.boostable
+    ? boostForm(
+        `/exit/${txid}/${vout}/boost-sweep`,
+        `Boost the sweep to ~${info.targetRateSatVb} sat/vB? It is rebuilt paying about ${info.projectedFeeSat} sats — the difference comes out of the swept amount.`,
+        info.projectedFeeSat,
+      )
+    : html`<br /><span class="ok">fee is competitive — should confirm soon</span>`
+  return html`<li data-step="sweep">
+    🕐 <strong>sweep</strong> → <code>${step.destAddress ?? '—'}</code>
+    <br /><span class="muted">tx <code>${short(info.sweepTxid)}</code> · in mempool — waiting for a block</span>
+    ${feeContextLine({
+      rate: info.rateSatVb,
+      targetRate: info.targetRateSatVb,
+      blocksWaiting: info.blocksWaiting,
+    })}
+    ${boostUi}
+  </li>`
+}
+
 export function renderStepperFragment(stepper: ExitStepper): RawHtml {
   const broadcasts = stepper.levels.flat()
   const all = [...broadcasts, stepper.wait, stepper.sweep]
@@ -183,7 +273,7 @@ export function renderStepperFragment(stepper: ExitStepper): RawHtml {
     <div class="dag" data-dag>
       <svg class="dag-edges" aria-hidden="true"></svg>
       ${stepper.levels.map(
-        (level) => html`<div class="dag-row">${level.map(stepLine)}</div>`,
+        (level) => html`<div class="dag-row">${level.map((s) => stepLine(s))}</div>`,
       )}
     </div>
     <ol style="list-style:none; padding-left:0; line-height:2;">
@@ -283,16 +373,45 @@ function statusFillIn(s: ExitStepper): RawHtml {
   `
 }
 
-/** Shown when a sweep is rejected (CSV not elapsed, dust, etc.) — a plain page with the reason. */
-export function exitSweepError(txid: string, vout: number, reason: string): RawHtml {
+// A swept op renders "swept" from the DB alone — whether the sweep tx
+// actually confirmed (or is stuck) is onchain state, fetched after render
+// like the step probes. One shot; a reload re-checks.
+function sweepFillIn(s: ExitStepper): RawHtml {
+  if (s.op?.state !== 'swept') return html``
+  return html`<script>
+    fetch('/exit/${s.txid}/${s.vout}/sweep-status')
+      .then(function (r) {
+        return r.ok ? r.json() : null
+      })
+      .then(function (d) {
+        if (!d || !d.sweepHtml) return
+        var el = document.querySelector('[data-step="sweep"]')
+        if (el) el.outerHTML = d.sweepHtml
+      })
+      .catch(function () {})
+  </script>`
+}
+
+/** Shown when an exit action is rejected — a plain page with the reason. */
+export function exitActionError(
+  action: string,
+  txid: string,
+  vout: number,
+  reason: string,
+): RawHtml {
   return layout({
-    title: 'Sweep failed',
+    title: `${action} failed`,
     current: 'exit',
     body: html`
       <p><a href="/exit/${txid}/${vout}">← back</a></p>
-      <p class="bad">Sweep failed: ${reason}</p>
+      <p class="bad">${action} failed: ${reason}</p>
     `,
   })
+}
+
+/** Shown when a sweep is rejected (CSV not elapsed, dust, etc.). */
+export function exitSweepError(txid: string, vout: number, reason: string): RawHtml {
+  return exitActionError('Sweep', txid, vout, reason)
 }
 
 export function exitDetailView(args: {
@@ -339,6 +458,7 @@ export function exitDetailView(args: {
       <div data-exit-stepper="${s.txid}:${s.vout}">${renderStepperFragment(s)}</div>
       ${dagScript(s)}
       ${statusFillIn(s)}
+      ${sweepFillIn(s)}
 
       <h2>Action</h2>
       ${actionPanel(s, args.estimate)}

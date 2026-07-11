@@ -356,6 +356,31 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE exit_vtxos ADD COLUMN quarantine_reason TEXT;
     `,
   },
+  {
+    version: 15,
+    description: 'exit_broadcasts — tip height at broadcast, for the "N blocks waiting" readout',
+    // Deliberately the ONLY thing recorded about a broadcast: everything else
+    // the boost path needs is either derivable offline (the parent hex
+    // re-finalizes from the vault PSBT) or better read live from esplora (the
+    // CPFP child and its fee are found through the anchor outspend — a stored
+    // copy could be stale if anyone else bumped the anyone-can-spend anchor).
+    // step_txid keys the row: for unroll packages that's the pre-signed
+    // parent (immutable, so boosts never touch the row); a sweep RBF mints a
+    // new txid, so the boost inserts a new row carrying the old tip_height
+    // forward (the wait started at the first broadcast, not the replacement).
+    // Re-broadcast after a mempool eviction overwrites tip_height — that IS a
+    // new wait. tip_height is NULL when the tip read failed at broadcast
+    // time; the UI just omits the counter.
+    sql: `
+      CREATE TABLE exit_broadcasts (
+        step_txid  TEXT PRIMARY KEY,
+        txid       TEXT    NOT NULL,
+        vout       INTEGER NOT NULL,
+        tip_height INTEGER,
+        created_at INTEGER NOT NULL
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

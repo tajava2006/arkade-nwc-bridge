@@ -54,10 +54,11 @@ export interface ExitEstimate {
 // in for the real destination (the default dest is P2TR too).
 const P2TR_SCRIPT_STANDIN = hex.decode('5120' + '00'.repeat(32))
 
-// Session finalize rules, replayed in memory to measure the real broadcast
-// size — TREE carries the round's aggregated tapKeySig, the rest finalize
-// from their complete witnesses.
-function finalizedVsize(type: ChainTxType, psbtB64: string): number {
+// Session finalize rules, replayed in memory — TREE carries the round's
+// aggregated tapKeySig, the rest finalize from their complete witnesses. The
+// result is byte-identical to what Session broadcasts, which is why the boost
+// path re-derives the parent hex from here instead of persisting a copy.
+export function finalizeProofTx(type: ChainTxType, psbtB64: string): Transaction {
   const tx = Transaction.fromPSBT(base64.decode(psbtB64))
   if (type === ChainTxType.TREE) {
     const input = tx.getInput(0)
@@ -66,7 +67,11 @@ function finalizedVsize(type: ChainTxType, psbtB64: string): number {
   } else {
     tx.finalize()
   }
-  return tx.vsize
+  return tx
+}
+
+function finalizedVsize(type: ChainTxType, psbtB64: string): number {
+  return finalizeProofTx(type, psbtB64).vsize
 }
 
 /** finalized vsize of one stored proof tx; null when it's missing or undecodable */

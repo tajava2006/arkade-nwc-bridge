@@ -30,7 +30,13 @@ import {
 } from '../exit/vault'
 import { getExitOp } from '../exit/ops'
 import { exitView, type ExitRow } from './views/exit'
-import { exitDetailView, exitSweepError, stepLine } from './views/exit_detail'
+import {
+  exitActionError,
+  exitDetailView,
+  exitSweepError,
+  stepLine,
+  sweepStatusLine,
+} from './views/exit_detail'
 import { buildExitStepper, probeExitStep } from '../exit/stepper'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
@@ -393,12 +399,88 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           }
           const probe = await probeExitStep({ db, explorer }, txid, vout, stepTxid)
           if (!probe) return new Response('no such step', { status: 404 })
+          // a step sitting in the mempool gets its fee context (package rate
+          // vs next block, boost button) — priced best-effort, the plain
+          // status line renders regardless
+          let boost = null
+          if (probe.status === 'mempool') {
+            try {
+              const info = await st.exitEngine.stepBoostInfo(txid, vout, stepTxid)
+              if (info) boost = { txid, vout, info }
+            } catch {
+              // unpriceable — plain line
+            }
+          }
           return Response.json({
             status: probe.status,
-            stepHtml: stepLine(probe.step).value,
+            stepHtml: stepLine(probe.step, boost).value,
             waitHtml: probe.wait ? stepLine(probe.wait).value : undefined,
             sweepHtml: probe.sweep ? stepLine(probe.sweep).value : undefined,
           })
+        },
+      },
+      // Fee/confirmation status of the sweep tx once an op is 'swept' —
+      // fetched by the detail page after render, same pattern as the step
+      // probes. 204 = nothing to correct (no sweep, or esplora can't see it).
+      '/exit/:txid/:vout/sweep-status': {
+        GET: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return new Response('setup required', { status: 409 })
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          const feeRate = await st.exitEngine.feeRate()
+          const stepper = buildExitStepper({ db }, txid, vout, feeRate)
+          if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
+          let info = null
+          try {
+            info = await st.exitEngine.sweepBoostInfo(txid, vout)
+          } catch {
+            info = null
+          }
+          if (!info) return new Response(null, { status: 204 })
+          return Response.json({
+            sweepHtml: sweepStatusLine(txid, vout, stepper.sweep, info).value,
+          })
+        },
+      },
+      // One-button fee boost for a stuck unroll package: replace its CPFP
+      // child at the next-block rate (single preset on purpose — the user
+      // shouldn't be asked to pick a fee rate mid-emergency).
+      '/exit/:txid/:vout/boost/:stepTxid': {
+        POST: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid, stepTxid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          try {
+            await st.exitEngine.boostStep(txid, vout, stepTxid)
+          } catch (err) {
+            return htmlResponse(
+              exitActionError('Boost', txid, vout, err instanceof Error ? err.message : String(err)),
+              { status: 400 },
+            )
+          }
+          return Response.redirect(`/exit/${txid}/${vout}`, 303)
+        },
+      },
+      '/exit/:txid/:vout/boost-sweep': {
+        POST: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          try {
+            await st.exitEngine.boostSweep(txid, vout)
+          } catch (err) {
+            return htmlResponse(
+              exitActionError('Boost', txid, vout, err instanceof Error ? err.message : String(err)),
+              { status: 400 },
+            )
+          }
+          return Response.redirect(`/exit/${txid}/${vout}`, 303)
         },
       },
       '/exit/:txid/:vout/start': {

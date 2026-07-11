@@ -50,6 +50,14 @@ const STUB_EXIT_ENGINE: ExitEngine = {
     throw new Error('stub')
   },
   fundingStatus: async () => ({ address: 'bc1pstubfunding', balanceSat: 5_000 }),
+  stepBoostInfo: async () => null,
+  boostStep: async () => {
+    throw new Error('stub')
+  },
+  sweepBoostInfo: async () => null,
+  boostSweep: async () => {
+    throw new Error('stub')
+  },
   snapshot: () => ({ ops: [], active: null }),
   onUpdate: () => () => {},
   stop: () => {},

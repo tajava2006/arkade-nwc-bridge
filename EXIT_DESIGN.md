@@ -250,6 +250,48 @@ child per package and the CSV-path sweep sized from the actual leaf. It emits
 packages / total vB / sats at the given rate / % of value / an `uneconomical`
 verdict / `proofComplete`, feeding both the per-row cost column and the stepper.
 
+**Boost** (`boost.ts`) is the answer to a mempool spike mid-exit. The SDK has
+no re-bump path — `Unroll.Session` returns WAIT forever while a package sits
+in the mempool, and its `bumpP2A` prices the child once at broadcast time.
+The pre-signed parent is immutable and zero-fee forever, so a bump always
+means **replacing the CPFP child**: a new v3 child spending the same anchor
+conflicts with the stuck one and rides in via RBF (v3 signals replaceability,
+BIP431). We always resubmit `[same parent hex, new child]` as a package —
+bitcoind dedupes an in-mempool parent, and the identical call recovers a
+fully evicted package. Details that make it correct where re-calling the
+SDK's `bumpP2A` would silently fail:
+
+- **Fee floor**: RBF rule 4 wants old child fee + incremental relay × new
+  size, regardless of what the estimate says. Fee = max(next-block rate ×
+  whole package vB, that floor).
+- **Confirmed-only fuel**: a v3 child gets exactly one unconfirmed parent
+  (the tree tx), and spending the stuck child's change would be spending an
+  output of the tx being replaced. The stuck child's own confirmed prevouts
+  are first-choice fuel — esplora's UTXO endpoint hides them while the stuck
+  child sits on them, but a replacement may reuse the replaced tx's inputs.
+  They come from the raw `/tx/:txid` read (fee, weight, prevouts — no SDK
+  method exists, `esploraTxInfo`), with the anchor spender found live via the
+  parent's outspends (anyone can spend an anchor; a stored child txid could
+  lie).
+- **Errors surface**: `bumpP2A` swallows broadcast failures in a
+  `finally`-return; the boost path throws, because a silent no-op here costs
+  the user blocks.
+- The parent hex is **re-derived from the vault PSBT** with the session's own
+  finalize rules (`finalizeProofTx`) — byte-identical to what was broadcast,
+  no second copy to drift. The only persisted fact is the tip height at
+  broadcast (`exit_broadcasts`, v15), which feeds the "waiting N blocks"
+  readout; a sweep RBF carries it forward to the replacement txid since the
+  wait began at the first broadcast.
+- **Concurrency is free**: the session's WAIT polls the parent txid, which a
+  child replacement never changes — boost mid-session, and the session simply
+  proceeds when the parent confirms.
+
+The sweep gets the same treatment (`boostSweep`): it pays its own fee out of
+the swept value, its CSV sequence already signals BIP125, so the boost
+rebuilds the identical spend (same inputs, same destination) above the RBF
+floor via `buildSweepTx(minFeeSat)` and updates every op the batched sweep
+settled to the replacement txid.
+
 ## 6. The tab
 
 - **`/exit` list** — one row per mirrored VTXO: value, expiry countdown (the
@@ -266,6 +308,14 @@ verdict / `proofComplete`, feeding both the per-row cost column and the stepper.
   cost beside the button and a short irreversibility confirm) and the funding
   panel (nsec P2TR + QR + onchain balance, low-fuel warning against the
   estimate).
+- **Boost affordance** — a step (or the sweep) probed as in-mempool gets a fee
+  context line: package rate vs the next-block estimate, plus "waiting N
+  blocks" as reference material. **One activation rule**: the ⚡ Boost button
+  exists exactly when the package rate sits below the next-block estimate —
+  waiting time is never the trigger (a well-priced package that waits is
+  luck, not something more sats can fix), and there is **no fee picker**: one
+  preset (next block), the projected cost on the button, a short confirm.
+  Boosting is always operator-initiated; nothing auto-spends fee money.
 
 **Chain layout** (`chain_order.ts`, display only): arkd's getVtxoChain array
 is a BFS from the vtxo upward with each branch's tree+commitment inlined

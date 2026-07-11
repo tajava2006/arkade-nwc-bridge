@@ -260,6 +260,7 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
 
 ## 8. 백로그 (에픽 스코프 밖)
 
+- ✅ **stuck 패키지 fee 재부스트** (`feat/exit-boost`, 2026-07-11): 멤풀 스파이크로 1P1C 패키지가 밀릴 때 CPFP 자식을 RBF로 교체 + 패키지 재제출(`src/exit/boost.ts` + `broadcasts.ts`, 마이그레이션 v15). SDK엔 재범프 경로 없음(Session은 멤풀 tx에 WAIT 무한). 확정 설계: **부모(pre-signed·zero-fee) 불변 → 항상 자식만 교체**, fee = max(다음블록 rate × 패키지 vB, RBF floor[옛fee + incrementalRelay×새vB]), **confirmed-only fuel + stuck 자식 prevout 회수**(TRUC unconfirmed-부모-1개 제한 + 교체대상 output 지출 방지), 에러 표면화(bumpP2A는 삼킴). sweep도 동일 RBF. UI: 멤풀 스텝에 `패키지 rate vs 다음블록 + N블록 대기` 표시, **버튼 활성 = rate 미달일 때만**(대기시간은 참고), **fee picker 없음**(다음블록 프리셋 1개), **auto-boost 없음**(운영자 발동만). 미드릴: 실bitcoind RBF 수락 e2e는 regtest 후속.
 - **유저 지정 esplora / 자가 mempool 인스턴스**: #06의 Config 필드 + `data/config.json` override로 코드는 사실상 완료. 남는 것 = 문서화 + settings 페이지 UI. (운영자 확인: "인스턴스 띄우는 게 일이지 코드는 간단" — 나중.)
 - **mainnet 소액 드릴**: #15 통과 후 결정 (CPFP 비용 실화폐).
 - **boarding UTXO CSV reclaim**: exit 탭 자연 확장 (boarding 스크립트의 CSV timeout 경로 — RECEIVE_DESIGN 참조).
