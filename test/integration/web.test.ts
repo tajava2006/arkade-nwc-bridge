@@ -61,6 +61,7 @@ const STUB_PROOF_SYNC: ProofSyncService = {
       lastSyncedAt: null,
       soonestExpiresAt: null,
     },
+    claim: null,
     lastRun: null,
     running: false,
   }),

@@ -127,4 +127,33 @@ describe('proof sync service (scheduler)', () => {
     await sleep(30)
     expect(d.listCalls()).toBe(0)
   })
+
+  test('claim records the last successful listVtxos and survives an outage', async () => {
+    const d = deps(new Map([[ark.txid, ark.psbtB64]]))
+    let aspDown = false
+    svc = startProofSync({
+      db: temp.db,
+      indexer: d.indexer,
+      listVtxos: async () => {
+        if (aspDown) throw new Error('asp unreachable')
+        return d.listVtxos()
+      },
+      timing: TIMING,
+    })
+
+    expect(svc.snapshot().claim).toBeNull() // no pass yet — nothing claimed
+
+    svc.trigger('boot')
+    await sleep(20)
+    expect(svc.snapshot().claim?.total).toBe(1)
+
+    // a pass that dies inside listVtxos records a failed run, but must not
+    // rewrite the claim — an outage is not the server claiming zero vtxos
+    aspDown = true
+    svc.trigger('outage')
+    await sleep(20)
+    const snap = svc.snapshot()
+    expect(snap.lastRun?.failed[0]?.outpoint).toBe('*')
+    expect(snap.claim?.total).toBe(1)
+  })
 })

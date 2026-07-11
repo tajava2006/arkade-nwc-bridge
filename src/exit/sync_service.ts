@@ -19,6 +19,13 @@ import { vaultStats, type VaultStats } from './vault'
 
 export interface ProofSyncSnapshot {
   stats: VaultStats
+  /**
+   * What the ASP itself credited on the most recent pass whose listVtxos
+   * succeeded — the "server says you own N" side of the dashboard's
+   * claim-vs-proof comparison. Kept separately from lastRun because a
+   * failed pass records total: 0, which is an outage, not a claim of zero.
+   */
+  claim: { total: number; at: number } | null
   lastRun: (ProofSyncResult & { at: number; reason: string }) | null
   running: boolean
 }
@@ -58,11 +65,13 @@ export function startProofSync(deps: {
   let pendingReason: string | null = null
   let retryCount = 0
   let lastRun: ProofSyncSnapshot['lastRun'] = null
+  let claim: ProofSyncSnapshot['claim'] = null
   let debounceTimer: ReturnType<typeof setTimeout> | undefined
   let retryTimer: ReturnType<typeof setTimeout> | undefined
 
   const snapshot = (): ProofSyncSnapshot => ({
     stats: vaultStats(deps.db),
+    claim,
     lastRun,
     running,
   })
@@ -82,6 +91,7 @@ export function startProofSync(deps: {
     notify() // dashboards show "syncing…" while a pass is in flight
     try {
       const vtxos = await deps.listVtxos()
+      claim = { total: vtxos.length, at: Math.floor(Date.now() / 1000) }
       const result = await syncProofs(deps.db, deps.indexer, vtxos)
       lastRun = { ...result, at: Math.floor(Date.now() / 1000), reason }
       if (result.failed.length > 0) {

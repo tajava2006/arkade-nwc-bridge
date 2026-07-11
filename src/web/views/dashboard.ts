@@ -23,24 +23,34 @@ export function renderBalanceFragment(balance: WalletBalance | null): RawHtml {
 }
 
 /**
- * Exit-readiness tile: could every current vtxo be unilaterally exited
- * offline RIGHT NOW from the local vault? "N/M exit-ready" is the headline;
- * the sub-line carries freshness + proof size, and sync gaps show loudly —
- * a stale vault silently narrows what survives the ASP dying (EXIT_PLAN §6
- * "증명 신선도 = 탈출 가능성"), so this is a first-class dashboard citizen.
+ * Exit-readiness tile: claim vs proof. Headline is "proven/claimed" where
+ * *claimed* is the vtxo count the ASP itself credited on the last successful
+ * listVtxos and *proven* is how many vtxos are fully exitable from the local
+ * vault right now. The denominator is deliberately NOT the vault's row count:
+ * a vtxo the server credits but whose chain never made it into the vault
+ * would drop out of a vault-based denominator entirely — "3/3" green while
+ * the ASP says you own 4. proven < claimed means the difference exists only
+ * on the server's word, so it shows as a loud warning, not a muted sync note
+ * (EXIT_PLAN §6 "증명 신선도 = 탈출 가능성").
  */
 export function renderExitReadinessFragment(snap: ProofSyncSnapshot | null): RawHtml {
   if (!snap) {
     return html`<span class="muted">Loading…</span>`
   }
-  const { stats, lastRun, running } = snap
-  if (stats.vtxoCount === 0 && !lastRun && !running) {
+  const { stats, claim, lastRun, running } = snap
+  if (!claim && !lastRun && !running) {
     return html`<span class="muted">first sync pending</span>`
   }
+  const proven = stats.readyCount
+  // claim === null past this point means every pass so far died inside
+  // listVtxos — the ASP has never told us what it credits, so there is
+  // nothing to compare against. Don't render that as green.
   const headline =
-    stats.readyCount === stats.vtxoCount
-      ? html`<span class="ok">${stats.readyCount}/${stats.vtxoCount}</span>`
-      : html`<span class="bad">${stats.readyCount}/${stats.vtxoCount}</span>`
+    claim === null
+      ? html`<span class="bad">${proven}/?</span>`
+      : proven < claim.total
+        ? html`<span class="bad">${proven}/${claim.total}</span>`
+        : html`<span class="ok">${proven}/${claim.total}</span>`
   const agoSec = lastRun ? Math.max(0, Math.floor(Date.now() / 1000) - lastRun.at) : null
   const freshness = running
     ? 'syncing…'
@@ -49,15 +59,24 @@ export function renderExitReadinessFragment(snap: ProofSyncSnapshot | null): Raw
       : agoSec < 90
         ? `synced ${agoSec}s ago`
         : `synced ${Math.floor(agoSec / 60)}m ago`
+  const shortfall =
+    claim === null
+      ? html`<div class="bad">ASP claim unknown — vtxo listing has never succeeded</div>`
+      : proven < claim.total
+        ? html`<div class="bad">
+            ⚠ ASP credits ${claim.total} vtxo(s) but exit proofs cover only ${proven} — the
+            other ${claim.total - proven} exist only on the server's word
+          </div>`
+        : html``
   const gaps =
     lastRun && lastRun.failed.length > 0
       ? html`<div class="bad">${lastRun.failed.length} sync gap(s) — retrying</div>`
       : html``
   return html`${headline}
     <div class="muted" style="font-size:0.55em; font-weight: normal;">
-      ${freshness} · proofs ${(stats.proofBytes / 1024).toFixed(0)} KB
+      proven / ASP-claimed · ${freshness} · proofs ${(stats.proofBytes / 1024).toFixed(0)} KB
     </div>
-    ${gaps}`
+    ${shortfall} ${gaps}`
 }
 
 /**
@@ -84,7 +103,6 @@ export function dashboardView(args: {
   noffer: string
   offerRelay: RelayStatus
   activeConnections: number
-  totalTxCount: number
 }): RawHtml {
   const relay = args.offerRelay
   const relayBadge = relay.connected
@@ -106,10 +124,6 @@ export function dashboardView(args: {
       <div class="stat">
         <div class="stat-label">Active connections</div>
         <div class="stat-value">${args.activeConnections}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Transactions</div>
-        <div class="stat-value">${args.totalTxCount}</div>
       </div>
 
       <h2>Receive — three ways to deposit</h2>
