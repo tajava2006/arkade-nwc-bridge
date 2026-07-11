@@ -280,11 +280,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const { value: balance } = r.ready.caches.balance.snapshot()
           void r.ready.caches.balance.refresh()
           const { active } = listAllConnections(db)
-          const txCountRow = db
-            .query<{ c: number }, []>(
-              `SELECT COUNT(*) AS c FROM transactions WHERE state = 'settled'`,
-            )
-            .get()
           return htmlResponse(
             dashboardView({
               balance,
@@ -295,7 +290,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               noffer: r.ready.offers.snapshot().noffer,
               offerRelay: r.ready.offers.getRelayStatus(),
               activeConnections: active.length,
-              totalTxCount: txCountRow?.c ?? 0,
             }),
           )
         },
