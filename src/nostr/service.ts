@@ -42,6 +42,14 @@ export interface NostrServiceDeps {
    * stays consistent across the outbox panel and connection rows.
    */
   pool: SimplePool
+  /**
+   * Fires on every authenticated, decryptable request — the only
+   * observable proof the client holds the URI secret (NIP-47 has no
+   * handshake; the client's info-event fetch is a relay read the bridge
+   * never sees). The new-connection page waits on this to flip from
+   * "waiting" to "connected".
+   */
+  onClientRequest?: (conn: Connection) => void
 }
 
 export interface NostrService {
@@ -268,6 +276,7 @@ async function handleEvent(
 
   const method = request.method
   console.log(`nostr: conn #${conn.id} → ${method}`)
+  deps.onClientRequest?.(conn)
 
   try {
     const result = await dispatch(deps, conn, event, method, request.params)

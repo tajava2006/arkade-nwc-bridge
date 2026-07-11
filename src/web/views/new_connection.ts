@@ -57,10 +57,34 @@ export function newConnectionResultView(args: {
 
       <h2>NWC URI</h2>
       <p class="muted">Paste this into your nostr client. The client secret is embedded in the URI and is <strong>not</strong> stored on this server — save it now, or re-issue a new connection later.</p>
-      <pre>${args.uri}</pre>
+      <div class="uri-row">
+        <pre data-nwc-uri>${args.uri}</pre>
+        <button type="button" data-copy-uri>Copy</button>
+      </div>
+
+      <p data-connection-wait="${args.connectionId}">
+        <span class="spinner"></span> Waiting for the client's first request…
+      </p>
 
       <h2>QR</h2>
       <div class="qr-box">${raw(args.qrSvg)}</div>
+
+      <script>
+        (function () {
+          var btn = document.querySelector('[data-copy-uri]')
+          var pre = document.querySelector('[data-nwc-uri]')
+          if (!btn || !pre) return
+          btn.addEventListener('click', function () {
+            navigator.clipboard.writeText(pre.textContent).then(
+              function () {
+                btn.textContent = 'Copied ✓'
+                setTimeout(function () { btn.textContent = 'Copy' }, 1500)
+              },
+              function () { btn.textContent = 'Copy failed' },
+            )
+          })
+        })()
+      </script>
     `,
   })
 }

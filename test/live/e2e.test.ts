@@ -157,6 +157,10 @@ async function nwcRequest(
 }
 
 let harness: Harness | undefined
+// Connection ids reported by onClientRequest — the "client connected"
+// signal the new-connection page waits on. Every authenticated round-trip
+// below should land here.
+const seenConnectionIds: number[] = []
 
 describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
   beforeAll(async () => {
@@ -168,7 +172,14 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
     const { wallet } = await initArkWallet(cfg, privateKey)
     const { swaps } = await initBoltz({ db, wallet, cfg })
     const sharedPool = new SimplePool({ enableReconnect: true })
-    const nostr = await startNostrService({ cfg, db, wallet, swaps, pool: sharedPool })
+    const nostr = await startNostrService({
+      cfg,
+      db,
+      wallet,
+      swaps,
+      pool: sharedPool,
+      onClientRequest: (conn) => seenConnectionIds.push(conn.id),
+    })
     const testRelays = [...NWC_RELAYS_FALLBACK]
 
     // Mint a temporary connection. revoke happens in afterAll regardless.
@@ -232,6 +243,7 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
       const result = r.result as { network: string; methods: string[] }
       expect(result.network).toBe('mainnet')
       expect(result.methods).toContain('pay_invoice')
+      expect(seenConnectionIds).toContain(harness!.connectionId)
     },
     TIMEOUT_MS,
   )
