@@ -112,11 +112,12 @@ boot**:
 }
 ```
 
-Any field of `Config` (`network`, `arkServerUrl`, `httpBind`,
-`httpPort`, `dbPath`) can be overridden; missing fields fall through
-to the static defaults in [`src/defaults.ts`](src/defaults.ts). The
-file is read once at boot. Outside of docker the file simply isn't
-there and the bridge stays zero-config.
+Any field of `Config` (`network`, `arkServerUrl`, `boltzApiUrl`,
+`esploraUrls`, `httpBind`, `httpPort`, `dbPath`) can be overridden;
+missing fields fall through to the static defaults in
+[`src/defaults.ts`](src/defaults.ts). The file is read once at boot.
+Outside of docker the file simply isn't there and the bridge stays
+zero-config.
 
 ## Connecting a nostr client
 
@@ -178,15 +179,33 @@ there's no vHTLC to hang the swap on at those amounts — an acceptable
 trade for tiny sums. Mechanics in [`SEND_DESIGN.md`](SEND_DESIGN.md) and
 [`RECEIVE_DESIGN.md`](RECEIVE_DESIGN.md).
 
+### Unilateral exit (works with the Ark server dead)
+
+The bridge continuously mirrors every VTXO's pre-signed exit proofs
+into its own sqlite (the *vault*). If the Ark server disappears — or
+turns hostile — the bridge still boots (**degraded mode**) and the
+`/exit` tab walks each VTXO back to the Bitcoin base layer: broadcast
+the pre-signed chain as zero-fee 1P1C packages CPFP-paid from an
+onchain fuel address (same nsec, no extra backup), wait out the CSV
+timelock, sweep to a plain address you alone control. A stuck package
+(mempool spike mid-exit) gets a one-button **fee boost** — the CPFP
+child is replaced via RBF at the next-block rate. This is what makes
+the wallet genuinely self-custodial: with Ark, seed alone ≠ recovery —
+you also need the proofs, and the vault keeps them.
+Design in [`EXIT_DESIGN.md`](EXIT_DESIGN.md); a fully automated
+regtest drill (`regtest-e2e/`) proves the whole path end-to-end.
+
 The web UI surfaces these views:
 
 | Page | What's there |
 |---|---|
 | `/setup` | First-run identity flow (paste or generate nsec). Shown automatically until an account exists; redirects to `/` once configured. |
-| `/` | Balance, the three receive handles (Ark address, CLINK noffer with live relay status, onchain boarding address), active-connection count, settled-transaction count. Balance refreshes in place over SSE — first visit may briefly show the last cached value before the live one lands. |
+| `/` | Balance, exit readiness (proven vs ASP-claimed VTXOs), the three receive handles (Ark address, CLINK noffer with live relay status, onchain boarding address), active-connection count. Balance refreshes in place over SSE — first visit may briefly show the last cached value before the live one lands. In degraded mode this becomes a red status page with vault readiness + the exit-fuel address. |
+| `/send` | Bridge-native send of the operator's own funds — Ark / Lightning / onchain (cooperative offboard), rail auto-detected from the pasted destination, plus a consolidate-all refresh. |
+| `/exit` | One row per vaulted VTXO: expiry countdown, measured exit cost at the current fee rate, economic verdict. Per-VTXO detail page draws the pre-signed chain as a DAG with live onchain status, runs the exit, shows the CSV countdown, sweeps — and offers the fee boost when a step sits underpriced in the mempool. Works identically in degraded mode. |
 | `/connections` | Active and revoked connections; create / revoke from here. Top panel shows the bootstrap relays and the current outbox set (what new connections will use); each connection row has a live `N/M ●` relay badge that updates in place as relays come and go. |
 | `/connections/:id` | Per-connection NWC log (every `pay_invoice` made through that connection) plus a per-relay status table for that connection's baked-in relay set. |
-| `/history` | Raw Ark wallet history — every onchain/offchain movement the wallet sees, regardless of NWC. Same stale-while-revalidate behavior as the dashboard. |
+| `/settings` | Nostr identity (npub) + nsec backup flow. |
 
 The pages are still server-rendered HTML; the live updates come
 through a single SSE stream at `/events` that swaps `innerHTML` on

@@ -184,10 +184,12 @@ as offchain-unspendable on the bridge too.**
 ## 6. Bridge integration notes
 
 - A bridge-native send is a **wallet-side** action with **no `connection_id`** —
-  it doesn't touch the per-connection NWC budget accounting. It shows up in the
-  `/history` tab (wired to `wallet.getTransactionHistory()`), not in the
-  connection-scoped NWC `transactions` table. Keep it that way; don't fabricate a
-  connection row.
+  it doesn't touch the per-connection NWC budget accounting and never lands in
+  the connection-scoped NWC `transactions` table. Keep it that way; don't
+  fabricate a connection row. (There is no ark-side web history view anymore —
+  the old `/history` tab was removed because `wallet.getTransactionHistory()`
+  is a full recompute per call with no pagination; offboards get their own
+  tracked list on `/send`, and LN sends show a one-shot result page.)
 - Mainnet, alpha SDKs: confirm-before-send, surface the detected rail + fee, and
   treat offboard/LN as long-running (reuse the SSE pattern for result state).
 

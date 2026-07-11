@@ -46,9 +46,11 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 ```
 ┌──────────────────────────────────────────────────────┐
 │  Operator Web UI  (Bun.serve, server-rendered HTML)  │
-│  /, /connections (list/new/:id/revoke), /history     │
+│  /, /send, /exit(/:txid/:vout),                      │
+│  /connections (list/new/:id/revoke), /settings       │
 │  /events: SSE feed for outbox / connection / balance │
-│          / history fragments (no client framework)   │
+│  / exit-op / offboards / mode-change fragments       │
+│  (no client framework)                               │
 ├──────────────────────────────────────────────────────┤
 │  Outbox Watcher  (NIP-65 kind 10002)                 │
 │  Bootstrap relays → discovery pubkey's relay list →  │
