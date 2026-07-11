@@ -4,6 +4,7 @@
 // SDK upgrade changes one of the methods we *do* use, the cast surfaces the
 // drift at the call site rather than silently swallowing it.
 
+import { bech32 } from '@scure/base'
 import type {
   Wallet,
   WalletBalance,
@@ -46,6 +47,8 @@ export interface WalletStubOptions {
   address?: string
   history?: ArkTransaction[]
   vtxos?: ExtendedVirtualCoin[]
+  /** override send() — capture funding args or fail the path on purpose */
+  sendImpl?: (args: { address: string; amount: number }) => Promise<string>
 }
 
 export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
@@ -62,8 +65,8 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
     async getVtxos() {
       return opts.vtxos ?? []
     },
-    async send() {
-      return 'arktxid-stub'
+    async send(args: { address: string; amount: number }) {
+      return opts.sendImpl ? opts.sendImpl(args) : 'arktxid-stub'
     },
     async sendBitcoin() {
       return 'arktxid-stub'
@@ -202,4 +205,17 @@ export function fakeInvoiceResponse(
  */
 export const INVOICE_2000_SAT =
   'lnbc20u1p3y0x3hpp5743k2g0fsqqxj7n8qzuhns5gmkk4djeejk3wkp64ppevgekvc0jsdqcve5kzar2v9nr5gpqd4hkuetesp5ez2g297jduwc20t6lmqlsg3man0vf2jfd8ar9fh8fhn2g8yttfkqxqy9gcqcqzys9qrsgqrzjqtx3k77yrrav9hye7zar2rtqlfkytl094dsp0ms5majzth6gt7ca6uhdkxl983uywgqqqqlgqqqvx5qqjqrzjqd98kxkpyw0l9tyy8r8q57k7zpy9zjmh6sez752wj6gcumqnj3yxzhdsmg6qq56utgqqqqqqqqqqqeqqjq7jd56882gtxhrjm03c93aacyfy306m4fq0tskf83c0nmet8zc2lxyyg3saz8x6vwcp26xnrlagf9semau3qm2glysp7sv95693fphvsp54l567'
+
+/**
+ * Amount variants of INVOICE_2000_SAT: same data part, re-checksummed under a
+ * different HRP. The embedded signature no longer matches, but
+ * light-bolt11-decoder never verifies it — these exist purely so amount-based
+ * branch selection (ln_send's sub-dust cutoff) can be driven with realistic
+ * bolt11 strings. 210n = 21 sats; no amount decodes as 0.
+ */
+const reAmount = (hrp: string): string =>
+  bech32.encode(hrp, bech32.decode(INVOICE_2000_SAT as never, false).words, false)
+export const INVOICE_21_SAT = reAmount('lnbc210n')
+export const INVOICE_328_SAT = reAmount('lnbc3280n')
+export const INVOICE_NO_AMOUNT = reAmount('lnbc')
 

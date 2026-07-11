@@ -12,7 +12,12 @@ import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
 import type { ProofSyncService } from '../../src/exit/sync_service'
 import type { ExitEngine } from '../../src/exit/engine'
-import { storeVtxoWithProofs } from '../../src/exit/vault'
+import {
+  getProofPsbts,
+  getVaultVtxo,
+  quarantineVtxo,
+  storeVtxoWithProofs,
+} from '../../src/exit/vault'
 import { ChainTxType } from '@arkade-os/sdk'
 import {
   emptyBalance,
@@ -650,5 +655,92 @@ describe('web server — exit step endpoint', () => {
     // commitment entries are metadata, not probeable steps
     const res2 = await fetch(`${base}/exit/${TXID}/0/step/${'c'.repeat(64)}`)
     expect(res2.status).toBe(404)
+  })
+})
+
+describe('web server — exit forget', () => {
+  const TXID = 'd'.repeat(64)
+  let temp: TempDb
+  let web: WebServer
+  let base: string
+
+  const seedRow = (): void => {
+    storeVtxoWithProofs(
+      temp.db,
+      {
+        txid: TXID,
+        vout: 0,
+        valueSat: 1000,
+        script: '5120' + 'ab'.repeat(32),
+        tapTree: 'c0de',
+        status: 'preconfirmed',
+        expiresAt: null,
+        chain: [
+          { txid: TXID, type: ChainTxType.ARK, expiresAt: '', spends: ['c'.repeat(64)] },
+          { txid: 'c'.repeat(64), type: ChainTxType.COMMITMENT, expiresAt: '', spends: [] },
+        ],
+      },
+      [{ txid: TXID, type: ChainTxType.ARK, psbtB64: 'psbt' }],
+    )
+  }
+
+  beforeAll(() => {
+    temp = openTempDb()
+    seedRow()
+    const state: AppStateRef = {
+      current: {
+        mode: 'degraded',
+        error: 'getInfo: ConnectionRefused',
+        since: Math.floor(Date.now() / 1000) - 120,
+        attempts: 3,
+        onchainAddress: 'bc1pstubfunding',
+        exitEngine: STUB_EXIT_ENGINE,
+      },
+    }
+    web = startWebServer({
+      cfg: CFG,
+      db: temp.db,
+      state,
+      sseHub: new SseHub(),
+      outbox: STUB_OUTBOX,
+      bootReady: async () => {},
+    })
+    base = web.url
+  })
+
+  afterAll(async () => {
+    await web.stop()
+    temp.cleanup()
+  })
+
+  test('404 when the vtxo is not in the vault', async () => {
+    const res = await fetch(`${base}/exit/${'e'.repeat(64)}/0/forget`, {
+      method: 'POST',
+      redirect: 'manual',
+    })
+    expect(res.status).toBe(404)
+  })
+
+  test('409 on a live (non-quarantined) row — a misclick must not shred proofs', async () => {
+    const res = await fetch(`${base}/exit/${TXID}/0/forget`, {
+      method: 'POST',
+      redirect: 'manual',
+    })
+    expect(res.status).toBe(409)
+    expect(getVaultVtxo(temp.db, TXID, 0)).not.toBeNull()
+    expect(getProofPsbts(temp.db, [TXID]).size).toBe(1)
+  })
+
+  test('quarantined row: deletes it and its orphaned proofs, bounces to /exit', async () => {
+    quarantineVtxo(temp.db, TXID, 0, 'test quarantine')
+    const res = await fetch(`${base}/exit/${TXID}/0/forget`, {
+      method: 'POST',
+      redirect: 'manual',
+    })
+    expect(res.status).toBe(303)
+    expect(res.headers.get('location')).toContain('/exit')
+    expect(getVaultVtxo(temp.db, TXID, 0)).toBeNull()
+    expect(getProofPsbts(temp.db, [TXID]).size).toBe(0)
+    seedRow() // restore for any later test in this block
   })
 })
