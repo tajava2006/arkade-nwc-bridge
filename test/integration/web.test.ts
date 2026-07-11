@@ -56,6 +56,8 @@ const STUB_PROOF_SYNC: ProofSyncService = {
     stats: {
       vtxoCount: 0,
       readyCount: 0,
+      quarantinedCount: 0,
+      expiredCount: 0,
       proofTxCount: 0,
       proofBytes: 0,
       lastSyncedAt: null,

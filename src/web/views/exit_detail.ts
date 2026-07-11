@@ -300,6 +300,8 @@ export function exitDetailView(args: {
   estimate: ExitEstimate | null
   funding: FundingStatus
   degraded: boolean
+  /** set when ProofSync flagged this vtxo (ASP dropped it; see expired for which story) */
+  quarantine?: { at: number; reason: string | null; expired: boolean } | null
 }): RawHtml {
   const s = args.stepper
   return layout({
@@ -309,6 +311,29 @@ export function exitDetailView(args: {
       <p><a href="/exit">← all vtxos</a></p>
       ${args.degraded
         ? html`<p class="bad">Degraded mode — computed from the local vault and esplora only.</p>`
+        : html``}
+      ${args.quarantine
+        ? html`<p class="bad">
+              ${args.quarantine.expired
+                ? html`This vtxo's batch expired before a refresh, and the server has
+                    dropped it — it isn't reviving it, and past expiry the pre-signed
+                    proofs below are dead paper. The lapse is on this wallet's side
+                    (no login before the deadline), even if the server could have been
+                    more forgiving. Nothing was deleted without telling you — that's
+                    this notice. When you've made peace with it, clean up:`
+                : html`⚠ QUARANTINED since ${new Date(args.quarantine.at * 1000).toISOString().slice(0, 16).replace('T', ' ')}
+                    — ${args.quarantine.reason ?? 'the ASP dropped this vtxo without evidence'}.
+                    The proofs below stay usable until expiry; exiting is the recourse if the
+                    server is cheating. If YOU know why it's gone (e.g. spent from another
+                    wallet this bridge can't verify), you can drop the row instead:`}
+            </p>
+            <form
+              method="post"
+              action="/exit/${s.txid}/${s.vout}/forget"
+              onsubmit="return confirm('Forget this vtxo? Its exit proofs are deleted — unilateral exit becomes impossible. Only do this if you can explain the disappearance yourself.');"
+            >
+              <button type="submit">Forget this vtxo (delete proofs)</button>
+            </form>`
         : html``}
       <p><strong>${s.valueSat.toLocaleString()} sats</strong> · <code>${s.txid}:${s.vout}</code></p>
       <div data-exit-stepper="${s.txid}:${s.vout}">${renderStepperFragment(s)}</div>

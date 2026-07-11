@@ -226,7 +226,7 @@ async function main(): Promise<void> {
     const undo: Array<() => Promise<unknown> | unknown> = []
     try {
 
-      const { wallet, address } = await initArkWallet(cfg, privateKey)
+      const { identity, wallet, address } = await initArkWallet(cfg, privateKey)
       console.log(`  ark address    ${address}`)
       undo.push(() => wallet.dispose())
 
@@ -339,6 +339,9 @@ async function main(): Promise<void> {
         db,
         indexer: wallet.indexerProvider,
         listVtxos: () => wallet.getVtxos({ withRecoverable: true }),
+        // evidence-gated GC verifies spend signatures against OUR key before
+        // believing a disappearance (src/exit/evidence.ts)
+        xOnlyPubkey: await identity.xOnlyPublicKey(),
         log: (msg) => console.log(msg),
       })
       proofSync = proofSyncSvc

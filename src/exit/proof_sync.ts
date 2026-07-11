@@ -1,13 +1,25 @@
 import type { Database } from 'bun:sqlite'
 import { base64, hex } from '@scure/base'
-import { Transaction, type ChainTx, type ExtendedVirtualCoin, type Outpoint } from '@arkade-os/sdk'
 import {
-  gcVault,
+  Transaction,
+  type ChainTx,
+  type ExtendedVirtualCoin,
+  type Outpoint,
+  type VirtualCoin,
+} from '@arkade-os/sdk'
+import { classifyDisappearance } from './evidence'
+import { getExitOp } from './ops'
+import {
+  clearQuarantine,
+  gcOrphanProofs,
   missingProofTxids,
   getVaultVtxo,
+  listVaultVtxos,
+  quarantineVtxo,
+  removeVtxo,
   storeVtxoWithProofs,
   type VaultProofTx,
-  type VaultVtxo,
+  type VaultVtxoSnapshot,
 } from './vault'
 
 // ProofSync = the normal-mode half of unilateral exit (EXIT_PLAN §3): while
@@ -15,7 +27,16 @@ import {
 // so the exit engine never needs the ASP again. One call = one full pass:
 //   diff live vtxos against the vault → fetch chains (paged) for the rest →
 //   fetch only the PSBTs the vault doesn't hold (paged, batched) → store
-//   atomically per vtxo → GC rows the live set no longer references.
+//   atomically per vtxo → evidence-gated GC over rows the live set dropped.
+//
+// GC never takes the server's word — and never deletes silently. A dropped
+// row is deleted only on verifiable evidence (our own signature on the
+// spending tx, or our own completed exit op); a locally-judged expiry is
+// flagged for review instead (the lapse is the user's, but funds don't get
+// to vanish without a word); anything else is quarantined with proofs
+// intact, so the pre-signed exit chain survives exactly the scenario where
+// the server starts lying. Quarantine self-heals in both directions: a
+// re-listed vtxo is released, late evidence deletes.
 //
 // Deliberately single-pass with per-vtxo error isolation and NO internal
 // retry/backoff — scheduling is the caller's job (#05 wires triggers +
@@ -23,7 +44,7 @@ import {
 // created, so a vault row that is proof-complete is skipped with zero
 // network traffic; only its status/expiry snapshot is refreshed if drifted.
 
-/** The two indexer reads ProofSync needs — structural subset of IndexerProvider, trivially fakeable. */
+/** The three indexer reads ProofSync needs — structural subset of IndexerProvider, trivially fakeable. */
 export interface ProofSyncIndexer {
   getVtxoChain(
     outpoint: Outpoint,
@@ -33,6 +54,8 @@ export interface ProofSyncIndexer {
     txids: string[],
     opts?: { pageIndex?: number; pageSize?: number },
   ): Promise<{ txs: string[]; page?: { current: number; next: number; total: number } }>
+  /** outpoint-keyed lookup — evidence.ts asks the server to explain a disappearance */
+  getVtxos(opts: { outpoints: Outpoint[] }): Promise<{ vtxos: VirtualCoin[] }>
 }
 
 export interface ProofSyncResult {
@@ -43,7 +66,21 @@ export interface ProofSyncResult {
   skipped: number
   /** per-vtxo isolation: one bad fetch never blocks the rest */
   failed: { outpoint: string; error: string }[]
-  gc: { removedVtxos: number; removedProofTxs: number }
+  gc: {
+    /** rows deleted WITH evidence (verified spend / our own completed exit) */
+    removedVtxos: number
+    removedProofTxs: number
+    /** outpoints NEWLY flagged as unexplained — quarantined, proofs kept */
+    quarantined: string[]
+    /**
+     * outpoints NEWLY flagged as expired-unrefreshed — the server dropped
+     * them after their window lapsed. Kept (never silently deleted) for the
+     * user to review and forget; nothing is exitable about them anymore.
+     */
+    expired: string[]
+    /** previously quarantined outpoints released (re-listed by the server) */
+    released: string[]
+  }
 }
 
 // PageResponse's last-page sentinel is undocumented; "next doesn't advance"
@@ -101,7 +138,7 @@ function expirySec(v: ExtendedVirtualCoin): number | null {
   return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
 }
 
-function toSnapshot(v: ExtendedVirtualCoin, chain: ChainTx[]): Omit<VaultVtxo, 'syncedAt'> {
+function toSnapshot(v: ExtendedVirtualCoin, chain: ChainTx[]): VaultVtxoSnapshot {
   return {
     txid: v.txid,
     vout: v.vout,
@@ -118,13 +155,16 @@ export async function syncProofs(
   db: Database,
   indexer: ProofSyncIndexer,
   vtxos: ExtendedVirtualCoin[],
+  /** our x-only pubkey — the key evidence.ts verifies spend signatures against */
+  xOnlyPubkey: Uint8Array,
+  nowSec: number = Math.floor(Date.now() / 1000),
 ): Promise<ProofSyncResult> {
   const result: ProofSyncResult = {
     total: vtxos.length,
     synced: [],
     skipped: 0,
     failed: [],
-    gc: { removedVtxos: 0, removedProofTxs: 0 },
+    gc: { removedVtxos: 0, removedProofTxs: 0, quarantined: [], expired: [], released: [] },
   }
 
   for (const v of vtxos) {
@@ -182,9 +222,66 @@ export async function syncProofs(
     }
   }
 
-  result.gc = gcVault(
-    db,
-    vtxos.map((v) => ({ txid: v.txid, vout: v.vout })),
-  )
+  // ── evidence-gated GC ──
+  const live = new Set(vtxos.map(outpointKey))
+  for (const row of listVaultVtxos(db)) {
+    const key = outpointKey(row)
+    if (live.has(key)) {
+      // the server (re-)acknowledges it — a quarantined row is exonerated
+      if (row.quarantinedAt !== null && clearQuarantine(db, row.txid, row.vout)) {
+        result.gc.released.push(key)
+      }
+      continue
+    }
+    // Our own exit engine explains (or still needs) some disappearances
+    // before the server is even asked. An unrolled vtxo leaves the live
+    // list while the exit is still in flight — sweep reads the vault row,
+    // so GC must not touch it (under the old unconditional GC this could
+    // strand a ready-mode exit). And a completed exit (state 'swept',
+    // sweep broadcast by US) is its own evidence — without this check
+    // every successful exit would end in a false betrayal alarm.
+    const op = getExitOp(db, row.txid, row.vout)
+    if (op && op.state !== 'failed') {
+      if (op.state === 'swept') {
+        if (removeVtxo(db, row.txid, row.vout)) result.gc.removedVtxos++
+      }
+      // unrolling / waiting / sweepable: exit in flight — keep silently
+      continue
+    }
+    try {
+      const verdict = await classifyDisappearance(indexer, row, xOnlyPubkey, nowSec)
+      if (verdict.kind === 'spent-verified') {
+        // our own signature on the spend — evidence in hand, safe to forget
+        if (removeVtxo(db, row.txid, row.vout)) result.gc.removedVtxos++
+      } else if (verdict.kind === 'expired') {
+        // The lapse is the user's, the drop is legitimate — but funds must
+        // not vanish without a word. Flag it with the story; the user
+        // reviews and forgets it from /exit (never auto-deleted).
+        if (
+          quarantineVtxo(
+            db,
+            row.txid,
+            row.vout,
+            'batch expired before a refresh and the server dropped it — nothing left to exit; review and forget',
+          )
+        ) {
+          result.gc.expired.push(key)
+        }
+      } else {
+        if (quarantineVtxo(db, row.txid, row.vout, verdict.reason)) {
+          result.gc.quarantined.push(key)
+        }
+      }
+    } catch (err) {
+      // indeterminate (network mid-pass): keep the row un-flagged, let the
+      // retry/poll re-ask — quarantining on our own connectivity would cry
+      // wolf every outage
+      result.failed.push({
+        outpoint: key,
+        error: `evidence check failed: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    }
+  }
+  result.gc.removedProofTxs = gcOrphanProofs(db)
   return result
 }

@@ -7,7 +7,7 @@ import {
   Transaction,
   type ChainTx,
 } from '@arkade-os/sdk'
-import type { VaultProofTx, VaultVtxo } from '../../src/exit/vault'
+import type { VaultProofTx, VaultVtxoSnapshot } from '../../src/exit/vault'
 
 export const ANCHOR_SCRIPT_HEX = '51024e73' // zero-value P2A, same bytes arkd emits
 
@@ -28,7 +28,7 @@ export interface SignedExitFixture {
   parentTxid: string
   chain: ChainTx[]
   proofs: VaultProofTx[]
-  vtxo: Omit<VaultVtxo, 'syncedAt'>
+  vtxo: VaultVtxoSnapshot
 }
 
 // Exit-path timelock baked into fixture tapTrees — short so CSV tests can

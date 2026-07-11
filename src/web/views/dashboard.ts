@@ -72,11 +72,30 @@ export function renderExitReadinessFragment(snap: ProofSyncSnapshot | null): Raw
     lastRun && lastRun.failed.length > 0
       ? html`<div class="bad">${lastRun.failed.length} sync gap(s) — retrying</div>`
       : html``
+  // Quarantine outranks everything above: the ASP dropped vtxo(s) it cannot
+  // justify. Their pre-signed exit chains are retained — point at /exit.
+  const quarantine =
+    stats.quarantinedCount > 0
+      ? html`<div class="bad">
+          ⚠ ${stats.quarantinedCount} vtxo(s) QUARANTINED — the ASP dropped them without
+          evidence. Proofs kept; <a href="/exit">exit them before expiry</a>.
+        </div>`
+      : html``
+  // Different story, different tone: these lapsed before a refresh (user's
+  // side of the bargain) and the server dropped them. Nothing exitable —
+  // but nothing is allowed to just vanish either.
+  const expired =
+    stats.expiredCount > 0
+      ? html`<div class="bad">
+          ${stats.expiredCount} vtxo(s) expired unrefreshed and the ASP dropped them —
+          <a href="/exit">review &amp; forget</a>.
+        </div>`
+      : html``
   return html`${headline}
     <div class="muted" style="font-size:0.55em; font-weight: normal;">
       proven / ASP-claimed · ${freshness} · proofs ${(stats.proofBytes / 1024).toFixed(0)} KB
     </div>
-    ${shortfall} ${gaps}`
+    ${quarantine} ${expired} ${shortfall} ${gaps}`
 }
 
 /**

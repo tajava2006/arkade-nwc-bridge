@@ -14,6 +14,11 @@ import { ChainTxType, type ChainTx } from '@arkade-os/sdk'
 //     that haven't been fetched yet, so exit-readiness is always recomputed
 //     against exit_proof_txs (missingProofTxids / isVtxoExitReady) rather
 //     than trusted from the row's existence.
+//   - rows are only DELETED with evidence in hand (evidence.ts): a verified
+//     spend by our own key, a locally-judged expiry, or an operator forget.
+//     A row the server drops without evidence is quarantined instead —
+//     proofs retained, still exitable. The server's word alone must never
+//     be able to destroy the escape hatch it exists to escape.
 
 export interface VaultProofTx {
   txid: string
@@ -36,12 +41,34 @@ export interface VaultVtxo {
   /** ChainTx[] exactly as the indexer returned it — Unroll.Session input */
   chain: ChainTx[]
   syncedAt: number
+  /**
+   * Set when the ASP dropped this vtxo from the live set WITHOUT verifiable
+   * evidence (our signature on the spend, or a locally-judged expiry). The
+   * row and its proofs are retained — still exitable — until evidence shows
+   * up, the server re-lists it, or the operator forgets it. First-flagged
+   * time; survives re-quarantine across passes.
+   */
+  quarantinedAt: number | null
+  quarantineReason: string | null
 }
 
 export interface VaultStats {
+  /** live rows (quarantined excluded — they're no longer server-claimed) */
   vtxoCount: number
-  /** vtxos whose every non-commitment chain tx has a stored proof */
+  /** live vtxos whose every non-commitment chain tx has a stored proof */
   readyCount: number
+  /**
+   * flagged rows whose exit window is still open — the server dropped them
+   * without evidence and exiting them IS the recourse; shown loudly
+   */
+  quarantinedCount: number
+  /**
+   * flagged rows whose batch expiry has passed — nothing left to exit
+   * (regardless of why they were flagged: an unrefreshed lapse the server
+   * dropped, or a betrayal quarantine that aged past its window). Kept for
+   * the user to review and forget, never silently deleted.
+   */
+  expiredCount: number
   proofTxCount: number
   /** total stored PSBT size (base64 chars ≈ bytes on disk) */
   proofBytes: number
@@ -59,6 +86,8 @@ interface VtxoRow {
   expires_at: number | null
   chain_json: string
   synced_at: number
+  quarantined_at: number | null
+  quarantine_reason: string | null
 }
 
 // COMMITMENT txs are already onchain (that's what makes them commitments) so
@@ -82,19 +111,24 @@ function rowToVtxo(r: VtxoRow): VaultVtxo {
     expiresAt: r.expires_at,
     chain: JSON.parse(r.chain_json) as ChainTx[],
     syncedAt: r.synced_at,
+    quarantinedAt: r.quarantined_at,
+    quarantineReason: r.quarantine_reason,
   }
 }
+
+/** What ProofSync captures per pass — quarantine state is NOT part of it (GC owns that). */
+export type VaultVtxoSnapshot = Omit<VaultVtxo, 'syncedAt' | 'quarantinedAt' | 'quarantineReason'>
 
 /**
  * Atomically persist a vtxo snapshot together with (any of) its proofs.
  * Proofs may arrive across several calls; the vtxo row is fully replaced
- * each time, proof rows are insert-once.
+ * each time (quarantine columns untouched), proof rows are insert-once.
  */
 export function storeVtxoWithProofs(
   db: Database,
-  vtxo: Omit<VaultVtxo, 'syncedAt'>,
+  vtxo: VaultVtxoSnapshot,
   proofs: VaultProofTx[],
-): VaultVtxo {
+): void {
   const now = Math.floor(Date.now() / 1000)
   db.transaction(() => {
     const insertProof = db.query(
@@ -113,7 +147,15 @@ export function storeVtxoWithProofs(
          script = excluded.script,
          tap_tree = excluded.tap_tree,
          status = excluded.status,
-         expires_at = excluded.expires_at,
+         -- monotonic: an outpoint's batch never changes, so its expiry never
+         -- legitimately shrinks. A server that "shortens" the expiry while a
+         -- vtxo is live could otherwise fast-forward the evidence-gated GC's
+         -- 'expired' verdict and get proofs deleted on its word after all.
+         expires_at = CASE
+           WHEN excluded.expires_at IS NULL THEN exit_vtxos.expires_at
+           WHEN exit_vtxos.expires_at IS NULL THEN excluded.expires_at
+           ELSE MAX(exit_vtxos.expires_at, excluded.expires_at)
+         END,
          chain_json = excluded.chain_json,
          synced_at = excluded.synced_at`,
     ).run(
@@ -128,7 +170,6 @@ export function storeVtxoWithProofs(
       now,
     )
   })()
-  return { ...vtxo, syncedAt: now }
 }
 
 export function listVaultVtxos(db: Database): VaultVtxo[] {
@@ -177,46 +218,85 @@ export function isVtxoExitReady(db: Database, txid: string, vout: number): boole
 }
 
 /**
- * Drop vtxo rows that are no longer live (spent / swept / refreshed away),
- * then drop proofs no remaining chain references. Reference computation
- * happens in code — solo-wallet scale (a few vtxos × ~100 txs) doesn't
- * justify a normalized ref table.
+ * Delete one vtxo row. Only call with evidence in hand (verified spend,
+ * locally-judged expiry, or an explicit operator forget) — ProofSync's GC is
+ * the sole automated caller and it gates on classifyDisappearance.
  */
-export function gcVault(
-  db: Database,
-  liveOutpoints: { txid: string; vout: number }[],
-): { removedVtxos: number; removedProofTxs: number } {
-  const live = new Set(liveOutpoints.map((o) => `${o.txid}:${o.vout}`))
-  let removedVtxos = 0
-  let removedProofTxs = 0
+export function removeVtxo(db: Database, txid: string, vout: number): boolean {
+  const res = db.query(`DELETE FROM exit_vtxos WHERE txid = ? AND vout = ?`).run(txid, vout)
+  return res.changes > 0
+}
+
+/**
+ * Flag a row the server dropped without evidence (or that expired
+ * unrefreshed — same mechanics, different story in the reason). Keeps the
+ * FIRST quarantine time across repeated passes (the age is the signal —
+ * "unexplained for 3 days" reads very differently from a 10-second-old
+ * race); the reason is refreshed to the latest classification. Returns true
+ * only when the row was newly flagged, so re-confirming passes don't re-log.
+ */
+export function quarantineVtxo(db: Database, txid: string, vout: number, reason: string): boolean {
+  const wasFlagged =
+    db
+      .query<{ quarantined_at: number | null }, [string, number]>(
+        `SELECT quarantined_at FROM exit_vtxos WHERE txid = ? AND vout = ?`,
+      )
+      .get(txid, vout)?.quarantined_at ?? null
+  db.query(
+    `UPDATE exit_vtxos
+     SET quarantined_at = COALESCE(quarantined_at, ?), quarantine_reason = ?
+     WHERE txid = ? AND vout = ?`,
+  ).run(Math.floor(Date.now() / 1000), reason, txid, vout)
+  return wasFlagged === null
+}
+
+/** Server re-listed the vtxo (or evidence resolved it) — lift the flag. */
+export function clearQuarantine(db: Database, txid: string, vout: number): boolean {
+  const res = db
+    .query(
+      `UPDATE exit_vtxos SET quarantined_at = NULL, quarantine_reason = NULL
+       WHERE txid = ? AND vout = ? AND quarantined_at IS NOT NULL`,
+    )
+    .run(txid, vout)
+  return res.changes > 0
+}
+
+/**
+ * Drop proofs no remaining row's chain references — quarantined rows count
+ * as references (their proofs ARE the retained exit capability). Reference
+ * computation happens in code — solo-wallet scale (a few vtxos × ~100 txs)
+ * doesn't justify a normalized ref table.
+ */
+export function gcOrphanProofs(db: Database): number {
+  let removed = 0
   db.transaction(() => {
-    const stored = db.query<VtxoRow, []>(`SELECT * FROM exit_vtxos`).all()
-    const deleteVtxo = db.query(`DELETE FROM exit_vtxos WHERE txid = ? AND vout = ?`)
     const referenced = new Set<string>()
-    for (const row of stored) {
-      if (live.has(`${row.txid}:${row.vout}`)) {
-        for (const txid of proofTxidsOf(JSON.parse(row.chain_json) as ChainTx[])) {
-          referenced.add(txid)
-        }
-      } else {
-        deleteVtxo.run(row.txid, row.vout)
-        removedVtxos++
+    for (const row of db.query<VtxoRow, []>(`SELECT * FROM exit_vtxos`).all()) {
+      for (const txid of proofTxidsOf(JSON.parse(row.chain_json) as ChainTx[])) {
+        referenced.add(txid)
       }
     }
     const deleteProof = db.query(`DELETE FROM exit_proof_txs WHERE txid = ?`)
-    const proofTxids = db.query<{ txid: string }, []>(`SELECT txid FROM exit_proof_txs`).all()
-    for (const { txid } of proofTxids) {
+    for (const { txid } of db.query<{ txid: string }, []>(`SELECT txid FROM exit_proof_txs`).all()) {
       if (!referenced.has(txid)) {
         deleteProof.run(txid)
-        removedProofTxs++
+        removed++
       }
     }
   })()
-  return { removedVtxos, removedProofTxs }
+  return removed
 }
 
-export function vaultStats(db: Database): VaultStats {
-  const vtxos = listVaultVtxos(db)
+export function vaultStats(db: Database, nowSec: number = Math.floor(Date.now() / 1000)): VaultStats {
+  const all = listVaultVtxos(db)
+  // Quarantined rows leave the readiness math (the server no longer claims
+  // them, so counting them as "ready" would inflate proven vs claimed) but
+  // keep their own loud counters — split on whether the exit window is
+  // still open, because the user's next move differs completely ("exit it
+  // NOW" vs "review and forget").
+  const vtxos = all.filter((v) => v.quarantinedAt === null)
+  const flagged = all.filter((v) => v.quarantinedAt !== null)
+  const expiredCount = flagged.filter((v) => v.expiresAt !== null && v.expiresAt <= nowSec).length
   const readyCount = vtxos.filter((v) => missingProofTxids(db, v.chain).length === 0).length
   const proofs = db
     .query<{ count: number; bytes: number | null }, []>(
@@ -227,7 +307,7 @@ export function vaultStats(db: Database): VaultStats {
     (acc, v) => (acc === null || v.syncedAt > acc ? v.syncedAt : acc),
     null,
   )
-  const soonestExpiresAt = vtxos.reduce<number | null>(
+  const soonestExpiresAt = all.reduce<number | null>(
     (acc, v) =>
       v.expiresAt !== null && (acc === null || v.expiresAt < acc) ? v.expiresAt : acc,
     null,
@@ -235,6 +315,8 @@ export function vaultStats(db: Database): VaultStats {
   return {
     vtxoCount: vtxos.length,
     readyCount,
+    quarantinedCount: flagged.length - expiredCount,
+    expiredCount,
     proofTxCount: proofs?.count ?? 0,
     proofBytes: proofs?.bytes ?? 0,
     lastSyncedAt,

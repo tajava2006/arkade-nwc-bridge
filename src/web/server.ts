@@ -21,7 +21,13 @@ import type { OfferService } from '../clink/offers'
 import type { ProofSyncService } from '../exit/sync_service'
 import type { ExitEngine } from '../exit/engine'
 import { estimateExit } from '../exit/estimate'
-import { isVtxoExitReady, listVaultVtxos } from '../exit/vault'
+import {
+  gcOrphanProofs,
+  getVaultVtxo,
+  isVtxoExitReady,
+  listVaultVtxos,
+  removeVtxo,
+} from '../exit/vault'
 import { getExitOp } from '../exit/ops'
 import { exitView, type ExitRow } from './views/exit'
 import { exitDetailView, exitSweepError, stepLine } from './views/exit_detail'
@@ -348,8 +354,24 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             estimate = null
           }
           const funding = await st.exitEngine.fundingStatus()
+          const vaultRow = getVaultVtxo(db, txid, vout)
           return htmlResponse(
-            exitDetailView({ stepper, estimate, funding, degraded: st.mode === 'degraded' }),
+            exitDetailView({
+              stepper,
+              estimate,
+              funding,
+              degraded: st.mode === 'degraded',
+              quarantine:
+                vaultRow && vaultRow.quarantinedAt !== null
+                  ? {
+                      at: vaultRow.quarantinedAt,
+                      reason: vaultRow.quarantineReason,
+                      expired:
+                        vaultRow.expiresAt !== null &&
+                        vaultRow.expiresAt <= Math.floor(Date.now() / 1000),
+                    }
+                  : null,
+            }),
           )
         },
       },
@@ -390,6 +412,28 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // streams back over the exit-op SSE event
           st.exitEngine.startExit(txid, vout)
           return Response.redirect(`/exit/${txid}/${vout}`, 303)
+        },
+      },
+      // Operator override for a quarantined row: "I can explain this
+      // disappearance myself (e.g. spent from another wallet in a way the
+      // bridge can't verify) — stop keeping its proofs." Destructive on
+      // purpose and quarantine-gated: evidence-verified rows never need it
+      // and live rows must not be droppable by a misclick.
+      '/exit/:txid/:vout/forget': {
+        POST: (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const { txid } = req.params
+          const vout = Number.parseInt(req.params.vout, 10)
+          if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
+          const row = getVaultVtxo(db, txid, vout)
+          if (!row) return new Response('no such vtxo in the exit vault', { status: 404 })
+          if (row.quarantinedAt === null) {
+            return new Response('only quarantined vtxos can be forgotten', { status: 409 })
+          }
+          removeVtxo(db, txid, vout)
+          gcOrphanProofs(db)
+          return Response.redirect('/exit', 303)
         },
       },
       '/exit/:txid/:vout/sweep': {

@@ -47,6 +47,9 @@ describe('proof sync service (scheduler)', () => {
   function deps(txs: Map<string, string>, opts: { listDelayMs?: number } = {}) {
     let listCalls = 0
     const indexer: ProofSyncIndexer = {
+      async getVtxos() {
+        return { vtxos: [] } // nothing ever disappears in these tests
+      },
       async getVtxoChain() {
         return { chain, page: { current: 0, next: 0, total: 1 } }
       },
@@ -69,7 +72,7 @@ describe('proof sync service (scheduler)', () => {
   test('a burst of triggers collapses into one pass', async () => {
     const d = deps(new Map([[ark.txid, ark.psbtB64]]))
     const updates: boolean[] = []
-    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, timing: TIMING })
+    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, xOnlyPubkey: new Uint8Array(32).fill(1), timing: TIMING })
     svc.onUpdate((snap) => updates.push(snap.running))
 
     svc.trigger('a')
@@ -88,7 +91,7 @@ describe('proof sync service (scheduler)', () => {
   test('gaps self-retry until the indexer serves the missing proof', async () => {
     const txs = new Map<string, string>() // proof not served yet
     const d = deps(txs)
-    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, timing: TIMING })
+    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, xOnlyPubkey: new Uint8Array(32).fill(1), timing: TIMING })
 
     svc.trigger('boot')
     await sleep(20)
@@ -107,7 +110,7 @@ describe('proof sync service (scheduler)', () => {
 
   test('a trigger landing mid-pass queues exactly one follow-up', async () => {
     const d = deps(new Map([[ark.txid, ark.psbtB64]]), { listDelayMs: 30 })
-    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, timing: TIMING })
+    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, xOnlyPubkey: new Uint8Array(32).fill(1), timing: TIMING })
 
     svc.trigger('first')
     await sleep(15) // first pass is now inside the slow listVtxos
@@ -121,7 +124,7 @@ describe('proof sync service (scheduler)', () => {
 
   test('stop() makes further triggers inert', async () => {
     const d = deps(new Map([[ark.txid, ark.psbtB64]]))
-    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, timing: TIMING })
+    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, xOnlyPubkey: new Uint8Array(32).fill(1), timing: TIMING })
     svc.stop()
     svc.trigger('late')
     await sleep(30)
@@ -138,6 +141,7 @@ describe('proof sync service (scheduler)', () => {
         if (aspDown) throw new Error('asp unreachable')
         return d.listVtxos()
       },
+      xOnlyPubkey: new Uint8Array(32).fill(1),
       timing: TIMING,
     })
 
