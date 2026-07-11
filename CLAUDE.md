@@ -37,6 +37,10 @@ src/
                                csv.ts (CSV-elapsed judgment), estimate.ts
                                (offline exit cost), engine.ts + ops.ts (drive
                                the session, exit_ops v11, sweep, funding),
+                               boost.ts + broadcasts.ts (stuck-package fee
+                               re-boost: replace the CPFP child via RBF and
+                               resubmit the package; sweep RBF; tip height at
+                               broadcast v15 for "waiting N blocks"),
                                chain_order.ts (spends-DAG layout for display —
                                arkd's BFS array stays Session's input),
                                stepper.ts (per-vtxo DAG model: DB-only build +

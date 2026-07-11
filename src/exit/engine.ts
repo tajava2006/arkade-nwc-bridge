@@ -20,6 +20,20 @@ import {
   type ExitOp,
 } from './ops'
 import { sweepVtxos, type SweepResult } from './sweep'
+import { recordBroadcast } from './broadcasts'
+import {
+  boostStep,
+  boostSweep,
+  esploraTxInfo,
+  stepBoostInfo,
+  sweepBoostInfo,
+  type BoostDeps,
+  type BoostStepResult,
+  type FuelSource,
+  type StepBoostInfo,
+  type SweepBoostInfo,
+  type TxInfoFn,
+} from './boost'
 
 // The emergency half of unilateral exit (EXIT_PLAN #09): drives the SDK's
 // Unroll.Session over the local vault (VaultIndexer) with CPFP fees paid by
@@ -57,6 +71,14 @@ export interface ExitEngine {
   feeRate(): Promise<number>
   /** the resolved exit esplora — for the stepper's per-tx onchain status reads */
   explorer(): Promise<OnchainProvider>
+  /** fee context of one in-mempool unroll package; null when it can't be priced */
+  stepBoostInfo(txid: string, vout: number, stepTxid: string): Promise<StepBoostInfo | null>
+  /** replace the package's CPFP child with a higher-fee one (RBF) and resubmit */
+  boostStep(txid: string, vout: number, stepTxid: string): Promise<BoostStepResult>
+  /** fee context of the sweep tx once the op is 'swept'; null when unpriceable */
+  sweepBoostInfo(txid: string, vout: number): Promise<SweepBoostInfo | null>
+  /** RBF the (possibly batched) sweep tx at the current rate */
+  boostSweep(txid: string, vout: number): Promise<SweepResult>
   /** CPFP fuel + sweep-destination status: the nsec P2TR address and its onchain balance (null when esplora is unreachable) */
   fundingStatus(): Promise<{ address: string; balanceSat: number | null }>
   snapshot(): { ops: ExitOp[]; active: string | null }
@@ -70,7 +92,13 @@ export interface ExitEngineDeps {
   network: Network
   esploraUrls: readonly string[]
   /** test seam / future override — production resolves via pickEsplora + OnchainWallet */
-  providers?: { bumper: AnchorBumper; explorer: OnchainProvider }
+  providers?: {
+    bumper: AnchorBumper
+    explorer: OnchainProvider
+    /** boost-path extras; production derives both (fuel = the OnchainWallet bumper, txInfo = raw esplora reads) */
+    fuel?: FuelSource
+    txInfo?: TxInfoFn
+  }
   /** waiting→sweepable re-check cadence; CSV clocks tick in blocks, so minutes are plenty */
   pollIntervalMs?: number
   log?: (msg: string) => void
@@ -90,10 +118,22 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
 
   // Resolved once, lazily: pickEsplora probes the priority list and the
   // OnchainWallet derives the CPFP wallet from the nsec — neither involves
-  // the ASP. Cached so every op shares one provider pair.
-  let providersPromise: Promise<{ bumper: AnchorBumper; explorer: OnchainProvider }> | null =
-    deps.providers ? Promise.resolve(deps.providers) : null
-  const providers = (): Promise<{ bumper: AnchorBumper; explorer: OnchainProvider }> => {
+  // the ASP. Cached so every op shares one provider set.
+  interface Providers {
+    bumper: AnchorBumper
+    explorer: OnchainProvider
+    fuel: FuelSource | null
+    txInfo: TxInfoFn | null
+  }
+  let providersPromise: Promise<Providers> | null = deps.providers
+    ? Promise.resolve({
+        bumper: deps.providers.bumper,
+        explorer: deps.providers.explorer,
+        fuel: deps.providers.fuel ?? null,
+        txInfo: deps.providers.txInfo ?? null,
+      })
+    : null
+  const providers = (): Promise<Providers> => {
     if (!providersPromise) {
       providersPromise = (async () => {
         const picked = await pickEsplora(deps.esploraUrls)
@@ -105,10 +145,40 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
           deps.network,
           new EsploraProvider(picked.url),
         )
-        return { bumper, explorer: picked.provider }
+        // the CPFP wallet doubles as the boost path's fuel source; per-tx fee
+        // reads go straight to the picked esplora (no SDK method for them)
+        return {
+          bumper,
+          explorer: picked.provider,
+          fuel: bumper,
+          txInfo: esploraTxInfo(picked.url),
+        }
       })()
     }
     return providersPromise
+  }
+
+  const boostDeps = async (): Promise<BoostDeps> => {
+    const p = await providers()
+    if (!p.fuel || !p.txInfo) {
+      throw new Error('boost unavailable — no fuel wallet / tx info source configured')
+    }
+    return {
+      db,
+      identity: deps.identity,
+      network: deps.network,
+      explorer: p.explorer,
+      fuel: p.fuel,
+      txInfo: p.txInfo,
+    }
+  }
+
+  const tipHeightSafe = async (explorer: OnchainProvider): Promise<number | null> => {
+    try {
+      return (await explorer.getChainTip()).height
+    } catch {
+      return null
+    }
   }
 
   const notify = (txid: string, vout: number, step?: ExitEngineUpdate['step']): void => {
@@ -150,6 +220,9 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
       for await (const step of session) {
         if (step.type === Unroll.StepType.UNROLL) {
           log(`exit-engine: ${key} broadcast ${step.tx.id}`)
+          // the "waiting N blocks" anchor for the boost UI; best-effort — a
+          // failed tip read only hides the counter
+          recordBroadcast(db, step.tx.id, txid, vout, await tipHeightSafe(explorer))
           notify(txid, vout, { type: 'UNROLL', txid: step.tx.id })
         } else if (step.type === Unroll.StepType.WAIT) {
           log(`exit-engine: ${key} waiting for ${step.txid} to confirm`)
@@ -247,6 +320,13 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
         outpoints,
         dest,
       )
+      recordBroadcast(
+        db,
+        result.txid,
+        outpoints[0]!.txid,
+        outpoints[0]!.vout,
+        await tipHeightSafe(explorer),
+      )
       for (const o of outpoints) {
         setExitOpState(db, o.txid, o.vout, 'swept', { sweepTxid: result.txid, destAddress: dest })
         notify(o.txid, o.vout)
@@ -258,6 +338,28 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     },
     async explorer() {
       return (await providers()).explorer
+    },
+    async stepBoostInfo(txid, vout, stepTxid) {
+      return stepBoostInfo(await boostDeps(), txid, vout, stepTxid)
+    },
+    async boostStep(txid, vout, stepTxid) {
+      const result = await boostStep(await boostDeps(), txid, vout, stepTxid)
+      log(
+        `exit-engine: boosted ${stepTxid} — new child ${result.childTxid} at ${result.pkgRateSatVb} sat/vB (${result.feeSat} sats)`,
+      )
+      notify(txid, vout)
+      return result
+    },
+    async sweepBoostInfo(txid, vout) {
+      return sweepBoostInfo(await boostDeps(), txid, vout)
+    },
+    async boostSweep(txid, vout) {
+      const result = await boostSweep(await boostDeps(), txid, vout)
+      log(
+        `exit-engine: boosted sweep — ${result.txid} pays ${result.feeSat} sats over ${result.inputCount} input(s)`,
+      )
+      notify(txid, vout)
+      return result
     },
     async fundingStatus() {
       const w = await fundingWallet()
