@@ -59,7 +59,7 @@ export async function initBoltz(deps: {
   return { swaps }
 }
 
-function reconcilePendingIncoming(db: Database): void {
+export function reconcilePendingIncoming(db: Database): void {
   // Reverse swaps that completed before the listener existed (or while the
   // bridge was offline) are already terminal in boltz_swaps but still
   // 'pending' in our transactions table — the SwapManager's resume loop
@@ -119,7 +119,7 @@ function reconcilePendingIncoming(db: Database): void {
  * State writes are gated on `state = 'pending'` so a later auto-action
  * can't undo what the synchronous handler already recorded.
  */
-function syncSwapToDb(
+export function syncSwapToDb(
   db: Database,
   swap: BoltzSwap,
   state: 'settled' | 'failed',
