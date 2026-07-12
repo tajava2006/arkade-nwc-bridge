@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import * as defaults from './defaults'
 
 export type { Network } from './defaults'
@@ -18,10 +18,21 @@ export interface Config {
 // the bridge at an in-network ASP (or rebind off 127.0.0.1) without touching
 // source, while a vanilla `bun run dev` clone keeps zero-config behavior
 // because the file simply isn't there.
-const OVERRIDE_PATH = resolve(defaults.REPO_ROOT, 'data', 'config.json')
+//
+// Discovery: the cwd's data/config.json wins over the repo root's. A config
+// file at the cwd is a deliberate setup — it's how the regtest drill runs an
+// isolated runtime (up.sh writes runtime/data/config.json and starts the
+// bridge from there). The repo-root anchor exists for the opposite case:
+// an *accidental* cwd (running a file directly from elsewhere) must not
+// stray outside the repo — but such a cwd has no config.json, so the
+// fallback covers it.
+const OVERRIDE_CANDIDATES = [
+  resolve(process.cwd(), 'data', 'config.json'),
+  resolve(defaults.REPO_ROOT, 'data', 'config.json'),
+]
 
 export function loadConfig(): Config {
-  const overrides = readOverrides()
+  const { overrides, baseDir } = readOverrides()
   return {
     network: overrides.network ?? defaults.NETWORK,
     arkServerUrl: overrides.arkServerUrl ?? defaults.ARK_SERVER_URL,
@@ -32,23 +43,27 @@ export function loadConfig(): Config {
         : defaults.ESPLORA_URLS,
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,
-    // A relative override resolves against the repo root, not the cwd, so
-    // config.json means the same thing no matter where the process started.
-    dbPath: overrides.dbPath ? resolve(defaults.REPO_ROOT, overrides.dbPath) : defaults.DB_PATH,
+    // A relative override resolves against the loaded config's own base
+    // (the directory holding its data/), so a config file means the same
+    // thing no matter where the process started — the drill's sqlite lands
+    // in ITS runtime, the repo config's in the repo.
+    dbPath: overrides.dbPath ? resolve(baseDir, overrides.dbPath) : defaults.DB_PATH,
   }
 }
 
-function readOverrides(): Partial<Config> {
-  if (!existsSync(OVERRIDE_PATH)) return {}
+function readOverrides(): { overrides: Partial<Config>; baseDir: string } {
+  const path = OVERRIDE_CANDIDATES.find((p) => existsSync(p))
+  if (!path) return { overrides: {}, baseDir: defaults.REPO_ROOT }
+  const baseDir = dirname(dirname(path)) // <base>/data/config.json → <base>
   try {
-    const parsed = JSON.parse(readFileSync(OVERRIDE_PATH, 'utf8')) as Partial<Config>
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<Config>
     const keys = Object.keys(parsed)
     if (keys.length > 0) {
-      console.log(`config: overrides from ${OVERRIDE_PATH}: ${keys.join(', ')}`)
+      console.log(`config: overrides from ${path}: ${keys.join(', ')}`)
     }
-    return parsed
+    return { overrides: parsed, baseDir }
   } catch (err) {
-    console.warn(`config: failed to read ${OVERRIDE_PATH}: ${(err as Error).message}`)
-    return {}
+    console.warn(`config: failed to read ${path}: ${(err as Error).message}`)
+    return { overrides: {}, baseDir }
   }
 }
