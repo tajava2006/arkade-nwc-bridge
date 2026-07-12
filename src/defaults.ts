@@ -1,7 +1,16 @@
+import { join } from 'node:path'
+
 // Static defaults for the bridge. Edit here rather than threading an env
 // file — there is no environment-specific knob worth a runtime override.
 // The bridge is a personal, loopback-only service; relays and the ASP are
 // effectively constants for the supported use case (mainnet zapping).
+
+// Repo root, anchored to this file's location (src/..) instead of the
+// process cwd. `bun run <script>` cds to the package root, but running a
+// file directly (`bun scripts/show-nsec.ts` from some other directory)
+// keeps the caller's cwd — with cwd-relative paths that silently reads
+// (or, on a fresh boot, *creates*) ./data somewhere outside the repo.
+export const REPO_ROOT = join(import.meta.dir, '..')
 
 export type Network = 'bitcoin' | 'signet' | 'mutinynet' | 'regtest'
 
@@ -96,4 +105,4 @@ export const CLINK_OFFER_ID = 'zap_default'
 export const HTTP_BIND = '127.0.0.1'
 export const HTTP_PORT = 4282
 
-export const DB_PATH = './data/bridge.sqlite'
+export const DB_PATH = join(REPO_ROOT, 'data', 'bridge.sqlite')

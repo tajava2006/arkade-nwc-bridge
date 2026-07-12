@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import * as defaults from './defaults'
 
 export type { Network } from './defaults'
@@ -17,7 +18,7 @@ export interface Config {
 // the bridge at an in-network ASP (or rebind off 127.0.0.1) without touching
 // source, while a vanilla `bun run dev` clone keeps zero-config behavior
 // because the file simply isn't there.
-const OVERRIDE_PATH = './data/config.json'
+const OVERRIDE_PATH = resolve(defaults.REPO_ROOT, 'data', 'config.json')
 
 export function loadConfig(): Config {
   const overrides = readOverrides()
@@ -31,7 +32,9 @@ export function loadConfig(): Config {
         : defaults.ESPLORA_URLS,
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,
-    dbPath: overrides.dbPath ?? defaults.DB_PATH,
+    // A relative override resolves against the repo root, not the cwd, so
+    // config.json means the same thing no matter where the process started.
+    dbPath: overrides.dbPath ? resolve(defaults.REPO_ROOT, overrides.dbPath) : defaults.DB_PATH,
   }
 }
 

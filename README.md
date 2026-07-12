@@ -237,7 +237,9 @@ small marker slots. No client framework, no build step.
   sqlite file you lose access to the funds at its Ark address.
   The web UI shows the nsec only once, on the setup screen; after
   that recover it with `bun run show-nsec` (reads the hex secret
-  from the sqlite file and prints it as `nsec1…`/`npub1…`). Since
+  from the sqlite file — the live one, or pass another sqlite path,
+  e.g. a backup copy or a docker volume dir, as an argument — and
+  prints it as `nsec1…`/`npub1…`). Since
   the key is also a full nostr identity, a phone nostr signer —
   [Amber](https://github.com/greenart7c3/Amber) (Android) or Clave
   (iOS) — makes a good backup home and lets you use the same
