@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { getPublicKey } from 'nostr-tools/pure'
 import { nip19 } from 'nostr-tools'
 import type { Config } from '../../src/config'
 import { createAccount } from '../../src/account'
@@ -186,19 +185,17 @@ describe('web server', () => {
     expect(body.toLowerCase()).toContain('label')
   })
 
-  test('settings page shows npub and the backupable nsec with a warning', async () => {
+  test('the nsec is never served after setup — /settings is gone', async () => {
     // Deterministic, valid (non-zero, < n) secp256k1 key for stable assertions.
     const sk = new Uint8Array(32).fill(7)
     createAccount(temp.db, sk)
-    const res = await fetch(`${base}/settings`)
-    expect(res.status).toBe(200)
-    const body = await res.text()
-    expect(body).toContain('Settings')
-    expect(body).toContain(nip19.npubEncode(getPublicKey(sk)))
-    expect(body).toContain('Reveal nsec')
-    // nsec is in the page (behind a cosmetic reveal), so backup is possible.
-    expect(body).toContain(nip19.nsecEncode(sk))
-    expect(body.toLowerCase()).toContain('losing it')
+    // The settings page used to render npub + nsec; the browser is the least
+    // trusted surface, so the route was removed (backup path: show-nsec script).
+    expect((await fetch(`${base}/settings`)).status).toBe(404)
+    for (const path of ['/', '/connections']) {
+      const body = await (await fetch(`${base}${path}`)).text()
+      expect(body).not.toContain(nip19.nsecEncode(sk))
+    }
   })
 
   test('connection detail returns 404 for nonexistent id', async () => {
@@ -545,7 +542,7 @@ describe('web server — degraded mode', () => {
   })
 
   test('ready-only routes bounce to the status page', async () => {
-    for (const path of ['/send', '/connections', '/settings']) {
+    for (const path of ['/send', '/connections']) {
       const res = await fetch(`${base}${path}`, { redirect: 'manual' })
       expect(res.status).toBe(303)
       expect(res.headers.get('location')).toBe('/')

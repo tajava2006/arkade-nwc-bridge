@@ -47,7 +47,7 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 ┌──────────────────────────────────────────────────────┐
 │  Operator Web UI  (Bun.serve, server-rendered HTML)  │
 │  /, /send, /exit(/:txid/:vout),                      │
-│  /connections (list/new/:id/revoke), /settings       │
+│  /connections (list/new/:id/revoke)                  │
 │  /events: SSE feed for outbox / connection / balance │
 │  / exit-op / offboards / mode-change fragments       │
 │  (no client framework)                               │

@@ -9,7 +9,7 @@ export function setupView(args?: {
     title: 'Welcome',
     current: 'setup',
     body: html`
-      <p>This bridge needs an Ark identity (nsec) to talk to the Ark server, Boltz, and your nostr clients. The nsec is stored in this machine's SQLite file and never leaves it.</p>
+      <p>This bridge needs an Ark identity (nsec) to talk to the Ark server, Boltz, and your nostr clients. The nsec is stored in this machine's SQLite file and is never sent to the browser again after this setup flow.</p>
 
       ${args?.error ? html`<p style="color:#c00"><strong>${args.error}</strong></p>` : null}
 
@@ -32,7 +32,7 @@ export function setupView(args?: {
       </form>
 
       <h2>Or generate a fresh one</h2>
-      <p class="muted">A new key is created and saved. You'll see it on the next screen so you can back it up — and it stays viewable in the bridge UI later.</p>
+      <p class="muted">A new key is created and saved. The next screen shows it once so you can back it up — after that the web UI never renders it again (recover it from the machine with <code>bun run show-nsec</code>).</p>
       <form action="/setup" method="post">
         <input type="hidden" name="mode" value="generate" />
         <button type="submit">Generate new nsec</button>
@@ -50,7 +50,8 @@ export function setupGeneratedView(args: { nsec: string }): RawHtml {
 
       <h2>Your nsec</h2>
       <pre>${args.nsec}</pre>
-      <p class="muted">You can view this again from the bridge UI at any time.</p>
+      <p class="bad">This is the only time the web UI shows the nsec — a browser is the least trusted surface on this machine, so it is deliberately never sent here again. It lives (hex-encoded) in <code>./data/bridge.sqlite</code>; run <code>bun run show-nsec</code> in the bridge directory whenever you need it back in nsec form.</p>
+      <p class="muted">This key is also a full nostr identity. A good backup home is a nostr signer on your phone — <a href="https://github.com/greenart7c3/Amber">Amber</a> (Android) or Clave (iOS) — which stores it encrypted and lets you use the same identity across nostr apps later.</p>
 
       <p><a href="/">Continue to dashboard →</a></p>
     `,

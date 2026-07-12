@@ -205,7 +205,6 @@ The web UI surfaces these views:
 | `/exit` | One row per vaulted VTXO: expiry countdown, measured exit cost at the current fee rate, economic verdict. Per-VTXO detail page draws the pre-signed chain as a DAG with live onchain status, runs the exit, shows the CSV countdown, sweeps — and offers the fee boost when a step sits underpriced in the mempool. Works identically in degraded mode. |
 | `/connections` | Active and revoked connections; create / revoke from here. Top panel shows the bootstrap relays and the current outbox set (what new connections will use); each connection row has a live `N/M ●` relay badge that updates in place as relays come and go. |
 | `/connections/:id` | Per-connection NWC log (every `pay_invoice` made through that connection) plus a per-relay status table for that connection's baked-in relay set. |
-| `/settings` | Nostr identity (npub) + nsec backup flow. |
 
 The pages are still server-rendered HTML; the live updates come
 through a single SSE stream at `/events` that swaps `innerHTML` on
@@ -236,7 +235,13 @@ small marker slots. No client framework, no build step.
   bookkeeping in the same sqlite file rebuild from on-chain/indexer
   state on each boot, but the nsec doesn't — if you lose the
   sqlite file you lose access to the funds at its Ark address.
-  Export the nsec to a password manager.
+  The web UI shows the nsec only once, on the setup screen; after
+  that recover it with `bun run show-nsec` (reads the hex secret
+  from the sqlite file and prints it as `nsec1…`/`npub1…`). Since
+  the key is also a full nostr identity, a phone nostr signer —
+  [Amber](https://github.com/greenart7c3/Amber) (Android) or Clave
+  (iOS) — makes a good backup home and lets you use the same
+  identity across nostr apps later.
 
 ## Security model
 
