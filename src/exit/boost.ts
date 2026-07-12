@@ -175,7 +175,7 @@ export interface StepBoostInfo {
   blocksWaiting: number | null
 }
 
-async function nextBlockRate(explorer: OnchainProvider): Promise<number> {
+export async function nextBlockRate(explorer: OnchainProvider): Promise<number> {
   try {
     const rate = await explorer.getFeeRate()
     return Math.max(1, Math.ceil(rate ?? 1))
@@ -184,7 +184,7 @@ async function nextBlockRate(explorer: OnchainProvider): Promise<number> {
   }
 }
 
-async function tipHeightOrNull(explorer: OnchainProvider): Promise<number | null> {
+export async function tipHeightOrNull(explorer: OnchainProvider): Promise<number | null> {
   try {
     return (await explorer.getChainTip()).height
   } catch {
@@ -192,7 +192,7 @@ async function tipHeightOrNull(explorer: OnchainProvider): Promise<number | null
   }
 }
 
-async function txPresence(
+export async function txPresence(
   explorer: OnchainProvider,
   txid: string,
 ): Promise<'confirmed' | 'mempool' | 'unknown'> {
@@ -209,7 +209,7 @@ async function txPresence(
  * (regtest drill: an equal-fee duplicate came back 200 and changed nothing).
  * Positively confirm the node took the replacement before reporting success.
  */
-async function confirmInMempool(
+export async function confirmInMempool(
   deps: Pick<BoostDeps, 'explorer' | 'confirmRetry'>,
   txid: string,
   what: string,
@@ -232,7 +232,7 @@ function anchorIndexOf(tx: Transaction): number {
   throw new Error('no P2A anchor output on the parent tx')
 }
 
-function blocksWaitingOf(
+export function blocksWaitingOf(
   db: Database,
   stepTxid: string,
   tipHeight: number | null,
@@ -243,7 +243,7 @@ function blocksWaitingOf(
 }
 
 /** RBF rule 4: the replacement pays the old absolute fee plus incremental relay for its own size */
-function rbfFloor(old: MempoolTxInfo | null, newVb: number): number {
+export function rbfFloor(old: MempoolTxInfo | null, newVb: number): number {
   return old ? old.feeSat + INCREMENTAL_RELAY * newVb + 1 : 0
 }
 

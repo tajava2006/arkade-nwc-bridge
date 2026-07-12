@@ -28,7 +28,7 @@ import {
   removeVtxo,
 } from '../exit/vault'
 import { getExitOp } from '../exit/ops'
-import { exitView, type ExitRow } from './views/exit'
+import { exitFinalError, exitView, type ExitRow } from './views/exit'
 import {
   exitActionError,
   exitDetailView,
@@ -328,6 +328,17 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }
           })
           const funding = await st.exitEngine.fundingStatus()
+          const dest = st.exitEngine.destStatus()
+          // priced only when a send exists; a failed esplora read degrades to
+          // "status unknown" instead of blocking the emergency page
+          let sendInfo = null
+          if (dest?.sendTxid) {
+            try {
+              sendInfo = await st.exitEngine.finalSendInfo()
+            } catch {
+              sendInfo = null
+            }
+          }
           return htmlResponse(
             exitView({
               rows,
@@ -337,6 +348,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               nowSec,
               fundingAddress: funding.address,
               fundingBalanceSat: funding.balanceSat,
+              dest,
+              summary: st.exitEngine.exitSummary(),
+              sendInfo,
             }),
           )
         },
@@ -359,11 +373,13 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           }
           const funding = await st.exitEngine.fundingStatus()
           const vaultRow = getVaultVtxo(db, txid, vout)
+          const dest = st.exitEngine.destStatus()
           return htmlResponse(
             exitDetailView({
               stepper,
               estimate,
               funding,
+              verifiedDest: dest?.verifiedAt ? dest.address : null,
               degraded: st.mode === 'degraded',
               quarantine:
                 vaultRow && vaultRow.quarantinedAt !== null
@@ -524,7 +540,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const vout = Number.parseInt(req.params.vout, 10)
           if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
           try {
-            await st.exitEngine.sweep([{ txid, vout }])
+            // dest=verified routes the sweep straight to the challenge-verified
+            // final-send address (skips the fuel hop); anything else = default
+            let destAddress: string | undefined
+            const form = await req.formData().catch(() => null)
+            if (form?.get('dest') === 'verified') {
+              const dest = st.exitEngine.destStatus()
+              if (!dest?.verifiedAt) {
+                throw new Error('no challenge-verified destination on file')
+              }
+              destAddress = dest.address
+            }
+            await st.exitEngine.sweep([{ txid, vout }], destAddress)
           } catch (err) {
             return htmlResponse(
               exitSweepError(txid, vout, err instanceof Error ? err.message : String(err)),
@@ -532,6 +559,72 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             )
           }
           return Response.redirect(`/exit/${txid}/${vout}`, 303)
+        },
+      },
+      '/exit/dest': {
+        POST: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const form = await req.formData()
+          const address = String(form.get('address') ?? '')
+          const result = st.exitEngine.issueDest(address)
+          if (!result.ok) {
+            return htmlResponse(exitFinalError('Challenge', result.reason), { status: 400 })
+          }
+          return Response.redirect('/exit', 303)
+        },
+      },
+      '/exit/dest/verify': {
+        POST: async (req) => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          const form = await req.formData()
+          const signature = String(form.get('signature') ?? '')
+          const result = st.exitEngine.verifyDest(signature)
+          if (!result.ok) {
+            return htmlResponse(exitFinalError('Signature verification', result.reason), {
+              status: 400,
+            })
+          }
+          return Response.redirect('/exit', 303)
+        },
+      },
+      '/exit/dest/clear': {
+        POST: () => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          st.exitEngine.clearDest()
+          return Response.redirect('/exit', 303)
+        },
+      },
+      '/exit/final-send': {
+        POST: async () => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          try {
+            await st.exitEngine.finalSend()
+          } catch (err) {
+            return htmlResponse(
+              exitFinalError('Final send', err instanceof Error ? err.message : String(err)),
+              { status: 400 },
+            )
+          }
+          return Response.redirect('/exit', 303)
+        },
+      },
+      '/exit/final-send/boost': {
+        POST: async () => {
+          const st = state.current
+          if (st.mode === 'setup') return redirectToSetup()
+          try {
+            await st.exitEngine.boostFinalSend()
+          } catch (err) {
+            return htmlResponse(
+              exitFinalError('Final-send boost', err instanceof Error ? err.message : String(err)),
+              { status: 400 },
+            )
+          }
+          return Response.redirect('/exit', 303)
         },
       },
       '/connections': {

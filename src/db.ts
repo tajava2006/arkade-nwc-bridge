@@ -381,6 +381,32 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 16,
+    description: 'exit_dest — challenge-verified final-send destination (single row)',
+    // The last exit step: send everything accumulated on the fuel P2TR to an
+    // address the user PROVED they control (signed our challenge with that
+    // address's key — a typo or clipboard swap can't produce a verifying
+    // signature). One row because there is one operator and one final
+    // destination at a time; issuing a new challenge replaces the row and
+    // voids any previous verification. Persisted (not in-memory) because
+    // signing may involve a cold wallet on another machine — the challenge
+    // must survive a bridge restart. send_txid records the LATEST broadcast
+    // final send (an RBF boost overwrites it); fee/vsize are read live from
+    // esplora like the sweep boost, never stored.
+    sql: `
+      CREATE TABLE exit_dest (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        address     TEXT    NOT NULL,
+        challenge   TEXT    NOT NULL,
+        issued_at   INTEGER NOT NULL,
+        verified_at INTEGER,
+        scheme      TEXT,
+        send_txid   TEXT,
+        sent_at     INTEGER
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {
