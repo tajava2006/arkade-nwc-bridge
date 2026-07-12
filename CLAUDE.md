@@ -194,6 +194,10 @@ row exists. Logs go to stdout; when running in background pipe to
   were consolidated there so they're not duplicated per-app. They're
   gitignored convenience clones for reading source only; nothing here
   imports from them (the `nostr-tools/...` imports are the npm package).
+  One soft dependency: `regtest-e2e/env.sh` will *reuse* a sibling
+  `../ts-sdk/regtest` checkout of arkade-regtest to avoid a duplicate
+  clone — but the repo is standalone regardless, via its own
+  `regtest-e2e/arkade-regtest` submodule (auto-inited on first drill).
   Don't link to them from anything that gets committed — public links
   will 404. External URLs are in [DESIGN.md §10](DESIGN.md). Refresh
   them via the workspace's `update-refs.sh`, not a bridge npm script.

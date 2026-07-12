@@ -1,0 +1,3 @@
+[submodule "regtest-e2e/arkade-regtest"]
+	path = regtest-e2e/arkade-regtest
+	url = https://github.com/ArkLabsHQ/arkade-regtest.git

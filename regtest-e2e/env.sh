@@ -10,20 +10,37 @@ set -euo pipefail
 BRIDGE_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="${BRIDGE_REPO}/regtest-e2e/runtime"
 
-# Where arkade-regtest lives (ts-sdk's regtest submodule). Auto-discovered
-# relative to THIS script (absolute, so it's CWD-independent), trying the
-# layouts we ship in: a normal checkout (reference/arkade-nwc-bridge, sibling
-# reference/ts-sdk) and a worktree nested under .worktrees/. Override
-# REGTEST_DIR for any other setup, or clone github.com/ArkLabsHQ/arkade-regtest.
+# Where arkade-regtest (github.com/ArkLabsHQ/arkade-regtest) lives. Resolution
+# order, all CWD-independent (anchored on THIS script's location):
+#   1. REGTEST_DIR — explicit override for any custom setup.
+#   2. This repo's own submodule (regtest-e2e/arkade-regtest) if initialized —
+#      the standalone path; the pin is the commit the drill was validated on.
+#   3. The operator workspace's sibling ts-sdk clone (which carries the same
+#      repo as ITS regtest/ submodule), incl. a worktree nested under
+#      .worktrees/ — so dev checkouts don't clone a duplicate.
+#   4. Auto-`git submodule update --init` of (2) — makes a fresh standalone
+#      clone work with no extra step (needs network once).
+LOCAL_REGTEST="${BRIDGE_REPO}/regtest-e2e/arkade-regtest"
 if [ -z "${REGTEST_DIR:-}" ]; then
   for cand in \
+    "${LOCAL_REGTEST}" \
     "${BRIDGE_REPO}/../ts-sdk/regtest" \
     "${BRIDGE_REPO}/../../../ts-sdk/regtest" \
     "${BRIDGE_REPO}/../../ts-sdk/regtest"; do
     if [ -f "${cand}/regtest.mjs" ]; then REGTEST_DIR="${cand}"; break; fi
   done
-  # fall back to the normal-checkout path so a miss gives a sensible error
-  REGTEST_DIR="${REGTEST_DIR:-${BRIDGE_REPO}/../ts-sdk/regtest}"
+fi
+if [ -z "${REGTEST_DIR:-}" ]; then
+  echo "▶ arkade-regtest not found — initializing the submodule (one-time)…" >&2
+  if git -C "${BRIDGE_REPO}" submodule update --init regtest-e2e/arkade-regtest >&2 \
+     && [ -f "${LOCAL_REGTEST}/regtest.mjs" ]; then
+    REGTEST_DIR="${LOCAL_REGTEST}"
+  else
+    echo "✗ could not set up arkade-regtest. Either:" >&2
+    echo "    git -C '${BRIDGE_REPO}' submodule update --init regtest-e2e/arkade-regtest" >&2
+    echo "  or clone github.com/ArkLabsHQ/arkade-regtest anywhere and set REGTEST_DIR." >&2
+    exit 1
+  fi
 fi
 
 # Regtest service endpoints (arkade-regtest defaults — README "Service URLs").

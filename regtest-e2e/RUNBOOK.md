@@ -8,9 +8,12 @@ full local regtest stack. This is the existence proof for the exit feature
 ## What it needs
 
 - Docker (colima or Docker Desktop) running.
-- The `arkade-regtest` stack — by default the operator workspace's
-  `../ts-sdk/regtest` submodule. Set `REGTEST_DIR` to point elsewhere, or clone
-  github.com/ArkLabsHQ/arkade-regtest.
+- The `arkade-regtest` stack — vendored as this repo's own submodule at
+  `regtest-e2e/arkade-regtest`, auto-initialized by env.sh on first use (needs
+  network once), so a standalone clone of this repo is enough. env.sh prefers
+  an already-present copy: the initialized submodule first, else the operator
+  workspace's sibling `../ts-sdk/regtest` (same repo, ts-sdk's submodule).
+  `REGTEST_DIR` overrides everything.
 - **Not** a Lightning setup: sub-dust / LN receive is out of scope here (needs
   the custom sub-dust Boltz + two LN nodes + a channel). Unilateral exit uses
   only arkd + esplora, so none of that matters for this drill.
@@ -20,7 +23,7 @@ full local regtest stack. This is the existence proof for the exit feature
 regtest = you own the chain. `regtest.mjs` wraps the primitives:
 
 ```bash
-cd $REGTEST_DIR   # e.g. ../ts-sdk/regtest
+cd $REGTEST_DIR   # e.g. regtest-e2e/arkade-regtest (up.sh prints the resolved path)
 node regtest.mjs mine 1            # mine 1 block (advance the tip)
 node regtest.mjs mine 20           # mine 20 — how you elapse a block CSV
 node regtest.mjs faucet <addr> 1   # send 1 BTC onchain from the node wallet
@@ -93,7 +96,7 @@ same funds hopping that deepens). Ark blocks self-sends, so ping-pong the funds
 between the pre-seeded `ark` client and the bridge:
 
 ```bash
-cd $REGTEST_DIR   # e.g. ../ts-sdk/regtest
+cd $REGTEST_DIR   # e.g. regtest-e2e/arkade-regtest (up.sh prints the resolved path)
 
 # the ark client's own address, so the bridge can send back to it
 node regtest.mjs ark receive              # prints an ark1… / tark1… address

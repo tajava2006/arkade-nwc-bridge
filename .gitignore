@@ -41,12 +41,3 @@ data
 
 # isolated bridge runtime for the regtest e2e drill (EXIT_PLAN.md #15)
 regtest-e2e/runtime
-
-# reference
-nips
-nostr-tools
-arkd
-wallet
-ts-sdk
-luds
-lightning-address
