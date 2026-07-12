@@ -405,6 +405,10 @@ the frontier, so reloads stay cheap even mid-unroll (same strategy as
    resumes across restarts. Watch the stepper progress.
 4. When a VTXO reaches **sweepable** (CSV elapsed), **Sweep** it to your plain
    address. Batch several sweepable VTXOs together to share the fee.
+5. **Final send** (§11): once sweeps have landed, prove a destination address
+   is yours (challenge signature) and send everything on the fuel address —
+   sweep outputs plus leftover CPFP change — to it in one exact-fee tx. Or
+   skip the bridge entirely: `bun run show-btc-key` and import the key.
 
 ## 9. Single point of failure
 
@@ -429,3 +433,66 @@ bitcoind `submitpackage` RPC.
   attached via `data/config.json`, driven from the browser at localhost:4282.
   See EXIT_PLAN.md #15. Mainnet fixture dumps are never committed (they identify
   the wallet — EXIT_PLAN §6); committed fixtures are synthetic or regtest-sourced.
+
+## 11. Final send — the last mile (EXIT_PLAN #17)
+
+Everything the exit produces lands on the nsec-derived fuel P2TR. That address
+is already beyond the ASP's reach, but its key lives in the bridge — a user who
+doesn't read taproot descriptors has no reason to *feel* exited. The last mile
+moves the lot to an address whose key the user holds somewhere else entirely.
+Two routes, both self-serve:
+
+**Route 1 — take the key (`bun run show-btc-key`).** Prints the account key as
+WIF plus a checksummed `tr(WIF)` descriptor (`src/lib/descriptor.ts` implements
+Core's descriptor checksum so the output is paste-ready for
+`importdescriptors`). The fuel address is `p2tr(xonly_pubkey)` with no script
+tree — byte-identical to what Bitcoin Core/Sparrow derive from `tr(KEY)` — so
+import + rescan finds the coins with no bridge involved. The printed warning
+matters: this key IS the nostr identity.
+
+**Route 2 — verified send (the /exit tab).** The bridge only sends to an
+address the user has PROVEN control of: enter address → bridge issues a
+challenge (embeds the address + a nonce, so a signature can't authorize any
+other destination) → sign it with that address's wallet → `dest_verify.ts`
+checks it. A typo'd or clipboard-hijacked address can't produce a verifying
+signature, which is the entire point (verification is REQUIRED — the escape
+hatch for wallets that can't message-sign is Route 1, never an unverified
+send). Two schemes are accepted because no single one covers real wallets:
+
+- **BIP-322 simple** — witness-stack signature over the virtual
+  to_spend/to_sign pair; P2TR key-path (schnorr against the tweaked output
+  key) and P2WPKH / P2SH-P2WPKH (BIP-143 ECDSA). Sighash DEFAULT/ALL only,
+  key-path only. Pinned against the BIP's own P2WPKH vectors and the widely
+  published P2TR vector.
+- **Legacy Bitcoin Signed Message** — 65-byte recoverable ECDSA (Electrum,
+  hardware wallets). Wallets disagree on the header-byte flag for segwit, so
+  the flag's type hint is ignored: the signature passes if the recovered key
+  derives the target address under any supported encoding (p2pkh compressed/
+  uncompressed, p2wpkh, p2sh-p2wpkh, BIP-341-tweaked p2tr).
+
+P2WSH and other script-hash-only targets are rejected up front — "the
+destination must be a plain single-key address" is enforced by construction,
+since proving control of a script hash from one signature is exactly what
+these schemes can't do (p2sh passes only as p2sh-p2wpkh).
+
+The send itself (`final_send.ts`) is the no-change sweep the operator wanted:
+all *confirmed* fuel coins as key-path inputs, ONE output, fee computed from
+the exact tx shape at the next-block rate, everything else to the verified
+address. Unconfirmed fuel coins are excluded (their parent is our own RBF-able
+sweep; a replacement would orphan the child). Inputs signal RBF and the boost
+rebuilds from the stuck tx's own inputs — after broadcast the esplora utxo
+endpoint hides the spent coins, so `getCoins` alone would find nothing — plus
+whatever landed since, over the BIP-125 absolute-fee floor
+(`exit_dest.send_txid` tracks the latest replacement; fee context is read live
+like every other boost).
+
+Before the button, the tab shows the vault tally (swept / total / unresolved)
+as a last "are the unswept ones really the ones you chose to abandon?" gate —
+informational, not enforced: whether an uneconomical vtxo is worth abandoning
+was already a per-vtxo judgment (§1). A challenge-verified destination is also
+offered as a direct sweep target on the per-vtxo page (skips the fuel hop —
+one hop of fees less when CSV timing lets you sweep straight out).
+
+State lives in the single-row `exit_dest` table (migration v16): challenges
+survive restarts because signing may happen on an air-gapped machine days
+later; re-issuing replaces the row and voids the previous verification.

@@ -21,6 +21,23 @@ import {
 } from './ops'
 import { sweepVtxos, type SweepResult } from './sweep'
 import { recordBroadcast } from './broadcasts'
+import { listVaultVtxos } from './vault'
+import {
+  clearExitDest,
+  getExitDest,
+  issueDestChallenge,
+  submitDestSignature,
+  type ExitDest,
+  type IssueResult,
+  type SubmitResult,
+} from './dest'
+import {
+  boostFinalSend,
+  finalSend,
+  finalSendInfo,
+  type FinalSendInfo,
+  type FinalSendResult,
+} from './final_send'
 import {
   boostStep,
   boostSweep,
@@ -81,6 +98,22 @@ export interface ExitEngine {
   boostSweep(txid: string, vout: number): Promise<SweepResult>
   /** CPFP fuel + sweep-destination status: the nsec P2TR address and its onchain balance (null when esplora is unreachable) */
   fundingStatus(): Promise<{ address: string; balanceSat: number | null }>
+  /** the challenge-verified final-send destination row, if any */
+  destStatus(): ExitDest | null
+  /** validate the address and (re-)issue a signing challenge; replaces any previous dest */
+  issueDest(address: string): IssueResult
+  /** verify the challenge signature; on success the dest becomes final-send-able */
+  verifyDest(signatureB64: string): SubmitResult
+  /** drop the destination row (challenge and verification both) */
+  clearDest(): void
+  /** vault-vs-swept tally for the "are the unswept ones really abandoned?" confirmation */
+  exitSummary(): { total: number; swept: number; unresolved: number }
+  /** send EVERYTHING on the fuel address to the verified destination (exact-fee, no change) */
+  finalSend(): Promise<FinalSendResult>
+  /** fee context of the last final send; null when there is none or it can't be priced */
+  finalSendInfo(): Promise<FinalSendInfo | null>
+  /** RBF the last final send at the current rate */
+  boostFinalSend(): Promise<FinalSendResult>
   snapshot(): { ops: ExitOp[]; active: string | null }
   onUpdate(cb: (u: ExitEngineUpdate) => void): () => void
   stop(): void
@@ -370,6 +403,52 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
         // esplora unreachable — show the address, leave balance unknown
       }
       return { address: w.address, balanceSat }
+    },
+    destStatus() {
+      return getExitDest(db)
+    },
+    issueDest(address) {
+      const result = issueDestChallenge(db, deps.network, address)
+      if (result.ok) log(`exit-engine: issued final-send challenge for ${result.dest.address}`)
+      return result
+    },
+    verifyDest(signatureB64) {
+      const result = submitDestSignature(db, deps.network, signatureB64)
+      if (result.ok) {
+        log(
+          `exit-engine: final-send destination ${result.dest.address} verified (${result.dest.scheme})`,
+        )
+      }
+      return result
+    },
+    clearDest() {
+      clearExitDest(db)
+    },
+    exitSummary() {
+      // total counts everything ever known: vault rows still present plus
+      // swept ops whose vault row the evidence-gated GC already reclaimed
+      const swept = new Set(listExitOps(db, ['swept']).map((o) => `${o.txid}:${o.vout}`))
+      const unresolved = listVaultVtxos(db).filter(
+        (v) => !swept.has(`${v.txid}:${v.vout}`),
+      ).length
+      return { total: unresolved + swept.size, swept: swept.size, unresolved }
+    },
+    async finalSend() {
+      const result = await finalSend(await boostDeps())
+      log(
+        `exit-engine: final send → ${getExitDest(db)?.address} (${result.amountSat} sats over ${result.inputCount} input(s), fee ${result.feeSat}) in ${result.txid}`,
+      )
+      return result
+    },
+    async finalSendInfo() {
+      return finalSendInfo(await boostDeps())
+    },
+    async boostFinalSend() {
+      const result = await boostFinalSend(await boostDeps())
+      log(
+        `exit-engine: boosted final send — ${result.txid} pays ${result.feeSat} sats over ${result.inputCount} input(s)`,
+      )
+      return result
     },
     async feeRate() {
       try {

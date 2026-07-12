@@ -44,7 +44,12 @@ src/
                                chain_order.ts (spends-DAG layout for display —
                                arkd's BFS array stays Session's input),
                                stepper.ts (per-vtxo DAG model: DB-only build +
-                               one-tx-at-a-time status probes)
+                               one-tx-at-a-time status probes),
+                               dest.ts + dest_verify.ts + final_send.ts
+                               (final send: challenge-verified destination —
+                               BIP-322/legacy signature proof of control,
+                               exit_dest v16 — then an exact-fee no-change
+                               send-all of the fuel P2TR, RBF-boostable)
   polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
                                (bun async-ESM require trap) + EventSource shim
   index.ts                   — three-mode boot (setup / ready / degraded);
@@ -87,6 +92,7 @@ src/
     lookup_invoice.ts        — connection-scoped SELECT
     list_transactions.ts     — connection-scoped, from/until/limit/offset
   lib/
+    descriptor.ts            — Bitcoin Core descriptor checksum (show-btc-key)
     budget.ts                — budget renewal windows (computed from
                                (renewal, now), never stored) + cycleSpentMsat
                                ('never' reads the spent_msat counter,
@@ -110,6 +116,11 @@ src/
     views/                   — server-rendered pages incl. setup.ts,
                                degraded.ts, exit.ts + exit_detail.ts;
                                layout.ts injects the SSE client JS
+scripts/
+  show-nsec.ts               — recovery: print npub/nsec from sqlite
+  show-btc-key.ts            — recovery: same key as WIF + tr() descriptor
+                               (checksummed via lib/descriptor.ts) for import
+                               into any descriptor wallet
 data/                        — sqlite file (gitignored)
 ```
 

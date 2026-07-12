@@ -15,7 +15,11 @@ export interface FundingStatus {
 // (§1: no bulk exit). Full cost sits visibly next to the button; the confirm
 // dialog is a short irreversibility gate. The funding panel warns when the
 // exit-fuel address can't cover the CPFP fees the unroll will need.
-function actionPanel(s: ExitStepper, est: ExitEstimate | null): RawHtml {
+function actionPanel(
+  s: ExitStepper,
+  est: ExitEstimate | null,
+  verifiedDest: string | null,
+): RawHtml {
   const op = s.op
   if (op?.state === 'swept') {
     return html`<p class="ok">Swept to <code>${op.destAddress ?? '—'}</code>. This vtxo has left Ark.</p>`
@@ -55,10 +59,22 @@ function actionPanel(s: ExitStepper, est: ExitEstimate | null): RawHtml {
           Safe to leave; it resumes across restarts.</p>`
       : html``
 
+  // With a challenge-verified final-send destination on file, the sweep can
+  // skip the fuel hop entirely — same tx count, one hop of fees less. The
+  // fuel address stays the default (matches the accumulate-then-final-send
+  // flow when CSV clocks free vtxos at different times).
   const sweepBtn =
     op?.state === 'sweepable'
       ? html`<form method="post" action="/exit/${s.txid}/${s.vout}/sweep"
               onsubmit="return confirm('Sweep to your onchain address? The CSV timelock has elapsed; this spends the vtxo to a plain address you alone control.');">
+            ${verifiedDest
+              ? html`<label>Destination:
+                  <select name="dest">
+                    <option value="fuel">exit fuel address (default)</option>
+                    <option value="verified">verified: ${verifiedDest}</option>
+                  </select>
+                </label> `
+              : html``}
             <button type="submit">Sweep now → your address</button>
           </form>`
       : html``
@@ -421,6 +437,8 @@ export function exitDetailView(args: {
   degraded: boolean
   /** set when ProofSync flagged this vtxo (ASP dropped it; see expired for which story) */
   quarantine?: { at: number; reason: string | null; expired: boolean } | null
+  /** challenge-verified final-send address, offered as a direct sweep destination */
+  verifiedDest?: string | null
 }): RawHtml {
   const s = args.stepper
   return layout({
@@ -461,7 +479,7 @@ export function exitDetailView(args: {
       ${sweepFillIn(s)}
 
       <h2>Action</h2>
-      ${actionPanel(s, args.estimate)}
+      ${actionPanel(s, args.estimate, args.verifiedDest ?? null)}
 
       ${fundingPanel(args.funding, args.estimate)}
 

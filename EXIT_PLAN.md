@@ -238,6 +238,25 @@ git worktree remove ../exit-03-vault-schema && git branch -d exit/03-vault-schem
   `EXIT_DESIGN.md` (영어, SEND/RECEIVE_DESIGN 관례) — 왜 Session 재사용인지, 왜 nsec P2TR인지, vault 스키마 근거, 스코프 아웃, 운영 절차(비상 시 순서). CLAUDE.md 갱신(프로젝트 shape + when-to-read-what). 이 문서(EXIT_PLAN.md) 상태 최종화.
   DoD: 문서 머지.
 
+### Phase 6 — 에픽 후 확장
+
+- ✅ **#17 `exit/17-final-send`** (M, 2026-07-12) — **마지막 마일: 유저 개인 주소로 전량 이동.**
+  fuel P2TR은 ASP 손 밖이지만 키가 bridge 안에 있음 → 진짜 끝은 유저가 딴 데서 키를 쥔 주소.
+  두 경로: ① `bun run show-btc-key` — hex 키를 WIF + 체크섬 포함 `tr()` descriptor로 출력
+  (`src/lib/descriptor.ts` = Core descriptor checksum 구현, 벡터 검증). fuel 주소 도출이
+  `p2tr(xonly)` = Core `tr(KEY)`와 동일해서 import+rescan으로 끝. ② **검증된 send** — 주소 입력 →
+  주소+nonce 박힌 challenge 발급 → 그 주소 키로 서명 → `dest_verify.ts` 검증(BIP-322 simple
+  P2TR/P2WPKH/P2SH-P2WPKH + legacy signed message, 복붙 실수/클립보드 하이재킹 차단) → 통과 시에만
+  전송. **서명 필수, skip 없음**(운영자 결정 — 서명 불가 지갑은 경로 ①). P2WSH 등 스크립트 주소 원천 거부.
+  send 자체(`final_send.ts`)는 잔돈 없는 정밀 sweep: confirmed fuel 코인 전량 key-path 입력,
+  단일 output, 최종 tx 모양에서 fee 역산(next-block rate), RBF 시그널 + boost는 stuck tx의
+  자기 입력에서 재구성(BIP-125 floor; 브로드캐스트 후엔 utxo 엔드포인트가 spent 코인을 숨기므로).
+  unconfirmed fuel 코인 제외(부모가 우리 RBF 대상). UI: /exit 하단 섹션(challenge flow +
+  vault 집계 xx/yy/zz "포기 맞나" 최종 확인 + send/boost) + per-vtxo sweep에 검증 주소 직행 옵션
+  (fuel hop 수수료 절약). 저장: `exit_dest` 단일행(v16) — 콜드지갑 서명이 며칠 걸려도 challenge가
+  재시작 생존. 유닛 28개(BIP-322 공식 벡터 + legacy 라운드트립 + send/boost 페이크) + 웹 배선 스모크.
+  DoD: typecheck + 302 tests green. regtest 드릴에 최종 send 단계 편입은 다음 드릴 때.
+
 에픽 완료 = #01-#16 전부 ✅ → `epic/unilateral-exit` → `main` 머지 (마이그레이션 번호 재확인 포함).
 
 **진행 상태 (2026-07-05):** Phase 0-4 + 문서(#16) 완료 — #01~#14, #16 머지됨. 코드는 전부 랜딩(vault·sync·degraded boot·엔진·sweep·견적·/exit 탭·스텝퍼·컨트롤). 유닛/통합 158+ green, mainnet 스모크로 탭 렌더 + 운영 지갑 증명 미러링 검증. **남은 것은 #15(브라우저 e2e regtest 드릴)뿐** — 유일한 실브로드캐스트 관문. #15 통과 후 에픽 → main. 리뷰는 운영자가 에픽 완성 뒤 일괄(대화에서 확정).

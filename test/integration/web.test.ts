@@ -57,6 +57,18 @@ const STUB_EXIT_ENGINE: ExitEngine = {
   boostSweep: async () => {
     throw new Error('stub')
   },
+  destStatus: () => null,
+  issueDest: () => ({ ok: false, reason: 'stub' }),
+  verifyDest: () => ({ ok: false, reason: 'stub' }),
+  clearDest: () => {},
+  exitSummary: () => ({ total: 0, swept: 0, unresolved: 0 }),
+  finalSend: async () => {
+    throw new Error('stub')
+  },
+  finalSendInfo: async () => null,
+  boostFinalSend: async () => {
+    throw new Error('stub')
+  },
   snapshot: () => ({ ops: [], active: null }),
   onUpdate: () => () => {},
   stop: () => {},
@@ -563,6 +575,20 @@ describe('web server — degraded mode', () => {
     expect(body).toContain('one vtxo at a time')
     expect(body).toContain('1,000 sats') // the seeded vault vtxo
     expect(body).toContain('exit cost')
+  })
+
+  test('/exit carries the final-send section; route wiring rejects a stub issue', async () => {
+    const res = await fetch(`${base}/exit`)
+    const body = await res.text()
+    expect(body).toContain('Final send')
+    expect(body).toContain('show-btc-key')
+    // stub engine refuses to issue → the error page, not a 500
+    const post = await fetch(`${base}/exit/dest`, {
+      method: 'POST',
+      body: new URLSearchParams({ address: 'bc1qqq' }),
+    })
+    expect(post.status).toBe(400)
+    expect(await post.text()).toContain('Challenge failed')
   })
 
   test('/exit/:txid/:vout renders DB-only and arms the client probe loop', async () => {

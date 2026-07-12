@@ -2,6 +2,8 @@ import { html, type RawHtml } from '../../lib/html'
 import type { VaultVtxo, VaultStats } from '../../exit/vault'
 import type { ExitEstimate } from '../../exit/estimate'
 import type { ExitOp } from '../../exit/ops'
+import type { ExitDest } from '../../exit/dest'
+import type { FinalSendInfo } from '../../exit/final_send'
 import { layout } from './layout'
 
 // The /exit tab (EXIT_PLAN #12): one row per mirrored vtxo, execution
@@ -101,6 +103,150 @@ export function renderExitRows(rows: ExitRow[], nowSec: number): RawHtml {
   )}`
 }
 
+export interface ExitSummary {
+  total: number
+  swept: number
+  unresolved: number
+}
+
+// The last mile (EXIT_PLAN #17): everything the exit accumulated on the
+// fuel P2TR → an address the user PROVED they control. The proof is a
+// challenge signature — a mistyped or clipboard-swapped address can't
+// produce one — and it is REQUIRED: the escape hatch for wallets that
+// can't sign messages is `bun run show-btc-key` (import the key itself),
+// never an unverified send.
+function finalSendSection(args: {
+  dest: ExitDest | null
+  summary: ExitSummary
+  sendInfo: FinalSendInfo | null
+  fundingBalanceSat: number | null
+}): RawHtml {
+  const { dest, summary, sendInfo } = args
+
+  const addressForm = html`
+    <form method="post" action="/exit/dest">
+      <label>Destination address (yours — a cold wallet, another wallet you hold the keys to):
+        <input name="address" size="64" placeholder="bc1..." required
+          value="${dest && !dest.verifiedAt ? dest.address : ''}" />
+      </label>
+      <button type="submit">${dest ? 'Re-issue challenge' : 'Get signing challenge'}</button>
+    </form>
+    <p class="muted">
+      Alternative that needs no signature: <code>bun run show-btc-key</code> prints this
+      wallet's key as WIF + <code>tr()</code> descriptor — import it into any descriptor
+      wallet, rescan, done. The funds never depended on this bridge.
+    </p>
+  `
+
+  if (!dest) {
+    return html`
+      <h2>Final send — move everything to YOUR address</h2>
+      <p class="muted">
+        The fuel address above is already yours alone, but its key lives in this
+        bridge. To finish an exit properly, sweep the fuel change plus every swept
+        vtxo to an address whose key you hold elsewhere. To rule out a paste error,
+        the bridge will only send to an address after you sign a challenge with
+        that address's key.
+      </p>
+      ${addressForm}
+    `
+  }
+
+  if (!dest.verifiedAt) {
+    return html`
+      <h2>Final send — prove the destination is yours</h2>
+      <p>Sign this exact text with the key of <code>${dest.address}</code>
+        (message signing in Sparrow/Electrum/your hardware wallet; BIP-322 or the
+        classic signed-message format both verify):</p>
+      <pre>${dest.challenge}</pre>
+      <form method="post" action="/exit/dest/verify">
+        <label>Signature (base64):
+          <textarea name="signature" rows="3" cols="80" required></textarea>
+        </label>
+        <button type="submit">Verify signature</button>
+      </form>
+      <p class="muted">
+        Wallet can't sign for this address type (common for taproot-only cold
+        wallets)? There is deliberately no skip — use a different address the
+        wallet CAN sign for, or take the <code>show-btc-key</code> route below.
+      </p>
+      ${addressForm}
+      <form method="post" action="/exit/dest/clear">
+        <button type="submit" class="muted">Clear destination</button>
+      </form>
+    `
+  }
+
+  const unresolvedNote =
+    summary.unresolved > 0
+      ? html`<p class="bad">
+          ${summary.swept} of ${summary.total} vaulted vtxo(s) are swept; ${summary.unresolved}
+          are not. If those are stuck because the exit cost exceeds their value, that is a
+          judgment call you already made — but check the table above one last time before
+          sending: after this, topping up fuel to exit them means paying onchain again.
+        </p>`
+      : html`<p class="muted">All ${summary.total} vaulted vtxo(s) are swept — nothing left behind.</p>`
+
+  const sendState = sendInfo
+    ? sendInfo.confirmed
+      ? html`<p>Last send <code>${short(sendInfo.sendTxid)}</code> is <strong>confirmed</strong>.
+          Anything landing on the fuel address afterwards can be sent again below.</p>`
+      : html`<p>
+          Send <code>${short(sendInfo.sendTxid)}</code> in mempool —
+          ${sendInfo.feeSat.toLocaleString()} sats fee (${sendInfo.rateSatVb} sat/vB, next block
+          ~${sendInfo.targetRateSatVb} sat/vB)${sendInfo.blocksWaiting !== null
+            ? html` · waiting ${sendInfo.blocksWaiting} block(s)`
+            : html``}
+        </p>
+        ${sendInfo.boostable
+          ? html`<form method="post" action="/exit/final-send/boost">
+              <button type="submit">Boost fee (RBF)</button>
+            </form>`
+          : html``}`
+    : dest.sendTxid
+      ? html`<p class="muted">Last send <code>${short(dest.sendTxid)}</code> — status unknown (esplora unreachable).</p>`
+      : html``
+
+  return html`
+    <h2>Final send — destination verified</h2>
+    <p>
+      <code>${dest.address}</code>
+      <span class="pill settled">ownership proven (${dest.scheme})</span>
+    </p>
+    ${unresolvedNote}
+    ${sendState}
+    <form method="post" action="/exit/final-send"
+      onsubmit="return confirm('Send the ENTIRE fuel balance (${args.fundingBalanceSat === null ? 'balance unknown' : `${args.fundingBalanceSat.toLocaleString()} sats`} minus one exact miner fee) to ${dest.address}?');">
+      <button type="submit">Send everything → ${short6(dest.address)}</button>
+    </form>
+    <p class="muted">
+      One transaction, all confirmed fuel coins, no change output: the fee is computed
+      from the exact tx size at the current next-block rate and everything else goes to
+      your address. RBF stays available above if it lags. Unconfirmed fuel coins are
+      left for a later send.
+    </p>
+    <form method="post" action="/exit/dest/clear">
+      <button type="submit" class="muted">Clear destination</button>
+    </form>
+  `
+}
+
+function short6(addr: string): string {
+  return `${addr.slice(0, 10)}…${addr.slice(-6)}`
+}
+
+/** shown when a final-send action (challenge, verify, send, boost) is rejected */
+export function exitFinalError(action: string, reason: string): RawHtml {
+  return layout({
+    title: `${action} failed`,
+    current: 'exit',
+    body: html`
+      <p><a href="/exit">← back to exit</a></p>
+      <p class="bad">${action} failed: ${reason}</p>
+    `,
+  })
+}
+
 export function exitView(args: {
   rows: ExitRow[]
   feeRate: number
@@ -109,6 +255,9 @@ export function exitView(args: {
   nowSec: number
   fundingAddress: string
   fundingBalanceSat: number | null
+  dest: ExitDest | null
+  summary: ExitSummary
+  sendInfo: FinalSendInfo | null
 }): RawHtml {
   const { rows, stats } = args
   return layout({
@@ -163,6 +312,12 @@ export function exitView(args: {
           : `${args.fundingBalanceSat.toLocaleString()} sats`}.
         Open a vtxo for its funding QR and the guided flow.
       </p>
+      ${finalSendSection({
+        dest: args.dest,
+        summary: args.summary,
+        sendInfo: args.sendInfo,
+        fundingBalanceSat: args.fundingBalanceSat,
+      })}
     `,
   })
 }
