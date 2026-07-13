@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet, WalletBalance, RestArkProvider } from '@arkade-os/sdk'
-import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 
 import type { Config } from '../config'
 import { sendLightning } from '../ln_send'
@@ -985,11 +985,16 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               )
               void ready.caches.balance.refresh()
               void ready.caches.sendData.refresh()
+              // Same amount/fee split as everywhere else: the invoice nominal
+              // is what the payee got, the gap (swap fee + any drain residue)
+              // is our cost — res.amount alone is the fee-inclusive total.
+              const nominalSats = decodeInvoice(destination).amountSats ?? 0
+              const feeSats = Math.max(0, res.amount - nominalSats)
               return htmlResponse(
                 sendResultView({
                   label: 'lightning',
                   ok: true,
-                  detail: `paid ${res.amount} sats\npreimage ${res.preimage}\narkTxid ${res.txid}`,
+                  detail: `paid ${nominalSats} sats (+ ${feeSats} sats fee)\npreimage ${res.preimage}\narkTxid ${res.txid}`,
                 }),
               )
             } catch (err) {

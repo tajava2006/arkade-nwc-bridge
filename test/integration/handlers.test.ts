@@ -112,7 +112,7 @@ describe('handlers', () => {
       ).rejects.toMatchObject({ code: 'OTHER' })
     })
 
-    test('≥dust inserts a pending swap row and returns wallet-movement amounts', async () => {
+    test('≥dust inserts a pending swap row — amount = BOLT11 nominal, fee = the swap cut', async () => {
       const conn = newConn(temp)
       // Client asks for 1000 sat. Boltz takes 10 sat fee, 990 sat lands on Ark.
       const swaps = makeSwapsStub({
@@ -133,8 +133,8 @@ describe('handlers', () => {
       expect(r.type).toBe('incoming')
       expect(r.state).toBe('pending')
       expect(r.invoice).toBe('lnbc10u')
-      expect(r.amount).toBe(990_000) // on-Ark movement, not nominal
-      expect(r.fees_paid).toBe(10_000)
+      expect(r.amount).toBe(1_000_000) // the nominal the client asked for — never inflated
+      expect(r.fees_paid).toBe(10_000) // the credit is derived: 1000 − 10 lands on Ark
       expect(r.description).toBe('tea')
       expect(r.payment_hash).toBe('aa'.repeat(32))
 
@@ -147,7 +147,7 @@ describe('handlers', () => {
         )
         .get()
       expect(row?.state).toBe('pending')
-      expect(row?.amount_msat).toBe(990_000)
+      expect(row?.amount_msat).toBe(1_000_000)
       expect(row?.fees_paid_msat).toBe(10_000)
       expect(row?.description).toBe('tea')
       // syncSwapToDb (boltz.ts) flips this row on settlement via the swap id.
@@ -172,7 +172,7 @@ describe('handlers', () => {
 
       expect(r.state).toBe('pending')
       expect(r.invoice).toBe(INVOICE_2000_SAT)
-      expect(r.amount).toBe(21_000) // 1:1 — the plain path takes no swap fee
+      expect(r.amount).toBe(21_000) // nominal; 1:1 — the plain path takes no swap fee
       expect(r.fees_paid).toBeUndefined()
 
       const row = temp.db
@@ -239,7 +239,7 @@ describe('handlers', () => {
         >(`SELECT state, amount_msat, fees_paid_msat, preimage FROM transactions`)
         .get()
       expect(row?.state).toBe('settled')
-      expect(row?.amount_msat).toBe(2_005_000)
+      expect(row?.amount_msat).toBe(2_000_000) // stays the BOLT11 nominal — fee is separate
       expect(row?.fees_paid_msat).toBe(5_000)
 
       const spent = temp.db

@@ -151,7 +151,7 @@ accounts (
 -- is no reset job, no last-reset column, and nothing to catch up
 -- on after downtime. 'never' is the one unbounded window; it reads
 -- the O(1) spent_msat counter instead (fee-inclusive wallet
--- movement since v13), which stays maintained for every renewal.
+-- movement), which stays maintained for every renewal.
 connections (
   id                  INTEGER PRIMARY KEY,
   label               TEXT,
@@ -169,8 +169,8 @@ connections (
 
 -- Unified NWC log: type='incoming' (make_invoice / reverse swap)
 -- and type='outgoing' (pay_invoice / submarine swap) live together.
--- amount_msat is on-Ark wallet movement, NOT invoice nominal.
--- fees_paid_msat captures the gap.
+-- amount_msat is the BOLT11 nominal, both directions; fees_paid_msat
+-- is our swap cost. Wallet movement is derived (see §5).
 transactions (
   id                  INTEGER PRIMARY KEY,
   connection_id       INTEGER NOT NULL REFERENCES connections(id),
@@ -215,7 +215,10 @@ boltz_swaps (
 
 Migrations are append-only ([`src/db.ts`](src/db.ts)). Once a version
 is shipped its SQL must not change — bump the version and write a
-correction instead, or older databases diverge.
+correction instead, or older databases diverge. (One deliberate
+exception on record: the 2026-07 schema-epoch reset collapsed the
+first 16 migrations back into a single v1 while the solo-operator DB
+was wiped on purpose; a pre-reset DB is refused at boot.)
 
 ## 5. NWC method flows
 
@@ -248,10 +251,12 @@ same reason.
    boltz collects itself; on settlement boltz plain-sends 1:1 to the wallet
    address (non-atomic — the payer trusts boltz; below dust there is no
    atomic alternative).
-3. Write a pending `transactions` row with `amount_msat = receivedMsat`
-   (= nominal on the sub-dust branch), `fees_paid_msat` the gap, and
-   `swap_id` only on the swap branch — `swap_id IS NULL` is how the
-   reconciler recognizes sub-dust rows.
+3. Write a pending `transactions` row with `amount_msat` = the BOLT11
+   nominal (exactly what the client asked for — the invoice is never
+   inflated), `fees_paid_msat` = the swap provider's cut that will come
+   out of what lands on Ark (0 on the sub-dust branch), and `swap_id`
+   only on the swap branch — `swap_id IS NULL` is how the reconciler
+   recognizes sub-dust rows.
 4. Return the invoice immediately. Settlement is asynchronous:
    - swap branch: Boltz drops a VHTLC once the LN side is paid; the
      `SwapManager` auto-claims it; `onSwapCompleted` → `syncSwapToDb` flips
@@ -272,16 +277,17 @@ same reason.
    `budget_msat`. No await between the check and the INSERT below, so
    concurrent requests can't jointly overshoot the cap.
 3. Insert pending `transactions` row with `amount_msat = invoiceMsat`
-   as a placeholder.
-4. `swaps.sendLightningPayment({ invoice })` — one-shot: creates
-   the submarine swap, sends the VTXO, awaits LN settlement, returns
-   preimage. Auto-refunds on failure via `SwapManager`.
-5. On success: `UPDATE` `amount_msat = paidMsat` (the on-Ark amount
-   that actually left the wallet, including the swap fee) and
-   `fees_paid_msat = paidMsat − invoiceMsat`. Bump
-   `connections.spent_msat` by `paidMsat` in the same sqlite
-   transaction (the row leaving 'pending' and the counter gaining it
-   must be atomic — see pay_invoice.ts). Return preimage.
+   — the BOLT11 nominal, final from the start.
+4. `sendLightning` (`src/ln_send.ts`, shared with the dashboard LN
+   rail): a submarine swap ≥ dust, boltz's plain-send path below it.
+   Auto-refunds on failure via `SwapManager`.
+5. On success: `UPDATE` `fees_paid_msat = paidMsat − invoiceMsat`
+   (everything we paid beyond the nominal: swap fee + any drain
+   residue); `amount_msat` stays the nominal. Bump
+   `connections.spent_msat` by `paidMsat` — the fee-inclusive wallet
+   movement — in the same sqlite transaction (the row leaving
+   'pending' and the counter gaining it must be atomic — see
+   pay_invoice.ts). Return preimage.
 
 ### `lookup_invoice` / `list_transactions`
 Read-only against `transactions`. **Scoped to the calling connection**
@@ -292,15 +298,29 @@ disambiguates.
 
 ### Amount semantics — the consistent story
 
-`transactions.amount_msat` = **on-Ark wallet movement**:
-- outgoing: what left the wallet (invoice + swap fee)
-- incoming: what landed in the wallet (invoice − swap fee)
+`transactions.amount_msat` = **the BOLT11 nominal**, both directions:
+the number payer and payee agreed on. `fees_paid_msat` = what WE paid
+to move it — the Boltz cut plus any drain residue; always ours, never
+the payer's. Wallet movement is derived, never stored:
 
-`fees_paid_msat` = the gap (always positive). NIP-47's spec is
-ambiguous on whether `amount` means "invoice nominal" or "what
-actually moved", but matching wallet movement is what makes the
-number useful to a user reasoning about their balance — and it's
-what arkade.money's wallet UI does.
+- outgoing: debit = amount + fees (fee paid on top of the nominal)
+- incoming: credit = amount − fees (fee taken out of the nominal)
+
+The rule is symmetric — the fee always lands on us — even though it
+reads "added" one way and "deducted" the other.
+
+We used to store wallet movement in `amount_msat` instead (fee folded
+into the outgoing amount). That double-shows the fee in any client
+that renders amount and fee side by side, disagrees with the number a
+payer can read out of the BOLT11 itself (`lookup_invoice` returns the
+invoice — its `amount` should match what's encoded in it), and skews
+zap history: NIP-57 receipt validation requires the bolt11 amount to
+equal the zap request's, so a 21-sat zap must read 21, not 20 or 22.
+Changed at the 2026-07 schema-epoch reset, together with the fee side
+of receives: the invoice is never inflated above what the client asked
+for — the payer pays the agreed number, and the swap cost comes out of
+what lands on Ark (the receiver's cost of the LN → Ark move, exactly
+like a merchant eating the card fee).
 
 ## 6. Why NIP-46 delegation is rejected
 

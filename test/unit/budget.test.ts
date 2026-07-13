@@ -78,16 +78,30 @@ describe('cycleSpentMsat', () => {
   let seq = 0
   function insertTx(
     connId: number,
-    args: { type: 'incoming' | 'outgoing'; state: string; amountMsat: number; createdAt: number },
+    args: {
+      type: 'incoming' | 'outgoing'
+      state: string
+      amountMsat: number
+      feesMsat?: number
+      createdAt: number
+    },
   ): void {
     temp.db
       .query(
         `INSERT INTO transactions (
            connection_id, type, request_event_id, invoice, payment_hash,
-           amount_msat, state, created_at
-         ) VALUES (?, ?, ?, 'lnbc1', 'hash', ?, ?, ?)`,
+           amount_msat, fees_paid_msat, state, created_at
+         ) VALUES (?, ?, ?, 'lnbc1', 'hash', ?, ?, ?, ?)`,
       )
-      .run(connId, args.type, `evt-${++seq}`, args.amountMsat, args.state, args.createdAt)
+      .run(
+        connId,
+        args.type,
+        `evt-${++seq}`,
+        args.amountMsat,
+        args.feesMsat ?? null,
+        args.state,
+        args.createdAt,
+      )
   }
 
   function conn(budgetRenewal: Connection['budgetRenewal']): Connection {
@@ -122,5 +136,17 @@ describe('cycleSpentMsat', () => {
     // stale counter must be irrelevant on the periodic path
     temp.db.query('UPDATE connections SET spent_msat = ? WHERE id = ?').run(9_999_999, c.id)
     expect(cycleSpentMsat(temp.db, c, now)).toBe(2_000_000)
+  })
+
+  test('daily: a settled row counts amount + fee — the budget guards wallet movement, not the nominal', () => {
+    const c = conn('daily')
+    const now = new Date(2026, 6, 15, 12)
+    const today = sec(new Date(2026, 6, 15, 9))
+    insertTx(c.id, {
+      type: 'outgoing', state: 'settled', amountMsat: 1_000_000, feesMsat: 3_000, createdAt: today,
+    })
+    // pending rows have no fee yet — they reserve the nominal only
+    insertTx(c.id, { type: 'outgoing', state: 'pending', amountMsat: 500_000, createdAt: today })
+    expect(cycleSpentMsat(temp.db, c, now)).toBe(1_503_000)
   })
 })

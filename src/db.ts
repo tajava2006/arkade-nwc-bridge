@@ -5,6 +5,13 @@ import { dirname } from 'node:path'
 // Each migration is applied in order, exactly once. Append-only — never edit a
 // previous entry's SQL, even to fix a typo, or older databases will diverge.
 // Bump the version, write a new migration that corrects the prior one.
+//
+// 2026-07 schema-epoch reset: the first 16 incremental migrations were
+// collapsed back into this single v1 while the operator DB was deliberately
+// wiped (solo-user instance, test data only) — sixteen ALTERs had made the
+// schema unreadable and there was no deployed data worth preserving. The
+// incremental history lives in git before this commit. The append-only rule
+// applies again from here; a pre-reset DB is refused at boot (applyMigrations).
 interface Migration {
   version: number
   description: string
@@ -14,8 +21,15 @@ interface Migration {
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
-    description: 'initial schema (connections, transactions, processed_events)',
+    description: 'consolidated schema (2026-07 epoch reset)',
     sql: `
+      -- One NWC client pairing per row. Each connection is pinned to the relay
+      -- set the outbox watcher resolved at create time (relays_json): existing
+      -- clients keep working even if the operator's NIP-65 list changes
+      -- underneath, no revoke+reissue dance. spent_msat is the lifetime
+      -- fee-inclusive wallet-movement counter backing the 'never' budget
+      -- renewal (src/lib/budget.ts) — maintained for every renewal type so a
+      -- row can later switch to 'never' without losing history.
       CREATE TABLE connections (
         id                  INTEGER PRIMARY KEY,
         label               TEXT,
@@ -23,7 +37,9 @@ const MIGRATIONS: readonly Migration[] = [
         service_pubkey_hex  TEXT    NOT NULL UNIQUE,
         client_pubkey_hex   TEXT    NOT NULL,
         budget_msat         INTEGER,
+        budget_renewal      TEXT    NOT NULL DEFAULT 'never',
         spent_msat          INTEGER NOT NULL DEFAULT 0,
+        relays_json         TEXT    NOT NULL DEFAULT '[]',
         expires_at          INTEGER,
         created_at          INTEGER NOT NULL,
         revoked_at          INTEGER
@@ -31,13 +47,23 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_connections_client_pubkey ON connections(client_pubkey_hex);
 
       -- Single transactions table covering both NWC-side incoming (reverse
-      -- swaps) and outgoing (submarine swaps). type discriminates, the
-      -- rest of the columns are a union of what each side needs:
-      --   incoming uses description / expires_at
-      --   outgoing uses error
-      -- everything else is shared. This mirrors the NIP-47 transaction
-      -- object shape (which is also one shape with a type field) and how
-      -- most LN wallet UIs surface history — a single feed.
+      -- swaps) and outgoing (submarine swaps). type discriminates, the rest of
+      -- the columns are a union of what each side needs (incoming uses
+      -- description / expires_at, outgoing uses error). This mirrors the
+      -- NIP-47 transaction object shape — one shape with a type field — and
+      -- how most LN wallet UIs surface history.
+      --
+      -- amount_msat is the BOLT11 nominal: the number payer and payee agreed
+      -- on, and the one NIP-57 receipt validation compares against the zap
+      -- request. fees_paid_msat is what WE paid to move it — the swap
+      -- provider's cut, plus any drain residue donated on sends; NULL until
+      -- known. The on-Ark wallet movement is always derived, never stored:
+      -- incoming credits amount − fees, outgoing debits amount + fees.
+      --
+      -- Reads are connection-scoped and ordered by created_at DESC
+      -- (list_transactions, lookup_invoice, the connection-detail page) — the
+      -- composite index serves all of them. state stays indexed for the
+      -- reconcilers' small high-selectivity pending scans.
       CREATE TABLE transactions (
         id                  INTEGER PRIMARY KEY,
         connection_id       INTEGER NOT NULL REFERENCES connections(id),
@@ -45,8 +71,8 @@ const MIGRATIONS: readonly Migration[] = [
         request_event_id    TEXT    NOT NULL UNIQUE,
         invoice             TEXT    NOT NULL,
         payment_hash        TEXT    NOT NULL,
-        amount_msat         INTEGER NOT NULL,    -- on-Ark wallet movement
-        fees_paid_msat      INTEGER,
+        amount_msat         INTEGER NOT NULL,    -- BOLT11 nominal
+        fees_paid_msat      INTEGER,             -- our cost, never the payer's
         description         TEXT,
         swap_id             TEXT,
         state               TEXT    NOT NULL,    -- 'pending' | 'settled' | 'failed' | 'expired'
@@ -56,11 +82,9 @@ const MIGRATIONS: readonly Migration[] = [
         expires_at          INTEGER,
         settled_at          INTEGER
       );
-      CREATE INDEX idx_transactions_connection ON transactions(connection_id);
       CREATE INDEX idx_transactions_payment_hash ON transactions(payment_hash);
       CREATE INDEX idx_transactions_state ON transactions(state);
-      CREATE INDEX idx_transactions_type ON transactions(type);
-      CREATE INDEX idx_transactions_created_at ON transactions(created_at);
+      CREATE INDEX idx_transactions_conn_created ON transactions(connection_id, created_at);
 
       CREATE TABLE processed_events (
         event_id            TEXT    PRIMARY KEY,
@@ -68,12 +92,9 @@ const MIGRATIONS: readonly Migration[] = [
         method              TEXT,
         processed_at        INTEGER NOT NULL
       );
-    `,
-  },
-  {
-    version: 2,
-    description: 'boltz_swaps table backing the SwapRepository for @arkade-os/boltz-swap',
-    sql: `
+
+      -- Backs the SqliteSwapRepository for @arkade-os/boltz-swap: rows keyed
+      -- on swap.id, the full BoltzSwap object stashed as a JSON blob.
       CREATE TABLE boltz_swaps (
         id          TEXT    PRIMARY KEY,
         type        TEXT    NOT NULL,   -- 'reverse' | 'submarine' | 'chain'
@@ -84,52 +105,30 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_boltz_swaps_status ON boltz_swaps(status);
       CREATE INDEX idx_boltz_swaps_type ON boltz_swaps(type);
       CREATE INDEX idx_boltz_swaps_created_at ON boltz_swaps(created_at);
-    `,
-  },
-  {
-    version: 3,
-    description: 'accounts table — Ark identity moves from ARK_NSEC env var to here',
-    // Schema permits multiple rows but the bridge only loads the first by id.
-    // Multi-account would need history/connection scoping changes far beyond
-    // a schema tweak, so for now treat "the account" as `ORDER BY id LIMIT 1`.
-    sql: `
+
+      -- The Ark identity (created via /setup, recovered via show-nsec).
+      -- Schema permits multiple rows but the bridge only loads the first by
+      -- id — multi-account would need history/connection scoping changes far
+      -- beyond a schema tweak, so "the account" is ORDER BY id LIMIT 1.
       CREATE TABLE accounts (
         id          INTEGER PRIMARY KEY,
         nsec_hex    TEXT    NOT NULL,
         created_at  INTEGER NOT NULL
       );
-    `,
-  },
-  {
-    version: 4,
-    description: 'connections.relays_json — per-connection relay list from outbox at create time',
-    // Each NWC client is pinned to whatever relays the outbox watcher
-    // resolved when its connection was created. Storing them here lets
-    // the bridge keep listening on each connection's original relays
-    // even after the outbox list changes, so existing clients keep
-    // working without a revoke+reissue dance. New rows always get a
-    // non-empty list via createConnection; the empty-array default is
-    // only for the column shape and won't apply to live rows.
-    sql: `
-      ALTER TABLE connections ADD COLUMN relays_json TEXT NOT NULL DEFAULT '[]';
-    `,
-  },
-  {
-    version: 5,
-    description: 'offboards table — bridge-native collaborative-exit tracking',
-    // Onchain sends are the one rail that can take >10 min (they wait for a
-    // settlement round to commit), so the web POST fires the offboard and
-    // returns immediately rather than blocking. This table is the durable
-    // record of those in-flight/finished exits: wallet.getTransactionHistory()
-    // only surfaces an offboard once its commitment tx is final, so without
-    // this the pending window — and any round failure — would be invisible.
-    // Separate from `transactions` (that one is NWC/LN-shaped: connection_id
-    // NOT NULL, invoice/payment_hash NOT NULL); an offboard has none of those.
-    sql: `
+
+      -- Bridge-native collaborative exits. Onchain sends are the one rail
+      -- that can take >10 min (they wait for a settlement round), so the web
+      -- POST fires the offboard and returns; this is the durable record of
+      -- the pending window and any round failure — getTransactionHistory()
+      -- only surfaces an offboard once its commitment tx is final. Separate
+      -- from transactions (that one is NWC/LN-shaped; an offboard has no
+      -- connection, invoice, or payment hash). Same amount/fee split as
+      -- transactions: amount_sat is what lands at the destination, fee_sat
+      -- what we paid on top.
       CREATE TABLE offboards (
         id           INTEGER PRIMARY KEY,
         address      TEXT    NOT NULL,    -- destination onchain address
-        amount_sat   INTEGER NOT NULL,    -- sats landing at the destination (after intent fee)
+        amount_sat   INTEGER NOT NULL,    -- sats landing at the destination
         fee_sat      INTEGER NOT NULL,    -- arkd onchain-output intent fee deducted
         is_max       INTEGER NOT NULL,    -- 1 = full drain (amount omitted to the SDK)
         state        TEXT    NOT NULL,    -- 'pending' | 'settled' | 'failed'
@@ -140,115 +139,65 @@ const MIGRATIONS: readonly Migration[] = [
       );
       CREATE INDEX idx_offboards_state ON offboards(state);
       CREATE INDEX idx_offboards_created_at ON offboards(created_at);
-    `,
-  },
-  {
-    version: 6,
-    description: 'clink_offer — single-row store for the static noffer receive code',
-    // The dashboard's static CLINK noffer code. We persist the *encoded
-    // string* (not its parts): it's the exact value people may have saved,
-    // and we decode it on boot to recover the relay to listen on — so the
-    // listen relay is frozen at mint time, immune to the operator's NIP-65
-    // outbox drifting underneath (mirrors connections.relays_json). A noffer
-    // carries only ONE relay (spec TLV 1 is singular), so there's nothing to
-    // listen on but that one; if it dies the operator regenerates by hand.
-    // Exactly one row (id=1, upserted) — a static handle, replaced not
-    // accumulated.
-    sql: `
+
+      -- The dashboard's static CLINK noffer code. We persist the *encoded
+      -- string* (not its parts): it's the exact value people may have saved,
+      -- and decoding it on boot recovers the relay to listen on — frozen at
+      -- mint time, immune to NIP-65 outbox drift (mirrors
+      -- connections.relays_json). A noffer carries only ONE relay (spec TLV 1
+      -- is singular); if it dies the operator regenerates by hand. Exactly
+      -- one row (id=1, upserted) — a static handle, replaced not accumulated.
       CREATE TABLE clink_offer (
         id         INTEGER PRIMARY KEY CHECK (id = 1),
         noffer     TEXT    NOT NULL,   -- the noffer1… bech32 string
         created_at INTEGER NOT NULL
       );
-    `,
-  },
-  {
-    version: 7,
-    description: 'clink_offer_receipts — pending CLINK payment receipts per offer swap',
-    // To send the spec's optional CLINK Payment Receipt (kind 21001
-    // {res:ok,preimage}) we must, at invoice-issue time, remember who to
-    // ack and where — the payer pubkey, their request event id, and the
-    // relay the request arrived on (the payer listens for the reply there;
-    // it may differ from the *current* offer relay if the code was
-    // regenerated in between). Keyed on the reverse-swap id so the swap's
-    // onSwapCompleted callback can look the row up, publish the receipt, and
-    // delete it. Persisted (not in-memory) so a restart between pay and
-    // settle still lets us ack. No connection_id, no invoice — doesn't fit
-    // the NWC-shaped transactions table.
-    sql: `
+
+      -- Pending CLINK payment receipts (kind 21001 {res:ok,preimage}): at
+      -- invoice-issue time remember who to ack and where — the payer pubkey,
+      -- their request event id, and the relay the request arrived on (it may
+      -- differ from the *current* offer relay if the code was regenerated in
+      -- between). Keyed on the reverse-swap id so onSwapCompleted can look
+      -- the row up, publish the receipt, and delete it. Persisted (not
+      -- in-memory) so a restart between pay and settle still acks.
+      -- zap_request/zap_invoice carry NIP-57 support, both needed at settle
+      -- time: the exact 9734 JSON string the descriptionHash was computed
+      -- over (doubles as the 9735 description tag) and the BOLT11 for the
+      -- 9735 bolt11 tag. Both NULL for plain non-zap receives.
       CREATE TABLE clink_offer_receipts (
         swap_id      TEXT PRIMARY KEY,
         payer_pubkey TEXT    NOT NULL,
         request_id   TEXT    NOT NULL,
         relay        TEXT    NOT NULL,
+        zap_request  TEXT,
+        zap_invoice  TEXT,
         created_at   INTEGER NOT NULL
       );
-    `,
-  },
-  {
-    version: 8,
-    description: 'clink_subdust_receipts — pending CLINK receipts for sub-dust receives',
-    // Sub-dust receives don't create a Boltz swap (no swap_id), so they can't
-    // ride clink_offer_receipts. Same payer/request/relay info, keyed on the
-    // invoice payment hash instead. The ack reconciler asks boltz
-    // (/v2/subdust/receive/status) whether the invoice settled and, if so,
-    // publishes the receipt and deletes the row. Persisted so a restart between
-    // issue and settle still acks; a TTL pass drops never-paid rows.
-    sql: `
+
+      -- Same ack bookkeeping for sub-dust receives, which create no Boltz
+      -- swap object (no swap_id) — keyed on the invoice payment hash instead.
+      -- The ack reconciler polls /v2/subdust/receive/status and publishes on
+      -- settle; a TTL pass drops never-paid rows.
       CREATE TABLE clink_subdust_receipts (
         payment_hash TEXT PRIMARY KEY,
         payer_pubkey TEXT    NOT NULL,
         request_id   TEXT    NOT NULL,
         relay        TEXT    NOT NULL,
+        zap_request  TEXT,
+        zap_invoice  TEXT,
         created_at   INTEGER NOT NULL
       );
-    `,
-  },
-  {
-    version: 9,
-    description: 'zap columns on clink receipt tables — NIP-57 zap (9735) support',
-    // A CLINK offer request can carry a NIP-57 zap payload (a kind-9734 event
-    // in the `zap` field). When it does, we mint a descriptionHash invoice
-    // committing SHA256(the exact 9734 string) and, on settlement, publish a
-    // kind-9735 zap receipt to the relays named in the 9734. Both are needed at
-    // settle time and settle happens later (possibly after a restart), so we
-    // persist them alongside the existing receipt rows:
-    //   zap_request — the exact 9734 JSON string (byte-identical to what the
-    //                 descriptionHash was computed over, so it doubles as the
-    //                 9735 `description` tag: SHA256(it) == invoice hash).
-    //   zap_invoice — the BOLT11, needed for the 9735 `bolt11` tag (not
-    //                 reconstructable from the payment hash).
-    // Both NULL for non-zap (plain spontaneous) receives — those still only get
-    // the CLINK Payment Receipt, no 9735. Nullable ADD COLUMN, so pre-zap rows
-    // and the whole plain path are unaffected.
-    sql: `
-      ALTER TABLE clink_offer_receipts   ADD COLUMN zap_request TEXT;
-      ALTER TABLE clink_offer_receipts   ADD COLUMN zap_invoice TEXT;
-      ALTER TABLE clink_subdust_receipts ADD COLUMN zap_request TEXT;
-      ALTER TABLE clink_subdust_receipts ADD COLUMN zap_invoice TEXT;
-    `,
-  },
-  {
-    version: 10,
-    description: 'exit vault — locally persisted unilateral-exit proofs (EXIT_PLAN.md)',
-    // Unilateral exit must work with the ASP dead, but the SDK's unroll path
-    // fetches the pre-signed PSBTs from the ASP's indexer at exit time. These
-    // two tables are the offline mirror, kept fresh by ProofSync while the
-    // ASP is alive; the exit engine reads only from here (+ esplora).
-    //
-    // exit_proof_txs is keyed on txid: vtxo histories form a DAG, so one row
-    // per tx dedupes branches shared across vtxos (and within one vtxo's own
-    // history — mainnet measurement saw 119 chain refs → 107 unique txs on a
-    // single vtxo). Rows are immutable; a pre-signed PSBT for a txid never
-    // legitimately changes.
-    //
-    // exit_vtxos snapshots what the sweep step needs when no Wallet object
-    // exists (value + tap_tree for exit paths/witnessUtxo) plus the ordered
-    // chain exactly as the indexer returned it (SDK ChainTx[] JSON — the
-    // Unroll.Session input). Completeness is not enforced here: a vtxo row
-    // may momentarily reference proofs not yet fetched; readiness is always
-    // recomputed by joining against exit_proof_txs (src/exit/vault.ts).
-    sql: `
+
+      -- Exit vault: locally persisted unilateral-exit proofs (EXIT_DESIGN.md).
+      -- Unilateral exit must work with the ASP dead, but the SDK's unroll
+      -- path fetches pre-signed PSBTs from the ASP's indexer at exit time.
+      -- These two tables are the offline mirror, kept fresh by ProofSync
+      -- while the ASP is alive; the exit engine reads only from here
+      -- (+ esplora).
+      --
+      -- exit_proof_txs is keyed on txid: vtxo histories form a DAG, so one
+      -- row per tx dedupes branches shared across vtxos. Rows are immutable;
+      -- a pre-signed PSBT for a txid never legitimately changes.
       CREATE TABLE exit_proof_txs (
         txid          TEXT    PRIMARY KEY,
         type          TEXT    NOT NULL,    -- SDK ChainTxType string
@@ -256,33 +205,40 @@ const MIGRATIONS: readonly Migration[] = [
         first_seen_at INTEGER NOT NULL
       );
 
+      -- exit_vtxos snapshots what the sweep step needs when no Wallet object
+      -- exists (value + tap_tree for exit paths/witnessUtxo) plus the ordered
+      -- chain exactly as the indexer returned it (SDK ChainTx[] JSON — the
+      -- Unroll.Session input). Completeness is not enforced here; readiness
+      -- is recomputed by joining against exit_proof_txs (src/exit/vault.ts).
+      -- GC is evidence-gated: a vtxo the ASP drops from the live set is only
+      -- deleted on verifiable evidence (our own signature on the spending tx,
+      -- or a locally-judged expiry). Rows failing that demand are quarantined
+      -- instead — proofs retained, so the server's lie can't destroy the
+      -- escape hatch. quarantined_at keeps the FIRST quarantine time across
+      -- passes; reason is refreshed.
       CREATE TABLE exit_vtxos (
-        txid        TEXT    NOT NULL,
-        vout        INTEGER NOT NULL,
-        value_sat   INTEGER NOT NULL,
-        script      TEXT    NOT NULL,    -- pkScript hex (ownership cross-check)
-        tap_tree    TEXT    NOT NULL,    -- EncodedVtxoScript.tapTree hex
-        status      TEXT    NOT NULL,    -- virtualStatus.state snapshot (display only)
-        expires_at  INTEGER,             -- batch expiry, unix seconds — the exit deadline
-        chain_json  TEXT    NOT NULL,    -- ChainTx[] in indexer order
-        synced_at   INTEGER NOT NULL,
+        txid              TEXT    NOT NULL,
+        vout              INTEGER NOT NULL,
+        value_sat         INTEGER NOT NULL,
+        script            TEXT    NOT NULL,    -- pkScript hex (ownership cross-check)
+        tap_tree          TEXT    NOT NULL,    -- EncodedVtxoScript.tapTree hex
+        status            TEXT    NOT NULL,    -- virtualStatus.state snapshot (display only)
+        expires_at        INTEGER,             -- batch expiry, unix seconds — the exit deadline
+        chain_json        TEXT    NOT NULL,    -- ChainTx[] in indexer order
+        quarantined_at    INTEGER,
+        quarantine_reason TEXT,
+        synced_at         INTEGER NOT NULL,
         PRIMARY KEY (txid, vout)
       );
       CREATE INDEX idx_exit_vtxos_expires_at ON exit_vtxos(expires_at);
-    `,
-  },
-  {
-    version: 11,
-    description: 'exit_ops — unilateral-exit intent/progress records (EXIT_PLAN #09)',
-    // One row per vtxo the operator told the engine to exit. Deliberately a
-    // COARSE record: the fine-grained unroll progress is re-derived from
-    // chain state every time (Unroll.Session skips what is already onchain),
-    // so a crash mid-exit needs no precise replay — resume just re-runs the
-    // session. States: unrolling (broadcasting the pre-signed chain) →
-    // waiting (all confirmed, CSV timelock running) → sweepable (CSV
-    // elapsed) → swept (sweep tx broadcast, #10 sets sweep_txid). failed is
-    // retryable — startExit on a failed row resets it.
-    sql: `
+
+      -- Unilateral-exit intent/progress, one row per vtxo the operator told
+      -- the engine to exit. Deliberately a COARSE record: fine-grained unroll
+      -- progress is re-derived from chain state every time (Unroll.Session
+      -- skips what is already onchain), so a crash mid-exit needs no precise
+      -- replay — resume just re-runs the session. States: unrolling →
+      -- waiting (CSV timelock running) → sweepable → swept. failed is
+      -- retryable — startExit on a failed row resets it.
       CREATE TABLE exit_ops (
         txid         TEXT    NOT NULL,
         vout         INTEGER NOT NULL,
@@ -295,83 +251,20 @@ const MIGRATIONS: readonly Migration[] = [
         PRIMARY KEY (txid, vout)
       );
       CREATE INDEX idx_exit_ops_state ON exit_ops(state);
-    `,
-  },
-  {
-    version: 12,
-    description: 'transactions index cleanup — composite (connection_id, created_at), drop redundant singles',
-    // Every read of this table is connection-scoped and ordered by
-    // created_at DESC (list_transactions, connection-detail page,
-    // lookup_invoice); the composite serves all three, so the standalone
-    // connection_id index is dead weight. type is never queried alone (always
-    // paired with state='pending' in the reconcilers, which state covers), and
-    // there is no cross-connection created_at consumer — the ark-side history
-    // view was removed, so its unqualified time-ordered scan is gone too. state
-    // stays: the 30s incoming reconciler and the boot recovery scan filter on
-    // state='pending', which is a tiny, high-selectivity slice at any moment.
-    // payment_hash stays for lookup_invoice's hash lookup.
-    sql: `
-      DROP INDEX IF EXISTS idx_transactions_connection;
-      DROP INDEX IF EXISTS idx_transactions_type;
-      DROP INDEX IF EXISTS idx_transactions_created_at;
-      CREATE INDEX idx_transactions_conn_created ON transactions(connection_id, created_at);
-    `,
-  },
-  {
-    version: 13,
-    description:
-      'connections.budget_renewal + spent_msat redefined as fee-inclusive wallet movement',
-    // Budget windows are computed, never stored — src/lib/budget.ts derives
-    // the current window from (budget_renewal, now) and sums `transactions`
-    // inside it, so there is no reset job and no last-reset column. 'never'
-    // is the one renewal whose window is unbounded; it keeps the spent_msat
-    // counter (O(1) forever) instead of a SUM that grows with lifetime
-    // traffic. The counter stays maintained for every renewal type so a row
-    // can later switch to 'never' without losing history.
-    //
-    // spent_msat also changes meaning here: it used to accumulate the
-    // invoice nominal, but budgets now track what actually left the wallet
-    // (invoice + swap fee), matching transactions.amount_msat. The backfill
-    // recomputes existing counters under the new definition.
-    sql: `
-      ALTER TABLE connections ADD COLUMN budget_renewal TEXT NOT NULL DEFAULT 'never';
-      UPDATE connections SET spent_msat = (
-        SELECT COALESCE(SUM(amount_msat), 0) FROM transactions
-        WHERE connection_id = connections.id AND type = 'outgoing' AND state = 'settled'
-      );
-    `,
-  },
-  {
-    version: 14,
-    description: 'exit_vtxos quarantine — evidence-gated GC keeps unexplained disappearances',
-    // A vtxo the ASP drops from the live set is no longer deleted on the
-    // server's word alone: ProofSync now demands verifiable evidence (our own
-    // signature on the spending tx, or a locally-judged expiry) before GC.
-    // Rows that fail that demand are quarantined instead — proofs retained,
-    // so the pre-signed exit chain stays usable until batch expiry (deleting
-    // it would let the server's lie destroy the escape hatch). quarantined_at
-    // keeps the FIRST quarantine time across passes; reason is refreshed.
-    sql: `
-      ALTER TABLE exit_vtxos ADD COLUMN quarantined_at INTEGER;
-      ALTER TABLE exit_vtxos ADD COLUMN quarantine_reason TEXT;
-    `,
-  },
-  {
-    version: 15,
-    description: 'exit_broadcasts — tip height at broadcast, for the "N blocks waiting" readout',
-    // Deliberately the ONLY thing recorded about a broadcast: everything else
-    // the boost path needs is either derivable offline (the parent hex
-    // re-finalizes from the vault PSBT) or better read live from esplora (the
-    // CPFP child and its fee are found through the anchor outspend — a stored
-    // copy could be stale if anyone else bumped the anyone-can-spend anchor).
-    // step_txid keys the row: for unroll packages that's the pre-signed
-    // parent (immutable, so boosts never touch the row); a sweep RBF mints a
-    // new txid, so the boost inserts a new row carrying the old tip_height
-    // forward (the wait started at the first broadcast, not the replacement).
-    // Re-broadcast after a mempool eviction overwrites tip_height — that IS a
-    // new wait. tip_height is NULL when the tip read failed at broadcast
-    // time; the UI just omits the counter.
-    sql: `
+
+      -- Tip height at broadcast, for the "waiting N blocks" readout.
+      -- Deliberately the ONLY thing recorded about a broadcast: everything
+      -- else the boost path needs is derivable offline (the parent hex
+      -- re-finalizes from the vault PSBT) or better read live from esplora
+      -- (a stored CPFP child could be stale if anyone else bumped the
+      -- anyone-can-spend anchor). step_txid keys the row: for unroll packages
+      -- that's the pre-signed parent (immutable, so boosts never touch the
+      -- row); a sweep RBF mints a new txid, so the boost inserts a new row
+      -- carrying the old tip_height forward (the wait started at the first
+      -- broadcast, not the replacement). Re-broadcast after a mempool
+      -- eviction overwrites tip_height — that IS a new wait. tip_height is
+      -- NULL when the tip read failed at broadcast time; the UI omits the
+      -- counter.
       CREATE TABLE exit_broadcasts (
         step_txid  TEXT PRIMARY KEY,
         txid       TEXT    NOT NULL,
@@ -379,22 +272,17 @@ const MIGRATIONS: readonly Migration[] = [
         tip_height INTEGER,
         created_at INTEGER NOT NULL
       );
-    `,
-  },
-  {
-    version: 16,
-    description: 'exit_dest — challenge-verified final-send destination (single row)',
-    // The last exit step: send everything accumulated on the fuel P2TR to an
-    // address the user PROVED they control (signed our challenge with that
-    // address's key — a typo or clipboard swap can't produce a verifying
-    // signature). One row because there is one operator and one final
-    // destination at a time; issuing a new challenge replaces the row and
-    // voids any previous verification. Persisted (not in-memory) because
-    // signing may involve a cold wallet on another machine — the challenge
-    // must survive a bridge restart. send_txid records the LATEST broadcast
-    // final send (an RBF boost overwrites it); fee/vsize are read live from
-    // esplora like the sweep boost, never stored.
-    sql: `
+
+      -- Challenge-verified final-send destination (single row). The last exit
+      -- step sends everything accumulated on the fuel P2TR to an address the
+      -- user PROVED they control (signed our challenge with that address's
+      -- key — a typo or clipboard swap can't produce a verifying signature).
+      -- One row because there is one operator and one final destination at a
+      -- time; issuing a new challenge replaces the row and voids any previous
+      -- verification. Persisted because signing may involve a cold wallet on
+      -- another machine — the challenge must survive a bridge restart.
+      -- send_txid records the LATEST broadcast final send (an RBF boost
+      -- overwrites it); fee/vsize are read live from esplora, never stored.
       CREATE TABLE exit_dest (
         id          INTEGER PRIMARY KEY CHECK (id = 1),
         address     TEXT    NOT NULL,
@@ -434,6 +322,20 @@ function applyMigrations(db: Database): void {
     'SELECT version FROM schema_migrations ORDER BY version',
   )
   const applied = new Set(appliedQuery.all().map((r) => r.version))
+
+  // A DB carrying migration versions this build has never heard of is either
+  // from before the 2026-07 epoch reset or from a newer build (a downgrade).
+  // Running against it would silently mix schema conventions — the epoch
+  // reset also changed what amount_msat *means* — so refuse loudly instead.
+  const maxKnown = MIGRATIONS[MIGRATIONS.length - 1]!.version
+  const maxApplied = Math.max(0, ...applied)
+  if (maxApplied > maxKnown) {
+    throw new Error(
+      `database schema v${maxApplied} is newer than this build knows (v${maxKnown}) — ` +
+        `a pre-epoch-reset DB or a downgrade. Back up the key (bun run show-nsec), ` +
+        `move the sqlite file aside, and restart to start fresh.`,
+    )
+  }
 
   for (const m of MIGRATIONS) {
     if (applied.has(m.version)) continue
