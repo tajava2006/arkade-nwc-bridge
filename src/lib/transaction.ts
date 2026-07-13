@@ -13,10 +13,11 @@ export interface TransactionRow {
   request_event_id: string
   invoice: string
   payment_hash: string
-  // amount_msat semantics: the on-Ark wallet movement. For incoming this
-  // is what was credited (invoice nominal minus the swap provider's fee);
-  // for outgoing this is what left the wallet (invoice nominal plus the
-  // fee). fees_paid_msat carries the gap explicitly.
+  // amount_msat is the BOLT11 nominal — the number payer and payee agreed
+  // on, both directions. fees_paid_msat is OUR cost of moving it (swap fee,
+  // plus any drain residue on sends), paid on top of the nominal when
+  // sending and out of it when receiving. Wallet movement is derived, never
+  // stored: incoming credits amount − fees, outgoing debits amount + fees.
   amount_msat: number
   fees_paid_msat: number | null
   description: string | null

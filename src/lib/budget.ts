@@ -50,9 +50,10 @@ export function nextRenewalSec(renewal: BudgetRenewal, now: Date): number | null
 
 /**
  * Spend committed against the connection's budget in the current window,
- * in msats. Counts actual wallet movement (invoice + swap fee once settled;
- * pending rows still hold the invoice nominal until settlement promotes
- * them) and includes pending rows so in-flight payments reserve budget.
+ * in msats. Budgets track actual wallet movement — amount (invoice nominal)
+ * plus fees_paid once settled; a pending row's fee isn't known yet, so it
+ * reserves the nominal only until settlement fills the fee in. Pending rows
+ * are included so in-flight payments reserve budget.
  *
  * Two sources by renewal type, on purpose:
  *  - periodic: SUM over `transactions` from the computed window start. The
@@ -87,9 +88,13 @@ export function cycleSpentMsat(
   }
 
   const start = periodStartSec(conn.budgetRenewal, now)
+  // amount_msat alone is the invoice nominal — the wallet movement a budget
+  // guards needs the fee added back (NULL while pending → nominal-only
+  // reservation, same as the 'never' path's pending slice).
   const row = db
     .query<{ total: number }, [number, number]>(
-      `SELECT COALESCE(SUM(amount_msat), 0) AS total FROM transactions
+      `SELECT COALESCE(SUM(amount_msat + COALESCE(fees_paid_msat, 0)), 0) AS total
+       FROM transactions
        WHERE connection_id = ? AND created_at >= ?
          AND type = 'outgoing' AND state IN ('pending', 'settled')`,
     )

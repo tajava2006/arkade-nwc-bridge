@@ -52,7 +52,7 @@ Implemented in [`src/clink/`](src/clink/). The Boltz/CLINK SDK only ships the
   displayed Ark address, so exposing it as the offer pubkey leaks nothing new and
   needs no extra backup).
 - noffer is minted from the operator's **current outbox relay [0]** at mint time
-  and the encoded string is persisted (`clink_offer` table, migration v6). On
+  and the encoded string is persisted (`clink_offer` table). On
   boot we decode the stored string and listen on the relay frozen into it — not
   the live outbox, which may have drifted. A noffer carries only one relay (spec
   TLV 1 is singular), so that single relay is the contact point; if it goes bad
@@ -60,7 +60,7 @@ Implemented in [`src/clink/`](src/clink/). The Boltz/CLINK SDK only ships the
   [`offers.ts`](src/clink/offers.ts), [`nip19_offer.ts`](src/clink/nip19_offer.ts).
 - Both responses (invoice and receipt) go to the relay the **request arrived
   on** — snapshotted into the handler for the invoice reply, persisted in
-  `clink_offer_receipts` (migration v7) for the later receipt — never the
+  `clink_offer_receipts` for the later receipt — never the
   "current" relay, so a regenerate/restart in between still reaches the payer.
 - Flow: payer sends kind-21001 → we validate + `createLightningInvoice` (Boltz
   reverse swap → Ark) → reply bolt11 → on settlement publish the CLINK Payment

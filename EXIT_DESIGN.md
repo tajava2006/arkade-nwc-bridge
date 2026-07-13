@@ -99,7 +99,7 @@ Modules under `src/exit/`:
 
 ## 3. Proof vault (the offline mirror)
 
-Two tables (migration v10):
+Two tables:
 
 - `exit_proof_txs(txid PK, type, psbt_base64, first_seen_at)` — the pre-signed
   PSBTs, one row per txid. VTXO histories form a DAG, so a txid PK **dedupes
@@ -134,7 +134,7 @@ bursts into one pass, escalates retry while a pass reports gaps (absorbing the
 post-settle availability lag), and polls every ~10 min as the missed-event
 safety net.
 
-**Evidence-gated GC** (`evidence.ts`, migration v14). GC used to trust the
+**Evidence-gated GC** (`evidence.ts`; the quarantine columns on `exit_vtxos`). GC used to trust the
 server's live list outright — but a vault row's proofs ARE the exit
 capability, so "the server said it's gone" deleting them means the server's
 lie can destroy the very escape hatch built against it (the denial-of-funds
@@ -220,7 +220,7 @@ so in-flight exits keep progressing even while the bring-up keeps failing.
 CPFP fees from the nsec `OnchainWallet` (esplora from `pickEsplora`) — identical
 in ready and degraded mode.
 
-`exit_ops` (migration v11) are **coarse** intent records: `unrolling → waiting →
+`exit_ops` rows are **coarse** intent records: `unrolling → waiting →
 sweepable → swept`, plus retryable `failed`. Coarse because unroll position is
 re-derived from chain state each run — a crash mid-exit needs no precise replay,
 `resume()` just re-runs the session and the session skips what's already
@@ -292,7 +292,7 @@ SDK's `bumpP2A` would silently fail:
 - The parent hex is **re-derived from the vault PSBT** with the session's own
   finalize rules (`finalizeProofTx`) — byte-identical to what was broadcast,
   no second copy to drift. The only persisted fact is the tip height at
-  broadcast (`exit_broadcasts`, v15), which feeds the "waiting N blocks"
+  broadcast (`exit_broadcasts`), which feeds the "waiting N blocks"
   readout; a sweep RBF carries it forward to the replacement txid since the
   wait began at the first broadcast.
 - **Concurrency is free**: the session's WAIT polls the parent txid, which a
@@ -493,6 +493,6 @@ was already a per-vtxo judgment (§1). A challenge-verified destination is also
 offered as a direct sweep target on the per-vtxo page (skips the fuel hop —
 one hop of fees less when CSV timing lets you sweep straight out).
 
-State lives in the single-row `exit_dest` table (migration v16): challenges
+State lives in the single-row `exit_dest` table: challenges
 survive restarts because signing may happen on an air-gapped machine days
 later; re-issuing replaces the row and voids the previous verification.

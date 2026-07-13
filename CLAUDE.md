@@ -26,8 +26,8 @@ src/
   boltz_repository.ts        — SqliteSwapRepository: rows keyed on swap.id,
                                full BoltzSwap stashed as JSON blob
   exit/                      — unilateral exit (EXIT_DESIGN.md). ASP-free:
-                               vault.ts (offline proof store, migration v10;
-                               quarantine columns v14), proof_sync.ts +
+                               vault.ts (offline proof store — exit_proof_txs
+                               + exit_vtxos incl. quarantine), proof_sync.ts +
                                sync_service.ts (mirror proofs while the ASP is
                                alive; GC is evidence-gated), evidence.ts
                                (classify a disappearance: verified spend by
@@ -36,11 +36,11 @@ src/
                                vault_indexer.ts (serve Unroll.Session offline),
                                csv.ts (CSV-elapsed judgment), estimate.ts
                                (offline exit cost), engine.ts + ops.ts (drive
-                               the session, exit_ops v11, sweep, funding),
+                               the session, exit_ops table, sweep, funding),
                                boost.ts + broadcasts.ts (stuck-package fee
                                re-boost: replace the CPFP child via RBF and
                                resubmit the package; sweep RBF; tip height at
-                               broadcast v15 for "waiting N blocks"),
+                               broadcast for "waiting N blocks"),
                                chain_order.ts (spends-DAG layout for display —
                                arkd's BFS array stays Session's input),
                                stepper.ts (per-vtxo DAG model: DB-only build +
@@ -48,7 +48,7 @@ src/
                                dest.ts + dest_verify.ts + final_send.ts
                                (final send: challenge-verified destination —
                                BIP-322/legacy signature proof of control,
-                               exit_dest v16 — then an exact-fee no-change
+                               exit_dest table — then an exact-fee no-change
                                send-all of the fuel P2TR, RBF-boostable)
   polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
                                (bun async-ESM require trap) + EventSource shim
@@ -87,7 +87,8 @@ src/
                                reverse swap ≥ dust, boltz plain path below);
                                sub-dust rows have no settlement event — a 30s
                                reconciler flips them, see ln_receive.ts
-    pay_invoice.ts           — submarine swap one-shot; amount_msat = paid
+    pay_invoice.ts           — submarine swap one-shot; amount stays the
+                               invoice nominal, fees_paid = our cost
                                (+ sub-dust <330 → boltz plain-send, see ln_send.ts)
     lookup_invoice.ts        — connection-scoped SELECT
     list_transactions.ts     — connection-scoped, from/until/limit/offset
@@ -216,17 +217,23 @@ row exists. Logs go to stdout; when running in background pipe to
   docstring lies; the real SDK default is `api.boltz.exchange` and
   that's what the production wallet uses. Don't pass `swapProvider`
   explicitly unless someone has a specific reason.
-- **`createLightningInvoice` result.amount = post-fee on-Ark
-  amount** (what lands in the wallet), not the invoice nominal.
-  Our `transactions.amount_msat` mirrors this on both sides
-  (incoming and outgoing report wallet movement, fees are
-  separate). NIP-47's `amount` spec is ambiguous — we picked
-  wallet-movement because it matches what arkade.money shows.
+- **`transactions.amount_msat` = the BOLT11 nominal, both
+  directions; `fees_paid_msat` = our cost.** Wallet movement is
+  derived (incoming credits amount − fees, outgoing debits
+  amount + fees), never stored — storing it double-shows the fee
+  in clients that render amount and fee side by side, and NIP-57
+  receipt validation requires the bolt11 amount to equal the zap
+  request's (a 21-sat zap must read 21). Invoices are never
+  inflated: the swap cut comes out of what lands on Ark — the
+  receiver's cost, not the payer's. Mind the SDK trap here:
+  `createLightningInvoice` result.amount is the **post-fee on-Ark
+  amount** (what lands), NOT the invoice nominal — don't record it
+  as `amount`. Rationale: DESIGN.md §5 "Amount semantics".
 - **`recoverable` balance is sub-dust VTXOs, not "broken funds".**
   Include it in `get_balance` responses.
 - **One subscription per connection, on `conn.relays`.** Each
-  connection has its own relay set (migration v4 column
-  `relays_json`), baked from the outbox watcher at create time. A
+  connection has its own relay set (`relays_json` column), baked
+  from the outbox watcher at create time. A
   single multi-pubkey filter would create a race window on revoke;
   per-connection SubCloser map makes revoke O(1) Map.delete with
   no race. Outbox updates affect *new* connections only — existing

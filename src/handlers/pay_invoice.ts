@@ -81,9 +81,11 @@ export async function handlePayInvoice(
   }
 
   // SendLightningPaymentResponse.amount is "Amount paid in satoshis" — the
-  // on-Ark amount handed to the swap provider, i.e. invoice + swap fee.
-  // That's the number that left the wallet, so promote it into amount_msat
-  // on success (replacing the invoice-nominal value written at INSERT).
+  // on-Ark total handed to the swap provider (invoice + swap fee + any drain
+  // residue). amount_msat keeps the invoice nominal written at INSERT — the
+  // number the payee received — and the whole gap becomes fees_paid_msat:
+  // our cost of the send, never part of the amount. What left the wallet is
+  // derived as amount + fees, not stored.
   const paidMsat = satsToMsats(result.amount)
   const feesPaidMsat = Math.max(0, paidMsat - invoiceMsat)
   const settledAt = Math.floor(Date.now() / 1000)
@@ -92,15 +94,15 @@ export async function handlePayInvoice(
   // so flipping the row out of 'pending' and bumping the counter must be
   // atomic — a crash in between would release the pending reservation
   // without ever landing it in the counter, permanently under-counting the
-  // payment. The counter adds paidMsat (wallet movement, fee included),
-  // matching what the settled row now says left the wallet.
+  // payment. The counter adds paidMsat (wallet movement, fee included) —
+  // amount + fees of the settled row.
   deps.db.transaction(() => {
     deps.db
       .query(
-        `UPDATE transactions SET state = 'settled', preimage = ?, amount_msat = ?, fees_paid_msat = ?, settled_at = ?
+        `UPDATE transactions SET state = 'settled', preimage = ?, fees_paid_msat = ?, settled_at = ?
          WHERE request_event_id = ?`,
       )
-      .run(result.preimage, paidMsat, feesPaidMsat, settledAt, deps.eventId)
+      .run(result.preimage, feesPaidMsat, settledAt, deps.eventId)
     deps.db
       .query(`UPDATE connections SET spent_msat = spent_msat + ? WHERE id = ?`)
       .run(paidMsat, deps.conn.id)

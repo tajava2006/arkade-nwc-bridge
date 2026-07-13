@@ -58,9 +58,12 @@ export async function handleMakeInvoice(
 
   const createdAt = Math.floor(Date.now() / 1000)
 
-  // amount_msat captures on-Ark wallet movement (what will actually land:
-  // invoice nominal minus the swap fee, 1:1 for sub-dust), fees_paid_msat the
-  // gap to the nominal — same story as pay_invoice, opposite direction.
+  // amount_msat is the BOLT11 nominal — exactly what the client asked for and
+  // what the payer pays (the invoice is never inflated: NIP-57 receipt
+  // validation demands the bolt11 amount match the zap request). The swap
+  // provider's cut comes out of what lands on Ark — moving LN → Ark is the
+  // receiver's cost, never the payer's — and is recorded as fees_paid_msat;
+  // the actual credit is derived as amount − fees, not stored.
   const receivedMsat = satsToMsats(issued.receivedSats)
   const feesPaidMsat = Math.max(0, amountMsat - receivedMsat)
 
@@ -76,7 +79,7 @@ export async function handleMakeInvoice(
       deps.eventId,
       issued.invoice,
       issued.paymentHash,
-      receivedMsat,
+      amountMsat,
       feesPaidMsat,
       description ?? null,
       issued.kind === 'swap' ? issued.swapId : null,
@@ -91,7 +94,7 @@ export async function handleMakeInvoice(
     description,
     description_hash: descriptionHash,
     payment_hash: issued.paymentHash,
-    amount: receivedMsat,
+    amount: amountMsat,
     fees_paid: feesPaidMsat > 0 ? feesPaidMsat : undefined,
     created_at: createdAt,
     expires_at: issued.expiresAt,
