@@ -375,6 +375,10 @@ batch expiry 필터만 / 받기 그리핑 무대응.
   (라이브 cosign 전용) / refund·uexit는 F 단독 leaf로 사전서명 불필요 / 순서 인터락 축소
   (C의 "검증 후 지출"만 남음) / payment_hash dedup 승계 (bound-address 트릭은 스크립트 내
   H 포함으로 대체 — 스크립트 자체가 바인딩).
+- [x] 2026-07-15 (운영자 질의로 재확인): **cancel leaf는 정규 swap에도 있는 표준 패턴** —
+  프로덕션 VHTLC의 무타임락 refund leaf(`ts-sdk packages/ts-sdk/src/script/vhtlc.ts`의
+  `refundScript` = `Multisig[sender, receiver, server]`, 3자 라이브 cosign)가 정확히 같은 물건.
+  정규 VHTLC는 6-leaf, 우리는 4-leaf — cancel 포함해도 표준보다 단순. 과설계 아님, 유지 확정.
 - [ ] #01: BuildTxs 패리티, dust/vtxoMinAmount/maxOpReturnOutputs 실측, U−a<dust 엣지 허용 여부,
   SDK subdust 인코딩, 와이어 포맷.
 - [ ] #02: T / d 확정값.
