@@ -256,13 +256,14 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
 
 ### Phase 0 — 검증 스파이크
 
-- ⬜ **#01 `asub/01-regtest-poc`** (L) — **에픽 전체의 관문.**
+- ✅ **#01 `asub/01-regtest-poc`** (L) — **에픽 전체의 관문. 2026-07-15 regtest GREEN (11/11), 에픽 머지됨.**
   boltz 없이 ts-sdk 지갑 2개 + regtest arkd로 단일 펀더 프로토콜 왕복:
   4-leaf 펀딩(단독 send) → (i) F 오프라인 상태에서 presig 2개로 C의 claim 성공 — **sub-dust
   스플릿 포함** (a subdust + 체인지 정규 / 체인지도 subdust 두 케이스), (ii) CLTV refund,
   (iii) cancel 협력 unwind. + §2.4 실측: BuildTxs 패리티, dust/vtxoMinAmount/maxOpReturnOutputs,
-  SDK subdust 아웃풋 인코딩. 산출: `test/spike/atomic_poc.spike.ts` + §8 기록.
-  DoD: 3경로 regtest green. **통과 못 하면 에픽 중단, 플랜 수정.**
+  SDK subdust 아웃풋 인코딩. 산출: `test/spike/atomic_poc.spike.ts`.
+  DoD: 3경로 regtest green. **통과 못 하면 에픽 중단, 플랜 수정.** → **통과. 설계 유지, #02+ 진행 가능.**
+  실측·결정은 §8 [#01] 참조.
 
 - ⬜ **#02 `asub/02-unroll-poc`** (S)
   #01 위에서 F의 일방 경로: shared vtxo unroll(기존 exit 머신 재사용) → d 경과 → leaf 4로
@@ -379,8 +380,30 @@ batch expiry 필터만 / 받기 그리핑 무대응.
   프로덕션 VHTLC의 무타임락 refund leaf(`ts-sdk packages/ts-sdk/src/script/vhtlc.ts`의
   `refundScript` = `Multisig[sender, receiver, server]`, 3자 라이브 cosign)가 정확히 같은 물건.
   정규 VHTLC는 6-leaf, 우리는 4-leaf — cancel 포함해도 표준보다 단순. 과설계 아님, 유지 확정.
-- [ ] #01: BuildTxs 패리티, dust/vtxoMinAmount/maxOpReturnOutputs 실측, U−a<dust 엣지 허용 여부,
-  SDK subdust 인코딩, 와이어 포맷.
+- [x] **#01 (2026-07-15, regtest arkd v0.9.9-rc.0, 11/11 green):** 단일 펀더 설계 **성립 확인**.
+  세 경로 전부 arkd 수락 — (i) F 오프라인 후 presig 2개로 C claim (a=21 subdust + 정규 체인지 /
+  a=200 subdust + subdust 체인지 두 케이스), (ii) CLTV refund(T 경과 수락 / T 미래 거부 — CLTV 집행
+  확인), (iii) F+C+server cancel 협력 unwind. 실측·확정:
+  - **dust = 330 sats, vtxoMinAmount = 1 sat** → a 범위 [1, 329]. a 하한은 vtxoMinAmount(=1)이지 dust 아님.
+  - **maxOpReturnOutputs ≥ 2**: U−a<dust 엣지(스플릿에 OP_RETURN 2개)를 arkd가 **수락**. ts-sdk
+    `buildOffchainTx`도 클라 측 `MAX_OP_RETURN=2` 하드코딩(`utils/arkTransaction.ts:50`) — 우리 스플릿은
+    최대 2개라 항상 통과. #04에서 별도 명시-에러 게이팅 불필요(2 초과 케이스가 없음).
+  - **BuildTxs↔arkd 패리티 OK, arkd 무패치 확정**: F의 presig txid == C의 결정적 재빌드 txid(바이트
+    일치), 그리고 arkd가 submit/finalize 수락 + server 서명이 ts-sdk 조립 tx에 유효 → 재구성 일치.
+  - **SDK subdust 인코딩**: `ArkAddress.subdustPkScript` = `OP_RETURN <32B x-only vtxo taproot key>`
+    (`ts-sdk script/address.ts:115`). 별도 인코더 불필요 — 이게 recoverable subdust vtxo를 만듦(오늘 plain
+    받기와 동일 물건). C가 실제로 subdust vtxo(recoverable) 수령 확인.
+  - **와이어 포맷 = PSBT base64**(`Transaction.toPSBT`/`fromPSBT`). presig = F의 tapScriptSig 실린 base64
+    PSBT 2개(arkTx + checkpoint). 결정적 txid 덕에 C의 verify-before-act(재빌드+F sig 검증)가 성립.
+  - **preimage witness**: claim leaf(ConditionMultisig)는 arkTx·checkpoint **양쪽** 인풋에
+    `ConditionWitness=[preimage]`(`setArkPsbtField`) 필요 — arkd가 최종 witness 조립. boltz-swap
+    `claimVHTLCIdentity` + `refundVHTLCwithOffchainTx`(3자 combine) 패턴 그대로.
+  - **checkpointTapscript = CSV 512s(seconds), d(unilateralExitDelay) = 512s** (아래 #02에서 확정 예정).
+  - **⚠ regtest 모드 함정**: ts-sdk `.env.regtest` 기본값은 **block 모드**(delays=20). 이 스파이크는
+    **seconds 모드**(CLTV=unix타임스탬프 + MTP 집행) 전제 → exit-drill env override(512/1024s,
+    AUTOMINE=30)로 `regtest start --profile ark` 기동해야 함. #02/#14도 같은 방식.
+  - 구현 노트: claim은 `refundVHTLCwithOffchainTx`(3자 F+C+server combine) + `claimVHTLCIdentity`
+    (preimage) 융합. refund/cancel은 단일-leaf 협력 스펜드 헬퍼(`collaborativeSpend`) 재사용.
 - [ ] #02: T / d 확정값.
 - [ ] #03: boltz ARK 레이어(α/β), fulmine 펍키 수취, vendored lib 전략.
 
