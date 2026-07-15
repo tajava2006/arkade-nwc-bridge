@@ -21,6 +21,7 @@ describe('database migrations', () => {
       .map((r) => r.name)
     expect(tables).toEqual([
       'accounts',
+      'atomic_swaps',
       'boltz_swaps',
       'clink_offer',
       'clink_offer_receipts',
@@ -45,9 +46,9 @@ describe('database migrations', () => {
       )
       .all()
     // Bumps here are intentional. If you added a migration without
-    // realizing, this test surfaces it. (v1 alone since the 2026-07
-    // epoch reset collapsed the original 16.)
-    expect(rows.map((r) => r.version)).toEqual([1])
+    // realizing, this test surfaces it. (v1 = 2026-07 epoch reset that
+    // collapsed the original 16; v2 = atomic sub-dust swaps.)
+    expect(rows.map((r) => r.version)).toEqual([1, 2])
   })
 
   test('re-opening the same db is idempotent (no double-apply)', () => {
@@ -59,7 +60,7 @@ describe('database migrations', () => {
       const count = db2
         .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM schema_migrations')
         .get()
-      expect(count?.c).toBe(1)
+      expect(count?.c).toBe(2)
     } finally {
       db2.close()
     }
