@@ -385,11 +385,16 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   T refund / 받기 happy(zap 포함, **빈 지갑 수신**) / 받기 미클레임 refund / F uexit(#02 재현) /
   **양측 재시작 재개**(펀딩 후 boltz 재시작, claim 전 bridge 재시작). 전 시나리오 잔액 대사.
   DoD: 전부 green, 스크립트화.
-  → **보내기 happy 통과**: 커스텀 boltz(`boltz-atomic:regtest`, Dockerfile SOURCE=local 빌드)를
-  arkade-regtest에 스왑, `test/spike/atomic_send_e2e.spike.ts`가 21 sats LN 인보이스를 boltz가 실제
-  결제+원자 claim까지 검증(6/6, 재현). Phase 2 boltz 라우터(#08)+#11이 처음으로 런타임 검증됨. 런북은
-  커밋 메시지. **잔여**: 보내기 subdust-change 케이스 / LN fail / T refund / **받기 전부** / uexit / 재시작 재개 / 잔액 대사.
-  ⚠ 셋업 함정: block 모드(tree expiry 20블록+자동채굴)면 펀더 vtxo가 즉시 만료 → **seconds 모드** 필수.
+  → **보내기 happy + 받기 happy + 보내기 LN-fail 3종 실측 통과 (2026-07-16)**: 커스텀 boltz
+  (`boltz-atomic:regtest`, Dockerfile SOURCE=local 빌드)를 arkade-regtest에 `BOLTZ_IMAGE` 스왑.
+  - `atomic_send_e2e.spike.ts` (6/6): 21 sats LN 실결제 + 원자 claim (#08 보내기+#11).
+  - `atomic_receive_e2e.spike.ts` (7/7): **빈 지갑 bridge**가 hold invoice로 21 sats 원자 수신 (#09,
+    addHoldInvoice→htlc.accepted 훅→fundShared→presign→claim→settleHoldInvoice). boltz 미니지갑 펀딩 필요.
+  - `atomic_send_fail_e2e.spike.ts` (4/4): 취소된 hold invoice로 LN 강제 실패 → boltz status=failed +
+    **shared vtxo 미소비**(절도 불가, 유저 refund 가능) = 트러스트리스 보장.
+  Phase 2 boltz 라우터(#08/#09)+#11+벤더 lib+커스텀 boltz 빌드 전부 실동작 확인. 런북은 커밋 메시지.
+  **잔여**: T refund 실행 / uexit(#02 재현) / 양측 재시작 재개 / 전 시나리오 잔액 대사 / 보내기 subdust-change 케이스 / 타이머 스케줄.
+  ⚠ 셋업 함정: block 모드(tree expiry 20블록+자동채굴)면 펀더 vtxo 즉시 만료 → **seconds 모드** 필수. hold invoice는 boltz-lnd에 있음(lnd 아님).
 
 - ⬜ **#15 `asub/15-mainnet-deploy`** (M) — **my-server 레포 작업 포함**
   patch 재생성 → `bump-stack.sh` 재빌드/배포 → bridge 배포 → mainnet 21 sats **양방향** 실측
