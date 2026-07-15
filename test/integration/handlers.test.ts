@@ -89,7 +89,7 @@ describe('handlers', () => {
 
     test('rejects non-positive amounts with OTHER', async () => {
       const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-a', wallet: makeWalletStub(), boltzApiUrl: '' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-a', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       await expect(handleMakeInvoice(deps, { amount: -1 })).rejects.toMatchObject({
         code: 'OTHER',
       })
@@ -98,7 +98,7 @@ describe('handlers', () => {
 
     test('rejects sub-sat amounts (non-multiple of 1000 msat) with OTHER', async () => {
       const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b', wallet: makeWalletStub(), boltzApiUrl: '' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       await expect(handleMakeInvoice(deps, { amount: 1500 })).rejects.toMatchObject({
         code: 'OTHER',
       })
@@ -106,7 +106,7 @@ describe('handlers', () => {
 
     test('rejects a malformed description_hash with OTHER', async () => {
       const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b2', wallet: makeWalletStub(), boltzApiUrl: '' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b2', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       await expect(
         handleMakeInvoice(deps, { amount: 1_000_000, description_hash: 'not-hex' }),
       ).rejects.toMatchObject({ code: 'OTHER' })
@@ -191,7 +191,7 @@ describe('handlers', () => {
   describe('pay_invoice', () => {
     test('rejects missing/invalid invoice with OTHER', async () => {
       const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-d', wallet: makeWalletStub(), boltzApiUrl: '' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-d', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       await expect(handlePayInvoice(deps, {})).rejects.toMatchObject({ code: 'OTHER' })
       await expect(handlePayInvoice(deps, { invoice: 'not-a-bolt11' })).rejects.toMatchObject({
         code: 'OTHER',
@@ -205,7 +205,7 @@ describe('handlers', () => {
         budgetMsat: 500_000, // 500 sat budget
       })
       const conn = r.connection
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-e', wallet: makeWalletStub(), boltzApiUrl: '' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-e', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       // 2000 sat invoice > 500 sat budget
       await expect(
         handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
@@ -226,7 +226,7 @@ describe('handlers', () => {
       // Well above expectedAmount + drain slack, so the funding stays exact.
       const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
       const r = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet, boltzApiUrl: '' },
+        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet, boltzApiUrl: '', arkServerUrl: '' },
         { invoice: INVOICE_2000_SAT },
       )) as Record<string, unknown>
       expect(r.preimage).toBe('be'.repeat(32))
@@ -276,7 +276,7 @@ describe('handlers', () => {
       })
       const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
       const res = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-window', wallet, boltzApiUrl: '' },
+        { swaps, db: temp.db, conn, eventId: 'evt-window', wallet, boltzApiUrl: '', arkServerUrl: '' },
         { invoice: INVOICE_2000_SAT },
       )) as Record<string, unknown>
       expect(res.preimage).toBe('be'.repeat(32))
@@ -291,7 +291,7 @@ describe('handlers', () => {
       })
       const conn = r.connection
       temp.db.query('UPDATE connections SET spent_msat = ? WHERE id = ?').run(1_000_000, conn.id)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-life', wallet: makeWalletStub(), boltzApiUrl: '' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-life', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       await expect(
         handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
       ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' })
@@ -313,7 +313,7 @@ describe('handlers', () => {
            ) VALUES (?, 'outgoing', 'evt-inflight', 'lnbc1', 'hash-p', ?, 'pending', ?)`,
         )
         .run(conn.id, 1_000_000, Math.floor(Date.now() / 1000))
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-reserve', wallet: makeWalletStub(), boltzApiUrl: '' }
+      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-reserve', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       await expect(
         handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
       ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' })
@@ -328,7 +328,7 @@ describe('handlers', () => {
       })
       await expect(
         handlePayInvoice(
-          { swaps, db: temp.db, conn, eventId: 'evt-g', wallet: makeWalletStub(), boltzApiUrl: '' },
+          { swaps, db: temp.db, conn, eventId: 'evt-g', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' },
           { invoice: INVOICE_2000_SAT },
         ),
       ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' })

@@ -980,7 +980,13 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           if (rail === 'lightning') {
             try {
               const res = await sendLightning(
-                { swaps: ready.swaps, wallet: ready.wallet, boltzApiUrl: cfg.boltzApiUrl },
+                {
+                  swaps: ready.swaps,
+                  wallet: ready.wallet,
+                  boltzApiUrl: cfg.boltzApiUrl,
+                  arkServerUrl: cfg.arkServerUrl,
+                  db,
+                },
                 destination,
               )
               void ready.caches.balance.refresh()
