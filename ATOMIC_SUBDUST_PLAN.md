@@ -271,10 +271,11 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   DoD: regtest 컨펌 + §8에 T/d 확정값. → **통과.** 산출: `test/spike/atomic_unroll.spike.ts`.
   실측·결정은 §8 [#02] 참조.
 
-- ⬜ **#03 `asub/03-boltz-ark-spike`** (M)
+- ✅ **#03 `asub/03-boltz-ark-spike`** (M) — **2026-07-15 regtest GREEN (8/8), 에픽 머지됨. α 확정.**
   boltz 쪽 ARK 능력 전략(§4 α/β): 패치 내 ts-sdk 임베드(Node 호환, GetInfo 파라미터 취득,
   서명·제출), 받기용 미니 지갑(탑업·만료 관리 runbook 초안), fulmine 펍키 수취 아이디어 검증,
   프로토콜 lib vendored 전략. DoD: §8 결정 + boltz 프로세스 안에서 서명·제출 1회 성공.
+  → **통과.** 산출: `test/spike/atomic_boltz.spike.cjs`(Node CJS). 결정은 §8 [#03] 참조.
 
 ### Phase 1 — 프로토콜 코어 (bridge `src/atomic/`)
 
@@ -424,7 +425,33 @@ batch expiry 필터만 / 받기 그리핑 무대응.
     지갑 소유 vtxo 전제라 불가 — 수동 tx 조립.
   - **⚠ regtest 운영 노트**: #02는 block 모드(빠른 CSV `mine 20`). 단 `ARKD_VTXO_TREE_EXPIRY`를 길게
     (500)—짧으면(기본 20) CSV용 20블록 채굴 중 펀딩 vtxo가 만료·churn. faucet 단위는 **BTC**(sats 아님).
-- [ ] #03: boltz ARK 레이어(α/β), fulmine 펍키 수취, vendored lib 전략.
+- [x] **#03 (2026-07-15, regtest arkd v0.9.9-rc.0, Node v24 CJS, 8/8 green): α 채택 확정.**
+  boltz 쪽 ARK 레이어는 **@arkade-os/sdk 임베드(α)** — fulmine 확장(β) 불필요(적어도 보내기·기본 받기).
+  boltz-backend 실측: **CommonJS**(tsconfig module Node20, `type` 미설정), **Node ≥22.4**, ark 의존성 0,
+  기존 `ArkClient`는 fulmine 스타일 노드에 **gRPC**(WalletService `sendOffchain`=서버측 키)라 클라 키-op 불가.
+  - **α 게이트 통과**: 진짜 리스크는 crypto(#01서 검증)가 아니라 런타임 — SDK가 @noble/curves v2(ESM-only)를
+    끌어와 CJS `require`가 깨질 위험. 실측 `require('@arkade-os/sdk')` **정상 로드**(149 exports, tsup CJS
+    번들이 @noble 내장). boltz-shaped .cjs 프로세스에서 sign+submit+finalize 1회 성공(보내기 claim, boltz=C).
+  - **아키텍처 결정 — Wallet 안 씀**: Node에 **global EventSource 없음** → 풀 `Wallet`(ArkProvider SSE +
+    ContractManager)은 shim 필요. 하지만 키-op엔 Wallet 불필요 → **`RestArkProvider` + `RestIndexerProvider`
+    + `SingleKey`만** 사용(+ `buildOffchainTx`/`combineTapscriptSigs`/`setArkPsbtField`/`DefaultVtxo.Script`).
+    보내기(boltz=C)는 vtxo 0개 순수 키-op. 주소도 Wallet 없이 `DefaultVtxo.Script(...).address()`로 도출.
+  - **받기용 미니 지갑 runbook 초안 (boltz=F, #07 확정)**: boltz `SingleKey` 주소를 운영자가 fulmine에서
+    주기적 탑업(dust+ vtxo 몇 개 프리펀드). 받기 스왑당 정규 vtxo 1개 선정(동시성 락), funding tx는
+    `buildOffchainTx`로 직접 조립. 만료 관리는 인덱서 폴링 + 임박분 refresh(협력 settle) 또는 탑업 케이던스.
+    Wallet 불필요(SSE 없이 인덱서 폴링). ⚠ regtest 실측 교훈: 클라 온보딩 vtxo가 만료-갭에 걸리면 인풋
+    거부(`ark settle`로 리프레시) — boltz 미니지갑도 만료 여유(expiry > now + T + margin, §3.5) 지켜 선정.
+  - **fulmine 펍키 수취(§4 운영 아이디어) — 검증**: 스플릿의 boltz 수취분(보내기 a, 받기 B−a)의 **수취
+    주소와 서명 키는 분리 가능**. 스파이크는 boltz 자기 `DefaultVtxo` 주소로 받았지만, 아웃풋 주소를
+    fulmine 펍키의 DefaultVtxo 주소로 바꾸면 fulmine 장부 가시성 + recoverable 재흡수를 공짜로 얻음
+    (서명은 여전히 boltz 키). 아웃풋은 임의 유효 ARK 주소면 arkd가 수락 → 채택 가능, #08/#09서 반영.
+  - **vendored lib 전략 확정**: 프로토콜 코어(4-leaf 스크립트·결정적 tx 빌더·presign·스플릿 계산)는
+    bridge `src/atomic/`(#04~#06)가 **source of truth**, boltz 패치는 **vendored 사본**. 둘 다 @arkade-os/sdk
+    프리미티브 위에 얇게 얹히므로(#01/#03가 bun-ESM·Node-CJS 양쪽서 동일 동작 확인) vendored 사본은 소형.
+    boltz는 CJS라 lib는 CJS-호환(또는 이중) 필요 — #04에서 빌드 타깃 이중(ESM+CJS)로 작성.
+  - **잔여(이 스파이크 밖, #07)**: boltz-backend **실제 트리**에 @arkade-os/sdk 의존성 추가 + TS 컴파일
+    통과 + 패치 내 import. 이 스파이크는 boltz **런타임 제약**(Node CJS, no Wallet, require 로드) 아래
+    sign+submit 성립을 증명 — 실제 in-tree 빌드 편입은 #07.
 
 ## 9. 백로그 (에픽 스코프 밖)
 
