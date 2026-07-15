@@ -279,10 +279,13 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
 
 ### Phase 1 — 프로토콜 코어 (bridge `src/atomic/`)
 
-- ⬜ **#04 `asub/04-script-and-splits`** (M)
+- ✅ **#04 `asub/04-script-and-splits`** (M) — **2026-07-15 GREEN (34 유닛테스트), 에픽 머지됨.**
   4-leaf VtxoScript 빌더 + 스왑 파라미터 구조체(방향, a, H, T, d, 키들, V) + 스플릿 계산기
   (a subdust 인코딩, 체인지 정규/subdust/생략 3분기, fee 자리) + 인풋 자격 필터(expiry).
-  #01 fixture로 arkd 인코딩 교차검증. DoD: 단위 테스트 + typecheck green.
+  #01 fixture로 arkd 인코딩 교차검증. DoD: 단위 테스트 + typecheck green. → **통과.**
+  산출: `src/atomic/{script,params,split,eligibility,index}.ts` + `test/unit/atomic_*.test.ts`.
+  4개 leaf 인코딩을 **#01/#02서 arkd가 수락한 바이트 그대로** 회귀 fixture로 고정(드리프트 감지).
+  typecheck green, 전체 스위트 339 pass/0 fail.
 
 - ⬜ **#05 `asub/05-tx-builder-presign`** (M)
   결정적 tx 빌더(funding / claim 쌍) + presig 생성·검증(부분서명 schnorr — verify-before-act)
