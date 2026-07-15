@@ -305,9 +305,15 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
 
 ### Phase 2 — boltz 패치 (../boltz-backend 위, patch 재생성은 #14)
 
-- ⬜ **#07 `asub/07-boltz-ark-layer`** (M)
+- 🔧 **#07 `asub/07-boltz-ark-layer`** (M) — **2026-07-15 코어 완료(in-tree 컴파일 green), 잔여 e2e는 #14.**
   #03 결정 구현: 키/서명·제출 레이어 + 받기용 vtxo 관리(선정 §3.5, 동시 스왑 락, 탑업 runbook).
-  DoD: regtest에서 서명·제출·(받기용) 펀딩 왕복.
+  DoD: regtest에서 서명·제출·(받기용) 펀딩 왕복. → **핵심 성립.** 상세 §8 [#07].
+  - bridge `asub/07`(에픽 머지): `src/atomic` **의존성 최소화**(직접 @scure/btc-signer import 2건 제거 —
+    conditionScript 손인코딩 + verifyPresig를 F 펍키 존재검사로) → 벤더 사본이 btc-signer 버전 안 섞음. 유닛 154 + #05 재검 10/10.
+  - boltz `atomic-subdust` 브랜치(v3.13.0 위, 격리): `@arkade-os/sdk` 의존성 추가(설치·로드·컴파일 OK) +
+    `lib/atomic/`(코어 벤더, sqlite repository 제외) + `lib/atomic/ArkSigner.ts`(SingleKey+REST providers,
+    Wallet 없이, 받기 미니지갑 vtxo 선정). boltz strict tsc에서 lib/atomic 에러 0.
+  - 잔여(머지 전): ArkSigner 구동 boltz-프로세스 regtest 왕복은 #14 드릴에 편입(서명·제출은 #03/#05 실증).
 
 - ⬜ **#08 `asub/08-boltz-send`** (M)
   `SubdustAtomicRouter` 보내기: `/send/init`·`/send/fund`·`GET /status`. pg 테이블 +
@@ -462,6 +468,20 @@ batch expiry 필터만 / 받기 그리핑 무대응.
   - **잔여(이 스파이크 밖, #07)**: boltz-backend **실제 트리**에 @arkade-os/sdk 의존성 추가 + TS 컴파일
     통과 + 패치 내 import. 이 스파이크는 boltz **런타임 제약**(Node CJS, no Wallet, require 로드) 아래
     sign+submit 성립을 증명 — 실제 in-tree 빌드 편입은 #07.
+- [x] **#07 (2026-07-15): α in-tree 통합 성립 + vendored lib 전략 확정.**
+  - **@scure/btc-signer 버전 중첩 발견·해소**: boltz는 2.2.0 top-level, SDK는 2.0.1 nested(정확 핀). 벤더
+    사본이 `@scure/btc-signer`를 직접 import하면 boltz 2.2.0으로 해석돼 SDK(2.0.1)가 만든 PSBT/Transaction
+    객체와 섞임 → **직접 import 전면 제거**(conditionScript 손인코딩 = OP_HASH160<20>OP_EQUAL 바이트 동일,
+    tapLeafHash 대신 verifyPresig를 F 펍키 존재검사로 — 인풋에 claim leaf만 있고 txid 이미 대조라 등가).
+    남은 의존성은 @arkade-os/sdk + @scure/base(순수 codec, 버전 무해) + node:crypto뿐 → bridge·boltz **동일
+    바이트 벤더**.
+  - **vendored 전략 확정**: 코어(script/params/split/eligibility/tx/state)만 벤더, **repository(bun:sqlite)는
+    제외**(boltz는 pg). boltz `lib/atomic/`에 마커 헤더 + `ArkSigner`(SingleKey+REST providers, Wallet 없음).
+    boltz strict tsc(Node20)에서 lib/atomic 에러 0 = #03 잔여(in-tree 빌드) 해결. 의존성 설치도 clean(313 pkg).
+  - **ArkSigner API**: getInfo(캐시)·serverXOnly·serverUnroll·receiveAddress(DefaultVtxo, fulmine 펍키 라우팅
+    가능)·ownVtxos·selectFunding(받기 미니지갑, eligibility). 서명·제출은 lib tx 함수 그대로 호출.
+  - **벤더 재생성 규율**: bridge `src/atomic` 변경 시 boltz `lib/atomic` 6파일 재복사(단일 진실=bridge).
+  - 잔여: ArkSigner 구동 boltz-프로세스 regtest 왕복 → #14 드릴 편입(서명·제출은 #03/#05 실증).
 
 ## 9. 백로그 (에픽 스코프 밖)
 
