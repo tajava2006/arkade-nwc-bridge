@@ -324,11 +324,18 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
     Wallet 없이, 받기 미니지갑 vtxo 선정). boltz strict tsc에서 lib/atomic 에러 0.
   - 잔여(머지 전): ArkSigner 구동 boltz-프로세스 regtest 왕복은 #14 드릴에 편입(서명·제출은 #03/#05 실증).
 
-- ⬜ **#08 `asub/08-boltz-send`** (M)
+- 🔧 **#08 `asub/08-boltz-send`** (M) — **2026-07-15 코어 완료(typecheck green), e2e 잔여. boltz 브랜치 push됨.**
   `SubdustAtomicRouter` 보내기: `/send/init`·`/send/fund`·`GET /status`. pg 테이블 +
   payment_hash dedup + funding/presig 검증 + **LN pay 타이밍 규율(§3.5)** + claim 실행기 +
   terminal fail 시 cancel 협력/방치 + 부팅 재개. (v1 대비 급감: collateral·세리머니 없음.)
-  DoD: regtest e2e (모킹 클라이언트로 happy + LN fail + T refund).
+  DoD: regtest e2e (모킹 클라이언트로 happy + LN fail + T refund). → **코어 성립, e2e 잔여.**
+  boltz `atomic-subdust` 브랜치(fork push): `lib/db/models/SubdustAtomicSwap.ts`(sequelize, paymentHash
+  UNIQUE dedup)·`ArkConfig` 확장(subdustRestUrl/SignerKey/sendWindow/payMargin/blockTime)+`ArkClient.subdustConfig`·
+  `lib/api/v2/routers/SubdustAtomicRouter.ts`(init/fund/status: 스크립트 재구성 → 인덱서로 funding 조회
+  (verify-before-act) → 스플릿 재계산 → verifyPresig → **LN pay 타이밍(payMargin 내면 거부, cltvLimit=
+  remaining/blockTime)** → finishClaim) + ApiV2/Database 배선. 벤더 lib/atomic 사용. 내 파일 tsc 에러 0
+  (ArkClient의 proto import 에러는 기존 — `npm run compile:rust` 미실행). **잔여: regtest e2e(모킹 클라)
+  + 부팅 재개 executor.**
 
 - ⬜ **#09 `asub/09-boltz-receive`** (L)
   받기: hold invoice(H, descriptionHash — 기존 patch LND 확장을 hold 계열로) → accepted 훅에서
