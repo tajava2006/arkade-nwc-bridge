@@ -295,9 +295,13 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   collaborativeSpend/refundSpend/cancelSpend·buildUexitSweep·PSBT wire) + `test/unit/atomic_tx.test.ts`
   + `test/spike/atomic_poc.spike.ts`(이제 lib 구동). 전체 유닛 135 pass.
 
-- ⬜ **#06 `asub/06-state-machine`** (S)
+- ✅ **#06 `asub/06-state-machine`** (S) — **2026-07-15 GREEN (19 유닛), 에픽 머지됨. Phase 1 완료.**
   양측 상태머신(§3.4) + 재개 규칙 + bridge sqlite `atomic_swaps`. 순수 로직.
-  DoD: 인메모리 sqlite 단위 테스트 (전이 표 + 재개 시나리오).
+  DoD: 인메모리 sqlite 단위 테스트 (전이 표 + 재개 시나리오). → **통과.**
+  산출: `src/atomic/{state,repository}.ts` + db.ts 마이그레이션 v2(append-only, ⚠ main 머지 시 재번호) +
+  `test/unit/atomic_{state,repository}.test.ts`. canTransition/assertTransition/isTerminal/classifyResume,
+  payment_hash UNIQUE dedup(DuplicateSwapError), transition()이 상태머신 강제, listResumable() 부팅 재개.
+  전체 스위트 364 pass/0 fail.
 
 ### Phase 2 — boltz 패치 (../boltz-backend 위, patch 재생성은 #14)
 
