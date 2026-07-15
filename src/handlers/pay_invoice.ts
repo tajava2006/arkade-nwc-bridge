@@ -13,10 +13,12 @@ export interface PayInvoiceDeps {
   db: Database
   conn: Connection
   eventId: string
-  /** Ark wallet — sub-dust sends move a plain vtxo to boltz directly. */
+  /** Ark wallet — sub-dust sends fund an atomic shared vtxo (atomic_send.ts). */
   wallet: Wallet
   /** Boltz REST base (no /v2 suffix). */
   boltzApiUrl: string
+  /** ASP (arkd) REST base — the atomic sub-dust send needs server params. */
+  arkServerUrl: string
 }
 
 export async function handlePayInvoice(
