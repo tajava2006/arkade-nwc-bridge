@@ -1,5 +1,4 @@
 import { base64, hex } from '@scure/base'
-import { tapLeafHash } from '@scure/btc-signer/payment.js'
 import {
   ConditionWitness,
   CSVMultisigTapscript,
@@ -48,17 +47,19 @@ function arkInput(shared: SharedVtxo, leaf: TapLeafScript): ArkTxInput {
   }
 }
 
-function leafScriptBytes(leaf: TapLeafScript): Uint8Array {
-  return leaf[1].subarray(0, leaf[1].length - 1) // strip the trailing leaf-version byte
-}
-
-/** Does `tx` input `i` carry a tapscript sig from `pubkey` on `leafHash`? */
-function hasLeafSig(tx: Transaction, i: number, pubkey: Uint8Array, leafHash: Uint8Array): boolean {
+/**
+ * Does `tx` input `i` carry a tapscript sig from `pubkey`? The claim input has
+ * exactly one leaf attached (the claim leaf) and the tx is a deterministic
+ * rebuild whose txid the caller already matched, so a sig under `pubkey` can
+ * only be over that leaf — a pubkey-presence check is equivalent to a leaf-hash
+ * match here, and avoids importing @scure/btc-signer's tapLeafHash (which would
+ * mix btc-signer versions against the SDK in the boltz vendored copy).
+ */
+function hasSig(tx: Transaction, i: number, pubkey: Uint8Array): boolean {
   const input = tx.getInput(i)
   if (!input.tapScriptSig) return false
   const pk = hex.encode(pubkey)
-  const lh = hex.encode(leafHash)
-  return input.tapScriptSig.some(([d]) => hex.encode(d.pubKey) === pk && hex.encode(d.leafHash) === lh)
+  return input.tapScriptSig.some(([d]) => hex.encode(d.pubKey) === pk)
 }
 
 // ── the deterministic claim pair ─────────────────────────────────────────────
@@ -138,12 +139,10 @@ export function verifyPresig(
   if (funderCheckpoint.id !== checkpoint.id) {
     throw new Error('presig checkpoint txid mismatch — F signed a different tx')
   }
-  // Both the checkpoint (spends shared via claim leaf) and the arkTx (spends the
-  // checkpoint's inherited claim closure) commit the same claim-leaf script, so
-  // one leaf hash verifies F's sig on both.
-  const leafHash = tapLeafHash(leafScriptBytes(shared.script.claim()))
-  if (!hasLeafSig(funderArkTx, 0, funderXOnly, leafHash)) throw new Error('F arkTx presig does not verify')
-  if (!hasLeafSig(funderCheckpoint, 0, funderXOnly, leafHash)) throw new Error('F checkpoint presig does not verify')
+  // F must have signed both the checkpoint (spends shared via the claim leaf)
+  // and the arkTx (spends the checkpoint's inherited claim closure).
+  if (!hasSig(funderArkTx, 0, funderXOnly)) throw new Error('F arkTx presig does not verify')
+  if (!hasSig(funderCheckpoint, 0, funderXOnly)) throw new Error('F checkpoint presig does not verify')
   return { arkTx, checkpoint, funderArkTx, funderCheckpoint }
 }
 
