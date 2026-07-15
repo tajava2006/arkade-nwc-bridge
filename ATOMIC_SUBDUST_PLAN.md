@@ -287,10 +287,13 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   4개 leaf 인코딩을 **#01/#02서 arkd가 수락한 바이트 그대로** 회귀 fixture로 고정(드리프트 감지).
   typecheck green, 전체 스위트 339 pass/0 fail.
 
-- ⬜ **#05 `asub/05-tx-builder-presign`** (M)
+- ✅ **#05 `asub/05-tx-builder-presign`** (M) — **2026-07-15 GREEN (유닛 6 + #01 재작성 10/10 regtest), 에픽 머지됨.**
   결정적 tx 빌더(funding / claim 쌍) + presig 생성·검증(부분서명 schnorr — verify-before-act)
   + 와이어 포맷(PSBT base64 — boltz vendored 사본이 그대로 쓰게 의존성 최소화)
-  + refund/cancel/uexit 라이브 구성 헬퍼. DoD: #01 PoC를 이 lib로 재작성해 green (spike 폐기).
+  + refund/cancel/uexit 라이브 구성 헬퍼. DoD: #01 PoC를 이 lib로 재작성해 green (spike 폐기). → **통과.**
+  산출: `src/atomic/tx.ts`(buildClaimPair·presignClaim·verifyPresig·withPreimage·finishClaim·
+  collaborativeSpend/refundSpend/cancelSpend·buildUexitSweep·PSBT wire) + `test/unit/atomic_tx.test.ts`
+  + `test/spike/atomic_poc.spike.ts`(이제 lib 구동). 전체 유닛 135 pass.
 
 - ⬜ **#06 `asub/06-state-machine`** (S)
   양측 상태머신(§3.4) + 재개 규칙 + bridge sqlite `atomic_swaps`. 순수 로직.
