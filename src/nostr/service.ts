@@ -314,6 +314,7 @@ async function dispatch(
           eventId: event.id,
           wallet: deps.wallet,
           boltzApiUrl: deps.cfg.boltzApiUrl,
+          arkServerUrl: deps.cfg.arkServerUrl,
         },
         params,
       )

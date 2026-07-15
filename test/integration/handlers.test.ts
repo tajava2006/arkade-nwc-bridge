@@ -126,7 +126,7 @@ describe('handlers', () => {
         },
       })
       const r = (await handleMakeInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-c', wallet: makeWalletStub(), boltzApiUrl: '' },
+        { swaps, db: temp.db, conn, eventId: 'evt-c', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' },
         { amount: 1_000_000, description: 'tea' },
       )) as Record<string, unknown>
 
@@ -155,37 +155,10 @@ describe('handlers', () => {
       expect(typeof row?.expires_at).toBe('number')
     })
 
-    test('sub-dust routes through the boltz plain path — NULL swap_id row for the reconciler', async () => {
-      const conn = newConn(temp)
-      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-        expect(String(url)).toBe('http://boltz/v2/subdust/receive')
-        expect(JSON.parse(String(init?.body))).toEqual({ amount: 21, address: 'tark1stub' })
-        return Response.json({ invoice: INVOICE_2000_SAT })
-      }) as unknown as typeof fetch
-
-      // Default swaps stub throws on createLightningInvoice — proves the
-      // reverse-swap path is never touched below dust.
-      const r = (await handleMakeInvoice(
-        { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-sd', wallet: makeWalletStub(), boltzApiUrl: 'http://boltz' },
-        { amount: 21_000 },
-      )) as Record<string, unknown>
-
-      expect(r.state).toBe('pending')
-      expect(r.invoice).toBe(INVOICE_2000_SAT)
-      expect(r.amount).toBe(21_000) // nominal; 1:1 — the plain path takes no swap fee
-      expect(r.fees_paid).toBeUndefined()
-
-      const row = temp.db
-        .query<
-          { swap_id: string | null; amount_msat: number; fees_paid_msat: number; expires_at: number | null },
-          []
-        >(`SELECT swap_id, amount_msat, fees_paid_msat, expires_at FROM transactions`)
-        .get()
-      expect(row?.swap_id).toBeNull()
-      expect(row?.amount_msat).toBe(21_000)
-      expect(row?.fees_paid_msat).toBe(0)
-      expect(typeof row?.expires_at).toBe('number')
-    })
+    // The sub-dust make_invoice branch now routes through the ATOMIC receive
+    // (issueAtomicReceive → boltz /v2/subdust/atomic/receive/*), which needs the
+    // SDK's ark providers + a live boltz — too coupled to mock here. It's
+    // validated end-to-end by the #14 receive drill (atomic_receive_e2e).
   })
 
   describe('pay_invoice', () => {
