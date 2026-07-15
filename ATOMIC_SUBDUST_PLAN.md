@@ -265,10 +265,11 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   DoD: 3경로 regtest green. **통과 못 하면 에픽 중단, 플랜 수정.** → **통과. 설계 유지, #02+ 진행 가능.**
   실측·결정은 §8 [#01] 참조.
 
-- ⬜ **#02 `asub/02-unroll-poc`** (S)
+- ✅ **#02 `asub/02-unroll-poc`** (S) — **2026-07-15 regtest GREEN (9/9), 에픽 머지됨.**
   #01 위에서 F의 일방 경로: shared vtxo unroll(기존 exit 머신 재사용) → d 경과 → leaf 4로
   전액 sweep. (claimer 쪽 일방 경로는 설계상 없음 — 소각 확인만 기록.)
-  DoD: regtest 컨펌 + §8에 T/d 확정값.
+  DoD: regtest 컨펌 + §8에 T/d 확정값. → **통과.** 산출: `test/spike/atomic_unroll.spike.ts`.
+  실측·결정은 §8 [#02] 참조.
 
 - ⬜ **#03 `asub/03-boltz-ark-spike`** (M)
   boltz 쪽 ARK 능력 전략(§4 α/β): 패치 내 ts-sdk 임베드(Node 호환, GetInfo 파라미터 취득,
@@ -404,7 +405,25 @@ batch expiry 필터만 / 받기 그리핑 무대응.
     AUTOMINE=30)로 `regtest start --profile ark` 기동해야 함. #02/#14도 같은 방식.
   - 구현 노트: claim은 `refundVHTLCwithOffchainTx`(3자 F+C+server combine) + `claimVHTLCIdentity`
     (preimage) 융합. refund/cancel은 단일-leaf 협력 스펜드 헬퍼(`collaborativeSpend`) 재사용.
-- [ ] #02: T / d 확정값.
+- [x] **#02 (2026-07-15, regtest arkd v0.9.9-rc.0 block 모드, 9/9 green):** F 일방탈출 **성립 확인**.
+  shared 4-leaf vtxo 펀딩 → `Unroll.Session`(기존 SDK exit 머신)이 체인을 온체인으로 브로드캐스트
+  (F onchain 지갑으로 P2A CPFP, 1C1P 패키지 = mempool `/txs/package`) → CSV d 경과 → leaf 4(uexit
+  = CSVMultisig[F])로 **전액 V 온체인 sweep** → F onchain 잔고 정확히 V−fee 증가. 확정:
+  - **d = 서버 `unilateralExitDelay` 그대로**(§3.5 초안대로). 실측 regtest block 모드 d=20 blocks로
+    sweep 성공. mainnet(seconds 모드)은 512s(#01 실측)가 서버 최소 — 그 값 그대로 uexit CSV에 사용.
+  - **T (refund CLTV): 프로토콜 하한 없음** — arkd는 T 경과 전 refund만 거부(#01 실측). 따라서 T는
+    순수 정책값: §3.5 초안 "펀딩 + 30~60분" 유지. 유일 제약은 §3.5 LN pay 규율(cltv_limit ≤ T−margin).
+    #02가 새로 좁힌 건 없음(送 흐름 #08/#11에서 확정).
+  - **claimer 일방 경로 없음 확인**: C는 claim·cancel leaf에만 있고 둘 다 server 공동서명 필요.
+    유일 CSV(exit) leaf는 uexit=F 단독. C가 온체인에서 realize 가능한 건 sub-dust a(OP_RETURN=소각)
+    → mid-swap unroll 절도 한도 ≤ a(§1.5 수용) 구조적 확인.
+  - **⚠ #13용 발견**: `VtxoScript.exitPaths()`가 우리 4-leaf에서 **throw**(claim/refund leaf를 CSV로
+    디코드 시도 → "expected CHECKSEQUENCEVERIFY DROP"). 즉 SDK 제네릭 exit 리졸버(prepareUnroll
+    Transaction→availableExitPath→exitPaths)로는 우리 shared vtxo를 못 몰음. #13(vault·/exit 편입)은
+    **uexit leaf를 직접 지정**해 sweep해야 함(이 스파이크의 수동 sweep이 레퍼런스). completeUnroll도
+    지갑 소유 vtxo 전제라 불가 — 수동 tx 조립.
+  - **⚠ regtest 운영 노트**: #02는 block 모드(빠른 CSV `mine 20`). 단 `ARKD_VTXO_TREE_EXPIRY`를 길게
+    (500)—짧으면(기본 20) CSV용 20블록 채굴 중 펀딩 vtxo가 만료·churn. faucet 단위는 **BTC**(sats 아님).
 - [ ] #03: boltz ARK 레이어(α/β), fulmine 펍키 수취, vendored lib 전략.
 
 ## 9. 백로그 (에픽 스코프 밖)
