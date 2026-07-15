@@ -368,16 +368,19 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   배선. 옛 plain 유닛테스트 삭제(제거된 코드)·submarine 유지, suite 359 pass. **잔여(#14 타이머와 함께): T-refund
   executor(부팅 재개 over atomic_swaps) + 진행 중 shared vtxo의 consolidate-all refresh 제외.**
 
-- 🔧 **#12 `asub/12-bridge-receive`** (M) — **2026-07-16 코어 모듈 완료(typecheck green, 에픽 머지). 배선 잔여.**
+- ✅ **#12 `asub/12-bridge-receive`** (M) — **2026-07-16 코어+배선 완료, 에픽 머지.**
   `src/clink/offers.ts` sub-dust 분기 교체: P 생성·영속 → init → invoice 전달 → status 폴링 →
   검증 → claim → settle 콜 → **9735를 자기 preimage로 발행** (plain 시절 reconciler 경로 대체,
   restart-safe 유지). DoD: regtest 드릴 (zap 포함) + 단위 테스트.
-  → **코어 성립**: `src/atomic_receive.ts`(issueAtomicReceive: P 생성→/receive/init(hold)→atomic_swaps 영속
+  → **코어**: `src/atomic_receive.ts`(issueAtomicReceive: P 생성→/receive/init(hold)→atomic_swaps 영속
   (P 저장)→invoice+P 반환 / driveAtomicReceive: status 폴링→funded면 verify+claim+settle, restart-safe /
-  driveAtomicReceives: 부팅+주기 패스). **#14 받기 e2e(7/7)가 검증한 바로 그 흐름.** typecheck green.
-  **잔여(결합 배선, 신중히 별도 세션)**: `ln_receive.issueInvoice` sub-dust 분기를 issueAtomicReceive로 교체 +
-  plain reconciler(reconcileSubdustReceives + clink) → driveAtomicReceives 대체 + 9735를 자기 P로 발행 +
-  transactions 행 플립. 그 배선 전까지 plain 경로 유지(마인넷도 plain boltz라 정합).
+  driveAtomicReceives: 부팅+주기 패스). **#14 받기 e2e(7/7)가 검증한 바로 그 흐름.**
+  → **배선(완료)**: `ln_receive.issueInvoice` sub-dust 분기 → issueAtomicReceive (IssuedInvoice
+  subdust에 swapId+preimage 동반). plain `reconcileSubdustReceives` → `reconcileAtomicReceives`
+  (driveAtomicReceives 후 payment_hash로 transactions 행을 자기 P로 settled 플립, grace 넘으면 expired).
+  clink/offers.ts sub-dust ack reconciler는 `getByPaymentHash(...).preimage`로 9735/zap 발행(boltz 폴링 X).
+  arkServerUrl+db를 make_invoice·service·clink·index에 배선. 옛 plain 유닛테스트 삭제(제거된 코드).
+  typecheck green, suite 351 pass / 0 fail. **마인넷 배포는 #15까지 plain boltz 유지(정합).**
 
 - ⬜ **#13 `asub/13-vault-dashboard`** (S)
   진행 중 shared vtxo를 proof vault에 편입(F=유저인 보내기 — ASP 사망 시 /exit에서 uexit 가능)
