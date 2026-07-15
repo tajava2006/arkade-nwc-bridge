@@ -358,10 +358,15 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
 
 ### Phase 3 — bridge 통합
 
-- ⬜ **#11 `asub/11-bridge-send`** (M)
+- 🔧 **#11 `asub/11-bridge-send`** (M) — **2026-07-15 코어 완료(typecheck+suite green), 에픽 머지. 드릴은 #14.**
   `src/ln_send.ts` <330 분기 교체: vtxo 선택(자격 필터) → init → 펀딩+presign → fund 콜 →
   종결 대기 → 실패 유형별 에러 표면화(NWC 매핑). T 후 refund executor(부팅 재개), cancel 응답,
-  진행 중 vtxo의 refresh 제외. DoD: regtest 드릴 + 단위 테스트.
+  진행 중 vtxo의 refresh 제외. DoD: regtest 드릴 + 단위 테스트. → **코어 성립.**
+  산출: `src/atomic_send.ts`(bridge=F: init→4-leaf 스크립트→`Wallet.sendBitcoin`로 shared 펀딩(V=a+dust,
+  순비용=a)→`computeClaimSplit`→`presignClaim`→/send/fund→종결. 각 단계 `atomic_swaps`(SqliteAtomicSwapRepository)
+  영속). ln_send.ts <330 분기가 이걸 호출, plain sendSubdust 제거. arkServerUrl/db를 pay_invoice·service·web에
+  배선. 옛 plain 유닛테스트 삭제(제거된 코드)·submarine 유지, suite 359 pass. **잔여(#14 타이머와 함께): T-refund
+  executor(부팅 재개 over atomic_swaps) + 진행 중 shared vtxo의 consolidate-all refresh 제외.**
 
 - ⬜ **#12 `asub/12-bridge-receive`** (M)
   `src/clink/offers.ts` sub-dust 분기 교체: P 생성·영속 → init → invoice 전달 → status 폴링 →
