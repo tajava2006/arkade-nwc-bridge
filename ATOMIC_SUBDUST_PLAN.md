@@ -221,7 +221,16 @@ bridge repo (이 레포)
 my-server repo (별도 — 머지 시점에만, §6 #14)
   patches/boltz-subdust-api.patch → SubdustAtomicRouter로 개정 (plain 라우터/모델 제거),
   bump-stack.sh 재빌드, SUBDUST_LN_PATCH.md 개정.
-boltz 코드 작업은 ../boltz-backend (핀 태그 checkout) 위 + patch 재생성 백업 — 기존 플로우.
+**boltz 워크플로 (2026-07-15 운영자 결정 — fork/branch 모델로 전환):**
+- boltz 커스터마이즈의 **진실 = 개인 fork `github.com/tajava2006/boltz-backend`의 `atomic-subdust`
+  브랜치** (boltz 릴리스 태그 위 우리 커밋들). `reference/boltz-backend` remote: `origin`=fork,
+  `upstream`=BoltzExchange(태그 pull용). 개발·테스트는 이 브랜치에서 real git으로 (patch 손유지 폐기).
+- **⚠ 마인넷 배포는 아직 plain 패치 유지** (atomic-subdust 브랜치는 #08~#10 미완). `bump-stack.sh`는
+  당분간 **plain-patch 모델 그대로** — 미완 브랜치를 빌드하지 않게. 배포 전환은 **#15**에서.
+- **#15 배포 시**: 완성된 브랜치에서 `git diff <tag>..atomic-subdust`로 patch 재생성(→ plain 대체) 하고
+  bump-stack을 브랜치-빌드(또는 재생성 패치 적용)로 전환. 업그레이드는 `fetch upstream → rebase <새태그>
+  atomic-subdust → push -f origin` 수동 스텝(충돌은 사람이). patch 파일은 그때부터 **생성 산출물**(감사·복구용).
+- 벤더 재생성 규율: bridge `src/atomic` 변경 시 boltz `lib/atomic` 6파일 재복사(단일 진실=bridge).
 ```
 
 **boltz 쪽 ARK 능력 요구 (v2에서 축소됐지만 잔존 — fulmine엔 없는 것들):**
