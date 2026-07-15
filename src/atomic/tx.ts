@@ -269,6 +269,38 @@ export function cancelSpend(
   return collaborativeSpend(shared, shared.script.cancel(), outputs, unroll, [funder, claimer], ark)
 }
 
+// ── funding (F spends its own vtxo into the shared 4-leaf output) ─────────────
+/**
+ * Fund a shared vtxo: the funder spends one of its own regular vtxos into the
+ * 4-leaf shared output (which MUST be `outputs[0]`) plus optional change, and
+ * submits/finalizes the offchain tx. For a no-Wallet funder (boltz on receive);
+ * a Wallet-backed funder can use `Wallet.sendBitcoin` instead. `funderInput` is
+ * the funder's own vtxo spent via its forfeit leaf (DefaultVtxo.Script.forfeit).
+ * Returns the resulting shared vtxo outpoint.
+ */
+export async function fundShared(
+  funderInput: ArkTxInput,
+  outputs: AtomicOutput[],
+  unroll: CSVMultisigTapscript.Type,
+  funder: Identity,
+  ark: ArkProvider,
+): Promise<{ txid: string; vout: number }> {
+  const { arkTx, checkpoints } = buildOffchainTx([funderInput], outputs, unroll)
+  const [checkpoint] = checkpoints
+  if (!checkpoint) throw new Error('funding tx must have exactly 1 checkpoint')
+
+  // Standard collaborative send over the funder's forfeit leaf: funder signs
+  // arkTx + checkpoint, the server co-signs at submit.
+  const arkSigned = await funder.sign(arkTx)
+  const ckptSigned = await funder.sign(checkpoint, [0])
+  const { arkTxid, signedCheckpointTxs } = await ark.submitTx(encodePsbt(arkSigned), [encodePsbt(checkpoint)])
+  const [serverCkptB64] = signedCheckpointTxs
+  if (!serverCkptB64) throw new Error('server returned no checkpoint')
+  combineTapscriptSigs(decodePsbt(serverCkptB64), ckptSigned)
+  await ark.finalizeTx(arkTxid, [encodePsbt(ckptSigned)])
+  return { txid: arkTxid, vout: 0 }
+}
+
 // ── uexit onchain sweep (after unroll, #02) ──────────────────────────────────
 export interface UexitSweepArgs {
   txid: string
