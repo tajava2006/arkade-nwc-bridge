@@ -337,15 +337,24 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   (ArkClient의 proto import 에러는 기존 — `npm run compile:rust` 미실행). **잔여: regtest e2e(모킹 클라)
   + 부팅 재개 executor.**
 
-- ⬜ **#09 `asub/09-boltz-receive`** (L)
+- 🔧 **#09 `asub/09-boltz-receive`** (L) — **2026-07-15 코어 완료(typecheck green), e2e 잔여. boltz 브랜치 push됨.**
   받기: hold invoice(H, descriptionHash — 기존 patch LND 확장을 hold 계열로) → accepted 훅에서
   펀딩+presign → status 노출 → settle 콜(P 검증) → 미클레임 T 후 refund + invoice cancel.
-  DoD: regtest e2e (happy + 미클레임 refund + 외부 결제자 환불 확인).
+  DoD: regtest e2e (happy + 미클레임 refund + 외부 결제자 환불 확인). → **코어 성립, e2e 잔여.**
+  boltz `atomic-subdust`(fork push): `SubdustAtomicRouter`에 받기 추가 — `/receive/init`(**LND hold invoice**
+  `addHoldInvoice`, descriptionHash zap 지원)·`htlc.accepted` 훅(`onHoldAccepted`: `selectFunding` 미니지갑
+  → **`fundShared`**(V=a+dust, 클레임 체인지 정규) → `presignClaim`)·`/receive/status`(펀딩·presig·boltz펍키·T·d
+  노출)·`/receive/settle`(sha256(P)==H 검증 → `settleHoldInvoice`)·`refundReceive`+`resumeExpiredReceives`
+  (T 경과 미클레임 → refund leaf + `cancelHoldInvoice`, 타이머는 #14). bridge lib에 `fundShared`(no-Wallet
+  펀더 빌더) 추가·에픽 머지·재벤더. boltz LndClient는 hold invoice 완비(add/settle/cancel/subscribe 확인).
+  **잔여: regtest e2e + 타이머 스케줄.**
 
-- ⬜ **#10 `asub/10-boltz-remove-plain`** (S)
+- ⬜ **#10 `asub/10-boltz-remove-plain`** (S) — **대부분 N/A: 브랜치엔 plain 라우터가 애초에 없음(#15 배포 시 자동).**
   plain 경로 제거: `/subdust/receive`·`/send`·`/address`, `SubdustSend`. 에러 코드 확정
   (예: `NO_ELIGIBLE_VTXO`(보내기 인풋 없음), `SUBDUST_EDGE_REJECTED`(maxOpReturn 엣지)).
   DoD: plain 라우트 부재 + 컴파일 green.
+  → **`atomic-subdust` 브랜치는 v3.13.0 + atomic만이라 plain 라우터/모델을 아예 안 가짐**(plain은 옛 patch에만
+  존재, 마인넷 live). #15 배포에서 브랜치가 plain 패치를 대체 = plain 자동 제거. 잔여 폴리시: 에러 코드 명시화(소).
 
 ### Phase 3 — bridge 통합
 
