@@ -18,7 +18,7 @@ import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
-import { reconcileSubdustReceives } from './ln_receive'
+import { reconcileAtomicReceives } from './ln_receive'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
@@ -268,7 +268,7 @@ async function main(): Promise<void> {
       // key (same key as the Ark wallet). Minted from the current outbox relay
       // and persisted; on boot it listens on the relay frozen into the stored
       // code (see clink/offers.ts). Operator regenerates by hand if it dies.
-      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: cfg.boltzApiUrl })
+      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: cfg.boltzApiUrl, arkServerUrl: cfg.arkServerUrl })
       console.log(`  noffer         ${offers.snapshot().noffer}`)
       undo.push(() => offers.stop())
 
@@ -280,8 +280,8 @@ async function main(): Promise<void> {
       const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: cfg.boltzApiUrl }
       const reconcileReceives = (): void => {
         void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
-        void reconcileSubdustReceives({ db, boltzApiUrl: cfg.boltzApiUrl }).catch((err) =>
-          console.error('nwc: sub-dust invoice reconcile failed:', err),
+        void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: cfg.boltzApiUrl, arkServerUrl: cfg.arkServerUrl, db }).catch((err) =>
+          console.error('nwc: atomic sub-dust receive reconcile failed:', err),
         )
       }
       reconcileReceives()
