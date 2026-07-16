@@ -19,6 +19,7 @@ import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
+import { resumeAtomicSends } from './atomic_send'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
@@ -278,11 +279,26 @@ async function main(): Promise<void> {
       // have no settlement event at all (no swap object), so this poll is the
       // only thing that ever flips them (see ln_receive.ts).
       const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: cfg.boltzApiUrl }
+      const atomicDeps = { wallet, arkServerUrl: cfg.arkServerUrl, db, boltzApiUrl: cfg.boltzApiUrl }
       const reconcileReceives = (): void => {
         void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
         void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: cfg.boltzApiUrl, arkServerUrl: cfg.arkServerUrl, db }).catch((err) =>
           console.error('nwc: atomic sub-dust receive reconcile failed:', err),
         )
+        // Send-side resume (§3.4 classifyResume): post-T rows are refunded (the
+        // T-refund executor), crash-orphaned rows reconcile against boltz
+        // status. Blocktime lag counts as waiting — the next tick retries.
+        void resumeAtomicSends(atomicDeps)
+          .then((r) => {
+            if (r.refunded.length || r.claimed.length || r.refundWait.length || r.failed.length) {
+              console.log(
+                `atomic send resume: refunded=${r.refunded.length} claimed=${r.claimed.length} ` +
+                  `refund_wait=${r.refundWait.length} waiting=${r.waiting} failed=${r.failed.length}`,
+              )
+              for (const f of r.failed) console.error(`atomic send resume ${f.id}:`, f.error)
+            }
+          })
+          .catch((err) => console.error('atomic send resume failed:', err))
       }
       reconcileReceives()
       receiveReconcilerInterval = setInterval(reconcileReceives, 30_000)

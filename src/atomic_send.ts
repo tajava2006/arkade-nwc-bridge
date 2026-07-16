@@ -11,6 +11,7 @@ import {
 import { decodeInvoice } from '@arkade-os/boltz-swap'
 import {
   AtomicVtxoScript,
+  classifyResume,
   computeClaimSplit,
   presignClaim,
   refundSpend,
@@ -196,6 +197,25 @@ export interface AtomicRefundResult {
 }
 
 /**
+ * T has passed on the wall clock but not on the chain: arkd enforces the CLTV
+ * against BLOCKTIME (MTP-ish), which lags wall clocks — ~1h on mainnet
+ * (measured on regtest in the #14 T-refund drill: FORFEIT_CLOSURE_LOCKED).
+ * Not a failure — the executor retries on its next pass.
+ */
+export class RefundNotYetError extends Error {
+  constructor(detail: string) {
+    super(
+      `chain time has not passed T yet (arkd checks blocktime, which lags wall clocks ~1h on mainnet) — retry shortly. ${detail}`,
+    )
+    this.name = 'RefundNotYetError'
+  }
+}
+
+const isBlocktimeLocked = (e: unknown): boolean =>
+  e instanceof Error &&
+  (/FORFEIT_CLOSURE_LOCKED/.test(e.message) || (e as { code?: number }).code === 11)
+
+/**
  * Reclaim the full funding V of a send swap through the refund leaf (CLTV T,
  * F+server — no boltz involvement). Callable from the dashboard and the boot
  * refund executor; rebuilds the 4-leaf script from the swap row alone
@@ -255,12 +275,127 @@ export async function refundAtomicSend(
   const ourAddr = ArkAddress.decode(await deps.wallet.getAddress())
   const outputs: AtomicOutput[] = [{ script: ourAddr.pkScript, amount: BigInt(coin.value) }]
   const shared: SharedVtxo = { txid, vout, value: coin.value, script }
-  const refundTxid = await refundSpend(shared, outputs, unroll, deps.wallet.identity, ark)
+  let refundTxid: string
+  try {
+    refundTxid = await refundSpend(shared, outputs, unroll, deps.wallet.identity, ark)
+  } catch (e) {
+    if (isBlocktimeLocked(e)) throw new RefundNotYetError(e instanceof Error ? e.message : String(e))
+    throw e
+  }
 
   if (swap.state !== 'refund_wait') repo.transition(swapId, 'refund_wait')
   repo.transition(swapId, 'refunded')
   releaseVaultRow(deps.db, txid, vout)
   return { txid: refundTxid, amount: coin.value }
+}
+
+// ── boot / periodic resume (the "#14 timer") ─────────────────────────────────
+
+export interface AtomicSendResumeResult {
+  /** swaps whose full V came back through the refund leaf this pass */
+  refunded: string[]
+  /** swaps reconciled to claimed via boltz status (crash after boltz's claim) */
+  claimed: string[]
+  /** swaps moved to refund_wait (boltz reports the LN pay failed) */
+  refundWait: string[]
+  /** non-terminal swaps with nothing to do yet (pre-T, or blocktime still lagging) */
+  waiting: number
+  failed: { id: string; error: string }[]
+}
+
+type SendStatus = { state: string; preimage?: string }
+
+/** boltz being unreachable is an expected input here, not an error. */
+async function sendStatusSafe(boltzApiUrl: string, swapId: string): Promise<SendStatus | undefined> {
+  try {
+    const res = await fetch(`${boltzApiUrl}/v2/subdust/atomic/send/status?swapId=${encodeURIComponent(swapId)}`)
+    if (!res.ok) return undefined
+    return (await res.json()) as SendStatus
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * One pass over non-terminal SEND swaps (boot + every reconcile tick),
+ * following classifyResume (§3.4):
+ *
+ * - post-T → refund. One boltz status check first when reachable: a crash
+ *   between boltz's claim and our bookkeeping leaves a row whose vtxo is
+ *   already spent — reconcile that to claimed instead of a doomed refund.
+ *   boltz unreachable → straight to refund (that IS the refund scenario).
+ * - pre-T (funded/ln_inflight) → poll boltz: claimed lands the terminal
+ *   bookkeeping (+ vault release), failed moves to refund_wait for T.
+ * - RefundNotYetError (blocktime lag) counts as waiting, not failure.
+ *
+ * `refund` is injectable for unit tests — the real one is e2e-proven
+ * (atomic_refund_e2e drill).
+ */
+export async function resumeAtomicSends(
+  deps: AtomicSendDeps,
+  refund: (d: Omit<AtomicSendDeps, 'boltzApiUrl'>, id: string) => Promise<AtomicRefundResult> = refundAtomicSend,
+): Promise<AtomicSendResumeResult> {
+  const repo = new SqliteAtomicSwapRepository(deps.db)
+  const nowSecs = BigInt(Math.floor(Date.now() / 1000))
+  const result: AtomicSendResumeResult = { refunded: [], claimed: [], refundWait: [], waiting: 0, failed: [] }
+
+  const markClaimed = (swapId: string, preimage: string | undefined, fundingOutpoint: string | undefined): void => {
+    const cur = repo.get(swapId)!
+    if (cur.state === 'funded') repo.transition(swapId, 'ln_inflight')
+    repo.transition(swapId, 'claimed')
+    if (preimage) repo.setPreimage(swapId, preimage)
+    if (fundingOutpoint) {
+      const [txid, vout] = fundingOutpoint.split(':')
+      if (txid && vout !== undefined) releaseVaultRow(deps.db, txid, Number(vout))
+    }
+    result.claimed.push(swapId)
+  }
+
+  for (const swap of repo.listResumable()) {
+    if (swap.direction !== SwapDirection.Send) continue
+    const action = classifyResume({
+      direction: swap.direction,
+      state: swap.state,
+      refundLocktime: BigInt(swap.refundLocktime),
+      nowSecs,
+    })
+    try {
+      if (action === 'refund') {
+        const st = await sendStatusSafe(deps.boltzApiUrl, swap.id)
+        if (st?.state === 'claimed' && swap.state !== 'refund_wait') {
+          // crash landed between boltz's claim and our bookkeeping
+          markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
+          continue
+        }
+        // (a refund_wait row boltz claims to have claimed would mean boltz paid
+        // after reporting failure — a §3.5 discipline violation; the refund
+        // below then fails loudly on the spent vtxo instead of us guessing)
+        const r = await refund(deps, swap.id)
+        console.log(`atomic send ${swap.id}: refunded ${r.amount} sats after T (arkTx ${r.txid.slice(0, 12)}…)`)
+        result.refunded.push(swap.id)
+      } else if (action === 'poll') {
+        const st = await sendStatusSafe(deps.boltzApiUrl, swap.id)
+        if (st?.state === 'claimed') {
+          markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
+        } else if (st?.state === 'failed' || st?.state === 'refund_wait') {
+          if (swap.state !== 'refund_wait') repo.transition(swap.id, 'refund_wait')
+          result.refundWait.push(swap.id)
+        } else {
+          result.waiting++
+        }
+      } else {
+        // wait_refund / none — T not reached, nothing to execute
+        result.waiting++
+      }
+    } catch (e) {
+      if (e instanceof RefundNotYetError) {
+        result.waiting++ // blocktime lag — the next pass retries
+      } else {
+        result.failed.push({ id: swap.id, error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+  }
+  return result
 }
 
 /** Terminal state housekeeping: drop the lifecycle-owned vault row + orphaned proofs. */
