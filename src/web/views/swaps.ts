@@ -17,15 +17,24 @@ function formatDate(unixMs: number): string {
   return new Date(unixMs).toLocaleString()
 }
 
-/** Human countdown to T: "in 3m 20s" / "42s ago". */
-function tCountdown(refundLocktime: number, nowSec: number): string {
-  const delta = refundLocktime - nowSec
+/**
+ * The refund-T cell. Only SEND rows carry a bridge-side T (the CLTV the bridge
+ * refunds after); RECEIVE rows store 0 as a placeholder — refunds there are
+ * boltz's, so the bridge has no T to count down (rendering 0 as a countdown is
+ * the "…h ago" garbage). Show "— (boltz)" for receive.
+ */
+function refundTCell(s: AtomicSwapRow, nowSec: number): RawHtml {
+  if (s.direction !== 'send' || s.refundLocktime <= 0) {
+    return html`<span class="muted" title="receive 환불은 boltz 관리 — bridge측 T 없음">— (boltz)</span>`
+  }
+  const delta = s.refundLocktime - nowSec
   const abs = Math.abs(delta)
   const h = Math.floor(abs / 3600)
   const m = Math.floor((abs % 3600) / 60)
-  const s = abs % 60
-  const span = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`
-  return delta >= 0 ? `in ${span}` : `${span} ago`
+  const sec = abs % 60
+  const span = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`
+  const text = delta >= 0 ? `in ${span}` : `${span} ago`
+  return html`<span title="T = ${new Date(s.refundLocktime * 1000).toLocaleString()}">${text}</span>`
 }
 
 /**
@@ -64,7 +73,7 @@ export function swapsView(args: {
       <td>${s.direction}</td>
       <td>${stateBadge(s)}</td>
       <td class="num">${s.amount.toLocaleString()} sats</td>
-      <td title="T = ${new Date(s.refundLocktime * 1000).toLocaleString()}">${tCountdown(s.refundLocktime, nowSec)}</td>
+      <td>${refundTCell(s, nowSec)}</td>
       <td class="muted">${s.fundingOutpoint ? html`<code>${s.fundingOutpoint.slice(0, 12)}…</code>` : '—'}</td>
       <td class="muted">${formatDate(s.createdAt)}</td>
       <td>

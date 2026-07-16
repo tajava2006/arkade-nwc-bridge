@@ -43,6 +43,17 @@ describe('swapsView', () => {
     expect(html).toContain('in 1m 30s')
   })
 
+  test('receive rows show "— (boltz)" for refund T, never a garbage countdown', () => {
+    // receive swaps store refundLocktime=0 (T is boltz's); it must not render
+    // as a "…h ago" countdown.
+    const html = swapsView({
+      swaps: [swap({ direction: SwapDirection.Receive, state: 'settled', refundLocktime: 0 })],
+      nowSec: 1752603600,
+    }).value
+    expect(html).toContain('— (boltz)')
+    expect(html).not.toContain('ago')
+  })
+
   test('notice renders', () => {
     const html = swapsView({ swaps: [], nowSec: 0, notice: { ok: true, text: 'refunded 351 sats' } }).value
     expect(html).toContain('refunded 351 sats')
