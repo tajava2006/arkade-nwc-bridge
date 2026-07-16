@@ -403,7 +403,7 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
 
 ### Phase 4 — 검증 + 배포 + 머지
 
-- 🔧 **#14 `asub/14-drill-matrix`** (L) — **2026-07-16 보내기 happy 실측 GREEN (6/6). Phase 2 첫 런타임 검증.**
+- ✅ **#14 `asub/14-drill-matrix`** (L) — **2026-07-17 regtest 풀 매트릭스 100% GREEN.** 아래 드릴 8종 전부 통과 + 프로덕션 wrapper 실측 중 상태머신 버그 1개 잡아 수정.
   regtest e2e 매트릭스: 보내기 happy(체인지 정규/subdust 두 케이스) / LN fail cancel /
   T refund / 받기 happy(zap 포함, **빈 지갑 수신**) / 받기 미클레임 refund / F uexit(#02 재현) /
   **양측 재시작 재개**(펀딩 후 boltz 재시작, claim 전 bridge 재시작). 전 시나리오 잔액 대사.
@@ -438,9 +438,11 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
     이미 /exit 탭+엔진에 흘러듦. 실제 캡처 행으로 estimateExit(**uneconomical=true, fee 12054 > V 351**
     = 경제성 실측)·buildExitStepper(실체인 unroll DAG 18 levels)·availableExitPath(uexit leaf, CSV 512s
     게이팅) 전부 통과. 온체인 unroll+sweep 실행은 #02가 증명(모든 vtxo 동일 코드).
-  **잔여(사유와 함께 보류)**:
-  - boltz 컨테이너 재시작 드릴 — boltz **자체** 회복력(pg 영속+resumeExpiredReceives, #09) 검증이라
-    bridge 스코프 밖. bridge 재시작 재개는 executor 유닛+driveAtomicReceive 멱등으로 커버. #15 직전 선택.
+  - `atomic_boltz_restart_e2e.spike.ts` (7/7): receive fund+presign 직후 `docker restart boltz`
+    미드스왑 → 복귀 후 swap 'funded' 유지(pg 영속) → driveAtomicReceive claim+settle 완료 → 수신값 생존.
+    배포 시 boltz 재빌드가 in-flight 수신을 안 버림 확인. **regtest 매트릭스 100% 완료.**
+  **매트릭스 상태**: 보내기 happy(코어+wrapper)·받기 happy(코어+wrapper, 빈지갑)·보내기 LN-fail·T-refund
+  (프로덕션)·resume executor(유닛7)·exit-엔진 소유(#13 payoff)·boltz 재시작 — **전부 GREEN**.
   - 보내기 subdust-change 케이스 — **프로덕션 N/A**: atomicSubdustSend는 항상 V=a+dust(체인지=정규 dust).
     subdust 체인지 분기는 #01에서 프로토콜 레벨 검증 완료.
   - #11 잔여였던 consolidate-all refresh 제외 — **구조적 N/A**: shared vtxo는 지갑 주소 세트 밖이라
