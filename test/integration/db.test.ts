@@ -47,8 +47,9 @@ describe('database migrations', () => {
       .all()
     // Bumps here are intentional. If you added a migration without
     // realizing, this test surfaces it. (v1 = 2026-07 epoch reset that
-    // collapsed the original 16; v2 = atomic sub-dust swaps.)
-    expect(rows.map((r) => r.version)).toEqual([1, 2])
+    // collapsed the original 16; v2 = atomic sub-dust swaps; v3 = atomic
+    // swaps in the exit vault — source column + script-rebuild params.)
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3])
   })
 
   test('re-opening the same db is idempotent (no double-apply)', () => {
@@ -60,7 +61,7 @@ describe('database migrations', () => {
       const count = db2
         .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM schema_migrations')
         .get()
-      expect(count?.c).toBe(2)
+      expect(count?.c).toBe(3)
     } finally {
       db2.close()
     }

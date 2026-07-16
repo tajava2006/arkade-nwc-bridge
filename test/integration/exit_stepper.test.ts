@@ -60,6 +60,7 @@ describe('exit stepper (DB-only build)', () => {
       {
         txid: 'v1',
         vout: 0,
+        source: 'wallet',
         valueSat: 1000,
         script: '5120' + 'ab'.repeat(32),
         tapTree: 'c0de',

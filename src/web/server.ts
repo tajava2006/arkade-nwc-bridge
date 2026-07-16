@@ -54,6 +54,9 @@ import { newConnectionForm, newConnectionResultView } from './views/new_connecti
 import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView } from './views/setup'
 import { degradedView } from './views/degraded'
+import { swapsView } from './views/swaps'
+import { SqliteAtomicSwapRepository } from '../atomic'
+import { refundAtomicSend } from '../atomic_send'
 import { vaultStats } from '../exit/vault'
 
 import {
@@ -789,6 +792,45 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return Response.redirect('/', 303)
         },
       },
+      '/swaps': {
+        GET: (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const url = new URL(req.url)
+          const msg = url.searchParams.get('msg')
+          return htmlResponse(
+            swapsView({
+              swaps: new SqliteAtomicSwapRepository(db).list(),
+              nowSec: Math.floor(Date.now() / 1000),
+              notice: msg ? { ok: url.searchParams.get('ok') === '1', text: msg } : undefined,
+            }),
+          )
+        },
+      },
+      // Manual refund of an atomic send whose T has passed (refund leaf,
+      // F+server — boltz not involved). PRG: redirect back with the outcome
+      // so a reload can't re-fire the spend.
+      '/swaps/refund': {
+        POST: async (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          const form = await req.formData()
+          const swapId = (form.get('swapId') ?? '').toString()
+          const back = (ok: boolean, text: string): Response =>
+            Response.redirect(`/swaps?ok=${ok ? '1' : '0'}&msg=${encodeURIComponent(text)}`, 303)
+          if (!swapId) return back(false, 'swapId is required')
+          try {
+            const res = await refundAtomicSend(
+              { wallet: r.ready.wallet, arkServerUrl: cfg.arkServerUrl, db },
+              swapId,
+            )
+            return back(true, `refunded ${res.amount.toLocaleString()} sats (arkTx ${res.txid.slice(0, 12)}…)`)
+          } catch (err) {
+            return back(false, `refund failed: ${errMsg(err)}`)
+          }
+        },
+      },
+
       '/send': {
         GET: async () => {
           const r = requireReady()

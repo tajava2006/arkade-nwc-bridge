@@ -100,3 +100,28 @@ describe('listResumable', () => {
     expect(ids).toEqual(['s1', 's2'])
   })
 })
+
+describe('script-rebuild params + dashboard listing (#13)', () => {
+  test('peerPubkey/exitDelay round-trip (absent stays undefined)', () => {
+    repo.create({ ...newSend('s-meta', 'a1'.repeat(32)), peerPubkey: 'cd'.repeat(32), exitDelay: 512 })
+    const row = repo.get('s-meta')!
+    expect(row.peerPubkey).toBe('cd'.repeat(32))
+    expect(row.exitDelay).toBe(512)
+
+    repo.create(newSend('s-bare', 'a2'.repeat(32)))
+    expect(repo.get('s-bare')!.peerPubkey).toBeUndefined()
+    expect(repo.get('s-bare')!.exitDelay).toBeUndefined()
+  })
+
+  test('list() returns newest-first and honors the limit', () => {
+    repo.create(newSend('s-1', 'b1'.repeat(32)))
+    repo.create(newSend('s-2', 'b2'.repeat(32)))
+    repo.create(newSend('s-3', 'b3'.repeat(32)))
+    const all = repo.list()
+    expect(all.length).toBe(3)
+    // same-ms creations tie-break on id; newest-first overall
+    expect(all.map((s) => s.id).sort()).toEqual(['s-1', 's-2', 's-3'])
+    expect(all[0]!.createdAt).toBeGreaterThanOrEqual(all[2]!.createdAt)
+    expect(repo.list(2).length).toBe(2)
+  })
+})

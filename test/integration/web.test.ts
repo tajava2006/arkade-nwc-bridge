@@ -500,6 +500,7 @@ describe('web server — degraded mode', () => {
       {
         txid: 'a'.repeat(64),
         vout: 0,
+        source: 'wallet',
         valueSat: 1000,
         script: '5120' + 'ab'.repeat(32),
         tapTree: 'c0de',
@@ -623,6 +624,7 @@ describe('web server — exit step endpoint', () => {
         txid: TXID,
         vout: 0,
         valueSat: 1000,
+        source: 'wallet',
         script: '5120' + 'ab'.repeat(32),
         tapTree: 'c0de',
         status: 'preconfirmed',
@@ -702,6 +704,7 @@ describe('web server — exit forget', () => {
         txid: TXID,
         vout: 0,
         valueSat: 1000,
+        source: 'wallet',
         script: '5120' + 'ab'.repeat(32),
         tapTree: 'c0de',
         status: 'preconfirmed',
