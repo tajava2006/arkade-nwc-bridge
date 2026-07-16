@@ -172,7 +172,10 @@ export async function atomicSubdustSend(
   repo.setPresigs(init.swapId, presig)
   repo.transition(init.swapId, 'funded')
 
-  // 5. hand boltz the presigs → it verifies, pays, claims.
+  // 5. hand boltz the presigs → it verifies, pays, claims. Handing them over =
+  // boltz's LN pay is now in flight (the state machine requires this hop:
+  // claimed/refund_wait are only reachable from ln_inflight, not funded).
+  repo.transition(init.swapId, 'ln_inflight')
   const fund = await boltzFetch<{ status: string; preimage?: string; error?: string }>(
     `${deps.boltzApiUrl}/v2/subdust/atomic/send/fund`,
     { swapId: init.swapId, fundingOutpoint: `${shared.txid}:${shared.vout}`, presigs: presig },
