@@ -382,8 +382,16 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   arkServerUrl+db를 make_invoice·service·clink·index에 배선. 옛 plain 유닛테스트 삭제(제거된 코드).
   typecheck green, suite 351 pass / 0 fail. **마인넷 배포는 #15까지 plain boltz 유지(정합).**
 
-- ⬜ **#13 `asub/13-vault-dashboard`** (S→M) — **2026-07-16 B안 확정. 설계 근거 전문은 §8
-  "in-flight 자금과 vault" 문답 기록 참조.**
+- ✅ **#13 `asub/13-vault-dashboard`** (S→M) — **2026-07-16 완료, 에픽 머지 (`e66f90d`). 설계 근거
+  전문은 §8 "in-flight 자금과 vault" 문답 기록 참조.**
+  → 산출: 마이그레이션 v3(exit_vtxos.source + atomic_swaps.peer_pubkey/exit_delay — 스크립트 재조립이
+  boltz 재문의 없이 행만으로 성립) / proof_sync `captureVtxo`(지갑 밖 vtxo 1회성 미러, 패스 fetch/store
+  재사용) / GC 사라짐 루프 source='atomic' skip / atomic_send 펀딩 시 캡처(best-effort — 미러 실패가
+  스왑을 못 죽임)·claimed 시 행 해제 / `refundAtomicSend`(refund leaf CLTV T, F+server; funded·
+  ln_inflight·refund_wait에서 T 경과 시) / `/swaps` 탭(진행중+최근, T 카운트다운, 수동 Refund 버튼 —
+  refundAtomicSend 게이트와 동일 조건에만 노출, PRG) / EXIT_DESIGN.md §3 atomic-source 절.
+  exitPaths() 회귀 assert 포함 테스트 12개 추가, suite 360 pass. **cancel(3-of-3)은 의도적 미배선**
+  (boltz cosign 엔드포인트 필요; T가 짧고 refund가 안전성 커버 — 필요시 백로그).
   (a) **vault 편입 (보내기만)**: `exit_vtxos`에 `source` 컬럼('wallet'|'atomic', 마이그레이션) +
   펀딩 직후 shared vtxo의 chain+proof 명시적 캡처(ProofSync 헬퍼 재사용) + ProofSync GC 사라짐
   루프에 source='atomic' skip 가드(getExitOp 가드와 동형 — 행 소유권은 atomic 스왑 생애주기) +
