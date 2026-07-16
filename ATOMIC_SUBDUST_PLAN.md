@@ -382,9 +382,15 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   arkServerUrl+db를 make_invoice·service·clink·index에 배선. 옛 plain 유닛테스트 삭제(제거된 코드).
   typecheck green, suite 351 pass / 0 fail. **마인넷 배포는 #15까지 plain boltz 유지(정합).**
 
-- ⬜ **#13 `asub/13-vault-dashboard`** (S)
-  진행 중 shared vtxo를 proof vault에 편입(F=유저인 보내기 — ASP 사망 시 /exit에서 uexit 가능)
-  + 대시보드: 진행 중 스왑 목록(상태/T 카운트다운) + 수동 refund/cancel 액션.
+- ⬜ **#13 `asub/13-vault-dashboard`** (S→M) — **2026-07-16 B안 확정. 설계 근거 전문은 §8
+  "in-flight 자금과 vault" 문답 기록 참조.**
+  (a) **vault 편입 (보내기만)**: `exit_vtxos`에 `source` 컬럼('wallet'|'atomic', 마이그레이션) +
+  펀딩 직후 shared vtxo의 chain+proof 명시적 캡처(ProofSync 헬퍼 재사용) + ProofSync GC 사라짐
+  루프에 source='atomic' skip 가드(getExitOp 가드와 동형 — 행 소유권은 atomic 스왑 생애주기) +
+  종료 상태(claimed/canceled/refunded) 도달 시 행 삭제 + gcOrphanProofs + `exitPaths()`가 atomic
+  tapTree의 uexit leaf를 인식하는 회귀 assert. EXIT_DESIGN.md §3에 포인터 추가.
+  (b) **대시보드**: 진행 중 스왑 목록(방향/상태/T 카운트다운) + 수동 refund 액션(T 후, F+server —
+  boltz 불필요). cancel(3-of-3)은 boltz cosign 엔드포인트가 필요해 구현 시 스코프 판단.
   DoD: vault 행 + /exit 표시 + 대시보드 로컬 확인 (regtest).
 
 ### Phase 4 — 검증 + 배포 + 머지
@@ -531,9 +537,64 @@ batch expiry 필터만 / 받기 그리핑 무대응.
     가능)·ownVtxos·selectFunding(받기 미니지갑, eligibility). 서명·제출은 lib tx 함수 그대로 호출.
   - **벤더 재생성 규율**: bridge `src/atomic` 변경 시 boltz `lib/atomic` 6파일 재복사(단일 진실=bridge).
   - 잔여: ArkSigner 구동 boltz-프로세스 regtest 왕복 → #14 드릴 편입(서명·제출은 #03/#05 실증).
+- [x] **2026-07-16 (#13 B안 확정 — "in-flight 자금과 vault" 운영자 문답 기록):** shared vtxo의
+  proof vault 편입 가치를 검증하다 도달한 이해의 전문 기록. 나중에 다시 읽어도 바로 알 수 있게.
+  - **현상은 sub-dust 전용이 아니다.** vault(ProofSync)는 지갑 자기 주소의 vtxo만 미러링한다.
+    스왑 in-flight 자금은 — 정규 vHTLC든 우리 atomic shared vtxo든 — 커스텀 스크립트 주소에
+    있어 vault에 안 들어감 → ASP가 in-flight 중 죽으면 일방탈출 재료(증명)가 없다. 금액과
+    무관한 **"지갑 밖 주소" 일반 현상**. 우리 shared vtxo는 V=a+dust≥330이라 아크 안에선 평범한
+    vtxo다(sub-dust인 건 claim 스플릿의 a 조각뿐 — 스크립트 주소에 떨어지는 동전을 설계가
+    일부러 dust+로 만들어 둠).
+  - **격리 오탐이 아니라 완전 비가시.** 격리는 "vault에 행이 **있는데** live 세트에서 사라졌고
+    증거 없음"일 때만 발동(GC는 vault 행만 순회). 오늘의 스크립트 주소 vtxo는 행이 아예 없어
+    볼 것도 없음 — **침묵은 안전이 아니라 비가시**. (펀딩에 소모된 지갑 vtxo 쪽은 내 서명이
+    스펜딩 tx에 있어 spent-verified로 정당 삭제 — 그 무경보는 정상. evidence는 "누가 썼나"만
+    보지 "잘 썼나"는 안 봄.) 격리 오탐은 vault에 행을 *넣기 시작하면* 비로소 생기는 문제:
+    지갑 live 세트에 영원히 없는 행이라 매 패스 오탐 + boltz claim(내 서명 아님) 시 또 오탐
+    → GC 가드가 필요한 유일한 이유.
+  - **정규 ≥dust 스왑도 같은 구멍.** SDK/SwapManager는 boltz 배신 시 환불(협조/일방 leaf)만
+    커버, ASP 사망 대비 증명 보존은 없음. 마인넷 무경보 = 안전해서가 아니라 vault가 못 봐서.
+    큰 금액은 경제성도 있으므로(수수료 내고도 남음) vHTLC 확장 가치 있음 → §9 백로그. 단
+    vHTLC의 일방 refund leaf는 CLTV+CSV 복합이라 exit 엔진 `exitPaths()` 파싱 검증 스파이크
+    선행 필요. 우리 uexit leaf는 SDK 표준 CSVMultisig 순정품이라 엔진 무수정(sweep.ts가
+    tapTree에서 generic 도출 — DefaultVtxo 하드코딩 없음, 코드 확인). **실측 확정(2026-07-16,
+    SDK 0.4.43)**: `VtxoScript.decode(atomic tapTree).exitPaths()` = uexit 1개 정상 반환.
+    claim leaf가 ConditionCSV로 오인돼 내부 디코드는 실패하지만 per-leaf try/catch가 잡아
+    debug 로그만 남김(무해 소음). #02 당시 "4-leaf에서 throw" 노트는 이 실측으로 무효 —
+    단 SDK bump가 throw를 재도입할 수 있으니 #13에서 회귀 assert로 고정.
+  - **경제성: 솔로 탈출은 상수 조정으로 못 살린다.** sweep 가드는 "수수료 뺀 후 출력 ≥ 546"
+    (SDK 보수 상수. 타프루트의 진짜 온체인 dust는 330 = 아크 dust와 같은 값·같은 기원; 546은
+    레거시 P2PKH 기준의 blanket). V=351 → 351−~110(1-in-1-out 최저 수수료) < 546 거부.
+    V=a+546=567로 올려도 457 < 546 **여전히 거부** — 예외 제거엔 V ≥ a+546+미래수수료가
+    필요한데 수수료율은 펀딩 시점에 미지 → **어떤 상수도 불가**. 게다가 이 가드는 vtxo 종류
+    무관 단일 값 체크라 없앨 "예외 처리 로직" 자체가 코드에 없음(평범한 400-sat 잔돈 vtxo도
+    동일 거부). 대량 탈출 배치에선 총합 체크라 그냥 실려 나감(throw 없음). dust 상향은 21-sat
+    zap 최소 잔고만 351→567로 올려 최소 지갑 케이스를 죽임 → **330 유지**.
+  - **용어 교정**: 이 편입이 완성하는 건 "아토믹"(boltz와의 원자성 — HTLC로 이미 확보)이
+    아니라 **일방탈출 보장**(ASP 사망 시에도 꺼낼 재료)의 빈틈 메우기.
+  - **결정(B안)**: 경제성 없어도 편입 — 철학("모든 vtxo는 내 것, 아무도 안 믿음")의 코드적
+    참 + 탈출 실행 여부는 유저 재량. 구현 형태(#13 스펙에 반영):
+    (i) **같은 exit_vtxos 테이블 + `source` 컬럼** — 별도 테이블은 exit 소비자 전부(sweep/
+    engine/stepper/estimate/vault_indexer/뷰) 수술이 필요해지고, gcOrphanProofs가 exit_vtxos
+    에서만 참조를 계산해 swap 행만 참조하는 증명이 고아 오판되는 footgun.
+    (ii) GC 사라짐 루프에 source='atomic' skip 가드(기존 getExitOp 가드와 동형) — 행 소유권은
+    atomic 스왑 생애주기.
+    (iii) 펀딩 시 캡처: "소모한 vtxo의 증거 보존"이 아니라 **"새 vtxo의 증거 신규 캡처"**가
+    정확한 메커니즘. proof는 tx 단위 dedupe라 조상 증명은 소모한 인풋 것과 대부분 겹침 —
+    신규 fetch는 새 hop(arkTx/checkpoint) PSBT 정도.
+    (iv) 종료 시 삭제: claimed(잔돈 dust는 내 정규 주소로 와 기존 ProofSync가 자동 커버)/
+    canceled(협조 3-of-3)/refunded(T 후 F+server) → removeVtxo + gcOrphanProofs. 비종료 stuck은
+    행 유지 — 여전히 탈출 가능한 자금이니 옳은 동작.
+    (v) **보내기만**(받기는 F=boltz — in-flight 위험도 uexit leaf도 boltz 몫).
+    (vi) 회귀 고정: atomic tapTree에 `exitPaths()`가 uexit leaf를 인식하는 assert.
 
 ## 9. 백로그 (에픽 스코프 밖)
 
+- **정규 vHTLC 스왑의 vault 편입** (§8 2026-07-16 문답에서 발견): in-flight vHTLC 자금도 같은
+  "지갑 밖 주소" 구멍 — ASP가 스왑 중 죽으면 일방탈출 재료 없음. 큰 금액이라 sub-dust와 달리
+  **경제성 있음**. #13의 source-컬럼 메커니즘 재사용 가능하되, vHTLC 일방 refund leaf(CLTV+CSV
+  복합)가 exit 엔진 `exitPaths()`에 파싱되는지 스파이크 선행. 완성 시 "일방탈출 보장"이
+  모든 in-flight 자금으로 확장됨.
 - **co-funded 받기 (구 v1 설계의 부활 자리)**: 유저가 정규 vtxo를 co-fund하면 수취 a가
   U+a ≥ dust 정규 vtxo가 되어 **완전 일방 집행** 획득 — 잔고 있는 유저용 프리미엄 아토믹 받기.
   멀티파티 펀딩·상호 사전서명 복잡도가 돌아오므로 수요 확인 후.
