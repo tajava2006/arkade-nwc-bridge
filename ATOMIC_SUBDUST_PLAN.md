@@ -427,11 +427,20 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
     도달 가능하면 status 1회 확인: claim 후 크래시 행은 refund 대신 claimed로 대사+preimage 저장+vault
     해제), pre-T→boltz 폴링(failed→refund_wait). index.ts 기존 30s reconcile 틱에 배선(부팅+주기).
     유닛 7종(크래시 대사/불통/blocktime lag/스왑별 격리). suite 367 pass.
+  → **배선 실측 + exit-엔진 소유 GREEN (2026-07-17, regtest 풀 매트릭스)**:
+  - `atomic_wired_e2e.spike.ts` (10/10): **프로덕션 wrapper** 첫 실측 — bridge B `issueAtomicReceive`+
+    `driveAtomicReceive` 수신 / bridge A `atomicSubdustSend` 송신, 각자 Wallet+db(운영자 "두 bridge"의
+    실질). ⚠ **버그 캐치**: atomicSubdustSend가 funded→claimed 직행(상태머신 위반) → mainnet이면 boltz
+    결제·claim 후 throw(돈 나가고 실패 보고) → funded→ln_inflight→claimed로 수정. ⚠ **닫힌 루프 불가**:
+    두 bridge가 한 boltz(=한 LN 노드) 공유라 A→B는 boltz-lnd 자기지불(LND 거부) → 각 측 외부 lnd 상대.
+    **mainnet 테스트 설계에도 적용**: 두 bridge 직접 루프 X, 각자 외부 LN 상대여야.
+  - `atomic_exit_plan.spike.ts` (9/9): **#13 payoff** — listVaultVtxos에 source 필터 없어 atomic 행이
+    이미 /exit 탭+엔진에 흘러듦. 실제 캡처 행으로 estimateExit(**uneconomical=true, fee 12054 > V 351**
+    = 경제성 실측)·buildExitStepper(실체인 unroll DAG 18 levels)·availableExitPath(uexit leaf, CSV 512s
+    게이팅) 전부 통과. 온체인 unroll+sweep 실행은 #02가 증명(모든 vtxo 동일 코드).
   **잔여(사유와 함께 보류)**:
-  - uexit 엔진 경유 재드릴 — #02(uexit sweep 실측) + #13(exitPaths 회귀 assert + real 인덱서 캡처)으로
-    구성요소 전부 검증됨; 전체 온체인 재드릴(CSV 512s 대기)은 #15 직전 풀 매트릭스 런에 편입.
-  - 양측 재시작 재개 — bridge 쪽은 executor 유닛+드릴로 커버(상태 주도라 재시작=재개). boltz 컨테이너
-    재시작 드릴은 #15 직전 풀 매트릭스 런에.
+  - boltz 컨테이너 재시작 드릴 — boltz **자체** 회복력(pg 영속+resumeExpiredReceives, #09) 검증이라
+    bridge 스코프 밖. bridge 재시작 재개는 executor 유닛+driveAtomicReceive 멱등으로 커버. #15 직전 선택.
   - 보내기 subdust-change 케이스 — **프로덕션 N/A**: atomicSubdustSend는 항상 V=a+dust(체인지=정규 dust).
     subdust 체인지 분기는 #01에서 프로토콜 레벨 검증 완료.
   - #11 잔여였던 consolidate-all refresh 제외 — **구조적 N/A**: shared vtxo는 지갑 주소 세트 밖이라
