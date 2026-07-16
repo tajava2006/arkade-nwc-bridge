@@ -22,8 +22,8 @@ function swap(over: Partial<AtomicSwapRow>): AtomicSwapRow {
 }
 
 describe('swapsView', () => {
-  test('refund button appears only for a T-elapsed non-terminal send with funding', () => {
-    const nowSec = 1752603600 + 10 // past T
+  test('refund button appears only past T + blocktime lag, for a non-terminal send', () => {
+    const nowSec = 1752603600 + 3600 + 10 // past T + blocktime lag (arkd's real gate)
     const eligible = swap({ id: 'refundable', state: 'refund_wait', fundingOutpoint: 'f'.repeat(64) + ':0' })
     const terminal = swap({ id: 'done', state: 'claimed', fundingOutpoint: 'f'.repeat(64) + ':0' })
     const receive = swap({ id: 'rcv', direction: SwapDirection.Receive, state: 'funded', fundingOutpoint: 'f'.repeat(64) + ':0' })
@@ -33,14 +33,26 @@ describe('swapsView', () => {
     expect(html).toContain('refundable')
   })
 
-  test('pre-T send shows a countdown, no refund lever', () => {
-    const nowSec = 1752603600 - 90 // 1m30s before T
+  test('past wall-T but within the blocktime lag → NO lever (arkd would reject)', () => {
+    // the exact live-mainnet footgun: wall clock passed T, but blocktime (MTP)
+    // hasn't, so a refund would bounce with FORFEIT_CLOSURE_LOCKED. The button
+    // must stay hidden until T + lag.
+    const nowSec = 1752603600 + 600 // 10m past T, well inside the ~1h lag
+    const html = swapsView({
+      swaps: [swap({ state: 'refund_wait', fundingOutpoint: 'f'.repeat(64) + ':0' })],
+      nowSec,
+    }).value
+    expect(html).not.toContain('/swaps/refund')
+  })
+
+  test('pre-T send shows a countdown (to T + lag), no refund lever', () => {
+    const nowSec = 1752603600 - 90 // before T
     const html = swapsView({
       swaps: [swap({ fundingOutpoint: 'f'.repeat(64) + ':0' })],
       nowSec,
     }).value
     expect(html).not.toContain('/swaps/refund')
-    expect(html).toContain('in 1m 30s')
+    expect(html).toContain('in 1h') // counts toward T + 1h lag
   })
 
   test('receive rows show "— (boltz)" for refund T, never a garbage countdown', () => {

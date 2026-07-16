@@ -17,37 +17,52 @@ function formatDate(unixMs: number): string {
   return new Date(unixMs).toLocaleString()
 }
 
+// arkd enforces the CLTV against BLOCKTIME (MTP), which lags wall clocks by
+// ~1h on mainnet (median-time-past ≈ the 6th-back block). A refund fired at
+// wall-clock T bounces with FORFEIT_CLOSURE_LOCKED until blocktime passes T.
+// So the button + countdown target T + this margin, not raw T — otherwise the
+// lever looks live ~1h before arkd will actually accept it. Heuristic (real
+// lag varies); an early click still fails gracefully (RefundNotYetError) and
+// the boot/tick executor retries regardless.
+const BLOCKTIME_LAG_SEC = 3600
+
+/** When a send's refund can realistically land (blocktime ≥ T), in wall-clock secs. */
+function refundReadyAt(s: AtomicSwapRow): number {
+  return s.refundLocktime + BLOCKTIME_LAG_SEC
+}
+
 /**
- * The refund-T cell. Only SEND rows carry a bridge-side T (the CLTV the bridge
- * refunds after); RECEIVE rows store 0 as a placeholder — refunds there are
- * boltz's, so the bridge has no T to count down (rendering 0 as a countdown is
- * the "…h ago" garbage). Show "— (boltz)" for receive.
+ * The refund-T cell = countdown to when the refund can actually land (T + the
+ * blocktime lag). RECEIVE rows store 0 (T is boltz's) → "— (boltz)", never a
+ * garbage countdown.
  */
 function refundTCell(s: AtomicSwapRow, nowSec: number): RawHtml {
   if (s.direction !== 'send' || s.refundLocktime <= 0) {
     return html`<span class="muted" title="receive 환불은 boltz 관리 — bridge측 T 없음">— (boltz)</span>`
   }
-  const delta = s.refundLocktime - nowSec
+  const delta = refundReadyAt(s) - nowSec
   const abs = Math.abs(delta)
   const h = Math.floor(abs / 3600)
   const m = Math.floor((abs % 3600) / 60)
   const sec = abs % 60
   const span = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`
   const text = delta >= 0 ? `in ${span}` : `${span} ago`
-  return html`<span title="T = ${new Date(s.refundLocktime * 1000).toLocaleString()}">${text}</span>`
+  const tip = `T = ${new Date(s.refundLocktime * 1000).toLocaleString()} · arkd는 blocktime(MTP, ~1h 지연) 기준이라 그 뒤에야 회수 가능`
+  return html`<span title="${tip}">${text}</span>`
 }
 
 /**
  * A send swap is manually refundable when it's non-terminal past `init`
- * (something was funded) and T has passed — the same gate refundAtomicSend
- * enforces; the button only shows when pressing it can work.
+ * (something was funded) and the refund can realistically land — i.e. blocktime
+ * has (heuristically) passed T. Gating on T + the blocktime lag, not raw T,
+ * keeps the button from lighting up ~1h before arkd will accept the spend.
  */
 function refundable(s: AtomicSwapRow, nowSec: number): boolean {
   return (
     s.direction === 'send' &&
     ['funded', 'ln_inflight', 'refund_wait'].includes(s.state) &&
     s.fundingOutpoint !== undefined &&
-    nowSec >= s.refundLocktime
+    nowSec >= refundReadyAt(s)
   )
 }
 
