@@ -321,6 +321,24 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_atomic_swaps_state ON atomic_swaps(state);
     `,
   },
+  {
+    version: 3,
+    description: 'atomic swaps in the exit vault (ATOMIC_SUBDUST_PLAN.md §8 2026-07-16)',
+    // In-flight atomic-send shared vtxos live at a script address the wallet
+    // never lists, so ProofSync's wallet-driven passes can't mirror them and
+    // the ASP dying mid-swap would leave no exit material. They are captured
+    // into exit_vtxos explicitly at funding time; `source` marks such rows as
+    // lifecycle-owned (the swap code deletes them on terminal states) so the
+    // evidence-gated GC skips them instead of false-quarantining every pass.
+    // peer_pubkey/exit_delay make a send row self-contained for the refund
+    // path: rebuilding the 4-leaf script after a restart (or with boltz gone)
+    // must not depend on boltz answering /send/init again.
+    sql: `
+      ALTER TABLE exit_vtxos ADD COLUMN source TEXT NOT NULL DEFAULT 'wallet';
+      ALTER TABLE atomic_swaps ADD COLUMN peer_pubkey TEXT;
+      ALTER TABLE atomic_swaps ADD COLUMN exit_delay INTEGER;
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

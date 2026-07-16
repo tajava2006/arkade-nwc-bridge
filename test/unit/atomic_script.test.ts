@@ -5,6 +5,7 @@ import {
   CSVMultisigTapscript,
   ConditionMultisigTapscript,
   MultisigTapscript,
+  VtxoScript,
 } from '@arkade-os/sdk'
 import { AtomicVtxoScript, hashlockConditionScript, ripemd160 } from '../../src/atomic/script'
 
@@ -104,5 +105,21 @@ describe('AtomicVtxoScript timelock units + validation', () => {
   test('hashlock condition commits ripemd160(H) with HASH160 … EQUAL framing', () => {
     const cond = hashlockConditionScript(H)
     expect(hex.encode(cond)).toBe(`a914${hex.encode(ripemd160(H))}87`)
+  })
+})
+
+describe('exit-engine compatibility (#13)', () => {
+  // The vault sweep derives spend paths generically via
+  // VtxoScript.decode(tapTree).exitPaths(); on SDK 0.4.43 that returns
+  // exactly our uexit leaf (the claim leaf trips the ConditionCSV decoder,
+  // but per-leaf try/catch swallows it — debug noise only). Measured
+  // 2026-07-16 (plan §8); this pins the behavior so an SDK bump that starts
+  // throwing (or hides the leaf) breaks loudly here instead of at exit time.
+  test('exitPaths() on the decoded 4-leaf tapTree yields exactly the uexit leaf', () => {
+    const decoded = VtxoScript.decode(build().encode())
+    const paths = decoded.exitPaths()
+    expect(paths.length).toBe(1)
+    expect(hex.encode(paths[0]!.script)).toBe(UEXIT)
+    expect(paths[0]!.params.timelock).toEqual({ type: 'seconds', value: 512n })
   })
 })

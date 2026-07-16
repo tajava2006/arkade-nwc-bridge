@@ -65,7 +65,7 @@ const STYLES = `
   .dag-node { background: #fbfbfb; border: 1px solid #ddd; border-radius: 6px; padding: 0.3em 0.7em; font-size: 0.85em; white-space: nowrap; text-align: center; }
 `
 
-type Nav = 'dashboard' | 'send' | 'exit' | 'connections' | 'setup'
+type Nav = 'dashboard' | 'send' | 'swaps' | 'exit' | 'connections' | 'setup'
 
 export function layout(args: {
   title: string
@@ -82,6 +82,7 @@ export function layout(args: {
       : html`<nav>
           ${tab('dashboard', '/', 'Dashboard')}
           ${tab('send', '/send', 'Send')}
+          ${tab('swaps', '/swaps', 'Swaps')}
           ${tab('exit', '/exit', 'Exit')}
           ${tab('connections', '/connections', 'Connections')}
         </nav>`

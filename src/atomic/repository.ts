@@ -23,6 +23,8 @@ export const ATOMIC_SWAPS_SCHEMA = `
     presigs_json      TEXT,                      -- send: F's 2 presigs (base64 PSBTs)
     preimage          TEXT,                      -- receive: our preimage (hex)
     invoice           TEXT,                      -- bolt11
+    peer_pubkey       TEXT,                      -- counterparty x-only (hex) — script rebuild without the peer
+    exit_delay        INTEGER,                   -- d (unilateral exit delay) at swap creation
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL
   );
@@ -40,6 +42,10 @@ export interface AtomicSwapRow {
   presigs?: AtomicPresig
   preimage?: string
   invoice?: string
+  /** counterparty x-only pubkey (hex) — lets the refund path rebuild the 4-leaf script offline */
+  peerPubkey?: string
+  /** unilateral exit delay d at swap creation (script rebuild input) */
+  exitDelay?: number
   createdAt: number
   updatedAt: number
 }
@@ -53,6 +59,8 @@ export interface NewAtomicSwap {
   refundLocktime: number
   invoice?: string
   preimage?: string
+  peerPubkey?: string
+  exitDelay?: number
 }
 
 export class DuplicateSwapError extends Error {
@@ -73,6 +81,8 @@ interface DbRow {
   presigs_json: string | null
   preimage: string | null
   invoice: string | null
+  peer_pubkey: string | null
+  exit_delay: number | null
   created_at: number
   updated_at: number
 }
@@ -89,6 +99,8 @@ function fromDb(r: DbRow): AtomicSwapRow {
     presigs: r.presigs_json ? (JSON.parse(r.presigs_json) as AtomicPresig) : undefined,
     preimage: r.preimage ?? undefined,
     invoice: r.invoice ?? undefined,
+    peerPubkey: r.peer_pubkey ?? undefined,
+    exitDelay: r.exit_delay ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }
@@ -110,8 +122,8 @@ export class SqliteAtomicSwapRepository {
       this.db
         .query(
           `INSERT INTO atomic_swaps
-             (id, direction, payment_hash, state, amount, refund_locktime, invoice, preimage, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, direction, payment_hash, state, amount, refund_locktime, invoice, preimage, peer_pubkey, exit_delay, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           swap.id,
@@ -122,6 +134,8 @@ export class SqliteAtomicSwapRepository {
           swap.refundLocktime,
           swap.invoice ?? null,
           swap.preimage ?? null,
+          swap.peerPubkey ?? null,
+          swap.exitDelay ?? null,
           now,
           now,
         )
@@ -147,6 +161,15 @@ export class SqliteAtomicSwapRepository {
     return (this.db.query('SELECT * FROM atomic_swaps').all() as DbRow[])
       .map(fromDb)
       .filter((s) => !isTerminal(s.direction, s.state))
+  }
+
+  /** Newest-first listing for the dashboard. */
+  list(limit = 50): AtomicSwapRow[] {
+    return (
+      this.db
+        .query('SELECT * FROM atomic_swaps ORDER BY created_at DESC, id LIMIT ?')
+        .all(limit) as DbRow[]
+    ).map(fromDb)
   }
 
   /** Move a swap to `to`, enforcing the state machine. Throws on illegal moves. */

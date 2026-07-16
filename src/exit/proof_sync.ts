@@ -131,7 +131,7 @@ function outpointKey(v: { txid: string; vout: number }): string {
 }
 
 /** virtualStatus.batchExpiry comes in ms from the SDK; the vault stores unix seconds. */
-function expirySec(v: ExtendedVirtualCoin): number | null {
+export function expirySec(v: { virtualStatus?: unknown }): number | null {
   const raw = (v.virtualStatus as { batchExpiry?: number | bigint } | undefined)?.batchExpiry
   if (raw === undefined || raw === null) return null
   const n = Number(raw)
@@ -143,12 +143,42 @@ function toSnapshot(v: ExtendedVirtualCoin, chain: ChainTx[]): VaultVtxoSnapshot
     txid: v.txid,
     vout: v.vout,
     valueSat: v.value,
+    source: 'wallet',
     script: v.script,
     tapTree: hex.encode(v.tapTree),
     status: v.virtualStatus?.state ?? 'unknown',
     expiresAt: expirySec(v),
     chain,
   }
+}
+
+/**
+ * One-shot capture of a single vtxo the wallet does NOT own — an atomic
+ * swap's shared vtxo lives at a custom script address, so the wallet-driven
+ * passes above never see it (ATOMIC_SUBDUST_PLAN.md §8: today's gap is
+ * invisibility, not quarantine). Same fetch/store machinery as a pass, no GC.
+ * Best-effort by contract: the caller treats a throw/incomplete result as a
+ * degraded safety mirror, never as a swap failure.
+ */
+export async function captureVtxo(
+  db: Database,
+  indexer: ProofSyncIndexer,
+  vtxo: Omit<VaultVtxoSnapshot, 'chain'>,
+): Promise<{ complete: boolean; unserved: string[] }> {
+  const chain = await fetchChain(indexer, { txid: vtxo.txid, vout: vtxo.vout })
+  if (chain.length === 0) throw new Error('indexer returned an empty chain')
+  const missing = missingProofTxids(db, chain)
+  const fetched = await fetchProofPsbts(indexer, missing)
+  const typeOf = new Map(chain.map((c) => [c.txid, c.type]))
+  const proofs: VaultProofTx[] = []
+  const unserved: string[] = []
+  for (const txid of missing) {
+    const psbtB64 = fetched.get(txid)
+    if (psbtB64) proofs.push({ txid, type: typeOf.get(txid)!, psbtB64 })
+    else unserved.push(txid)
+  }
+  storeVtxoWithProofs(db, { ...vtxo, chain }, proofs)
+  return { complete: unserved.length === 0, unserved }
 }
 
 export async function syncProofs(
@@ -248,6 +278,12 @@ export async function syncProofs(
       // unrolling / waiting / sweepable: exit in flight — keep silently
       continue
     }
+    // Atomic-swap rows are lifecycle-owned: never in the wallet's live set
+    // (script address), and their eventual spend is by the CLAIMER's key,
+    // which classifyDisappearance could never verify as ours — the machinery
+    // below would false-flag them every pass. The swap code deletes them on
+    // terminal states; a completed exit op is still honored above.
+    if (row.source === 'atomic') continue
     try {
       const verdict = await classifyDisappearance(indexer, row, xOnlyPubkey, nowSec)
       if (verdict.kind === 'spent-verified') {

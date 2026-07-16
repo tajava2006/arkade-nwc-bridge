@@ -26,10 +26,21 @@ export interface VaultProofTx {
   psbtB64: string
 }
 
+/**
+ * Who owns a row's lifecycle. 'wallet' rows are ProofSync's: mirrored from
+ * the wallet's live vtxo set, GC'd on evidence. 'atomic' rows are in-flight
+ * atomic-swap shared vtxos — they live at a script address the wallet never
+ * lists, so they're captured explicitly at funding time, deleted by the swap
+ * code on terminal states, and skipped by the disappearance GC (which would
+ * otherwise false-flag them every pass). ATOMIC_SUBDUST_PLAN.md §8 2026-07-16.
+ */
+export type VaultVtxoSource = 'wallet' | 'atomic'
+
 export interface VaultVtxo {
   txid: string
   vout: number
   valueSat: number
+  source: VaultVtxoSource
   /** pkScript hex — lets tooling cross-check the row belongs to our wallet */
   script: string
   /** EncodedVtxoScript.tapTree hex — sweep re-derives exit paths + witnessUtxo from it without a Wallet */
@@ -88,6 +99,7 @@ interface VtxoRow {
   synced_at: number
   quarantined_at: number | null
   quarantine_reason: string | null
+  source: string
 }
 
 // COMMITMENT txs are already onchain (that's what makes them commitments) so
@@ -105,6 +117,7 @@ function rowToVtxo(r: VtxoRow): VaultVtxo {
     txid: r.txid,
     vout: r.vout,
     valueSat: r.value_sat,
+    source: r.source === 'atomic' ? 'atomic' : 'wallet',
     script: r.script,
     tapTree: r.tap_tree,
     status: r.status,
@@ -140,8 +153,11 @@ export function storeVtxoWithProofs(
       insertProof.run(p.txid, p.type, p.psbtB64, now)
     }
     db.query(
-      `INSERT INTO exit_vtxos (txid, vout, value_sat, script, tap_tree, status, expires_at, chain_json, synced_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // source is written on insert only — a row's lifecycle owner never
+      // changes, and the two writers (ProofSync / atomic capture) target
+      // disjoint outpoints anyway.
+      `INSERT INTO exit_vtxos (txid, vout, value_sat, source, script, tap_tree, status, expires_at, chain_json, synced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(txid, vout) DO UPDATE SET
          value_sat = excluded.value_sat,
          script = excluded.script,
@@ -162,6 +178,7 @@ export function storeVtxoWithProofs(
       vtxo.txid,
       vtxo.vout,
       vtxo.valueSat,
+      vtxo.source,
       vtxo.script,
       vtxo.tapTree,
       vtxo.status,
