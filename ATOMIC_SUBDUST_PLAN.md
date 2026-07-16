@@ -416,7 +416,26 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
   - `atomic_send_fail_e2e.spike.ts` (4/4): 취소된 hold invoice로 LN 강제 실패 → boltz status=failed +
     **shared vtxo 미소비**(절도 불가, 유저 refund 가능) = 트러스트리스 보장.
   Phase 2 boltz 라우터(#08/#09)+#11+벤더 lib+커스텀 boltz 빌드 전부 실동작 확인. 런북은 커밋 메시지.
-  **잔여**: T refund 실행 / uexit(#02 재현) / 양측 재시작 재개 / 전 시나리오 잔액 대사 / 보내기 subdust-change 케이스 / 타이머 스케줄.
+  → **T-refund 실측 GREEN + 타이머 완성 (2026-07-16)**:
+  - `atomic_refund_e2e.spike.ts` (10/10): **프로덕션 `refundAtomicSend`** 실측 — 행만으로 4-leaf 재조립
+    → refund leaf(CLTV T, F+server) → 전액 V 복귀 → state=refunded + vault 행 해제 + **잔액 대사 net 0**.
+    #13 `captureVtxo`도 real 인덱서 상대 exit-ready 확인. pre-T 로컬 거부 확인.
+    ⚠ **발견: arkd는 CLTV를 blocktime(MTP류) 기준으로 집행** — wall clock보다 뒤짐(유휴 regtest ~35분,
+    mainnet ~1h). T 직후 refund는 `FORFEIT_CLOSURE_LOCKED`으로 튕김 → `RefundNotYetError`로 매핑,
+    executor는 waiting 처리(다음 틱 재시도), 대시보드 에러 메시지에 지연 설명 포함.
+  - **타이머(executor)**: `resumeAtomicSends` — classifyResume(§3.4) 그대로. post-T→refund(단 boltz
+    도달 가능하면 status 1회 확인: claim 후 크래시 행은 refund 대신 claimed로 대사+preimage 저장+vault
+    해제), pre-T→boltz 폴링(failed→refund_wait). index.ts 기존 30s reconcile 틱에 배선(부팅+주기).
+    유닛 7종(크래시 대사/불통/blocktime lag/스왑별 격리). suite 367 pass.
+  **잔여(사유와 함께 보류)**:
+  - uexit 엔진 경유 재드릴 — #02(uexit sweep 실측) + #13(exitPaths 회귀 assert + real 인덱서 캡처)으로
+    구성요소 전부 검증됨; 전체 온체인 재드릴(CSV 512s 대기)은 #15 직전 풀 매트릭스 런에 편입.
+  - 양측 재시작 재개 — bridge 쪽은 executor 유닛+드릴로 커버(상태 주도라 재시작=재개). boltz 컨테이너
+    재시작 드릴은 #15 직전 풀 매트릭스 런에.
+  - 보내기 subdust-change 케이스 — **프로덕션 N/A**: atomicSubdustSend는 항상 V=a+dust(체인지=정규 dust).
+    subdust 체인지 분기는 #01에서 프로토콜 레벨 검증 완료.
+  - #11 잔여였던 consolidate-all refresh 제외 — **구조적 N/A**: shared vtxo는 지갑 주소 세트 밖이라
+    refresh 수집 대상에 애초에 안 들어감(§8 2026-07-16 문답의 같은 원리).
   ⚠ 셋업 함정: block 모드(tree expiry 20블록+자동채굴)면 펀더 vtxo 즉시 만료 → **seconds 모드** 필수. hold invoice는 boltz-lnd에 있음(lnd 아님).
 
 - ⬜ **#15 `asub/15-mainnet-deploy`** (M) — **my-server 레포 작업 포함**
