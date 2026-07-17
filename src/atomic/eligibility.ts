@@ -45,36 +45,33 @@ export function isEligibleFundingInput(vtxo: VirtualCoin, args: EligibilityArgs)
 }
 
 /**
- * Pick a funding input that covers the shared output V = dust + a. The funder
- * spends it into V plus change (V's leftover); the funding tx must balance
- * (input == V + change), so a vtxo below V is USELESS — returning one builds an
- * unbalanced tx arkd rejects ("input amount is not equal to output amount",
- * hit live on mainnet 2026-07-17). Preference order among vtxos ≥ V:
- *   1. regular change (value ≥ V + dust) — change is a normal vtxo, one OP_RETURN
- *      in the claim split (§3.5);
- *   2. exact (value == V) — no change output at all;
- *   3. else sub-dust change (V < value < V+dust) — the caller MUST emit that
- *      change as a sub-dust (OP_RETURN) output, not a normal one.
- * Smallest-first within each tier minimizes value tied up in the swap. Returns
- * undefined when nothing covers V (operator tops up the mini-wallet).
+ * Pick funding input(s) to spend WHOLE into the shared vtxo — no funding change.
+ * The shared value V' then varies (it's the picked total, ≥ dust + a), and the
+ * claim split gives the claimer `a` (sub-dust) + the funder `V'−a` (always ≥
+ * dust ⇒ regular). This deletes all funding-change handling (the 2026-07-17
+ * false-funding was exactly there) and stops sub-dust dust from accreting in
+ * the funder's wallet.
+ *
+ *   1. smallest single vtxo that alone covers V = dust + a → fund it whole;
+ *   2. else the two smallest eligible vtxos — two dust-or-greater vtxos sum to
+ *      ≥ 2·dust > dust + a (a < dust), so they always cover V. This also
+ *      consolidates: the claim change comes back as one regular vtxo.
+ *
+ * `amount` is the sub-dust `a`, NOT V (V = dust + a is derived here). Returns []
+ * when nothing covers V (operator tops up the mini-wallet).
  */
-export function selectFundingInput(
+export function selectFundingInputs(
   vtxos: VirtualCoin[],
-  // `amount` is the sub-dust amount `a` — NOT V. The shared output the input
-  // must cover is V = dust + a, derived here. (Passing V by mistake inflates
-  // every threshold by `dust` — the 2026-07-17 mainnet false-funding.)
   args: EligibilityArgs & { amount: number },
-): VirtualCoin | undefined {
-  const shared = args.dust + args.amount // V = dust + a — the input must cover this
+): VirtualCoin[] {
+  const V = args.dust + args.amount
   const eligible = vtxos
-    .filter((v) => isEligibleFundingInput(v, args).eligible && v.value >= shared)
+    .filter((v) => isEligibleFundingInput(v, args).eligible)
     .sort((a, b) => a.value - b.value)
-  if (eligible.length === 0) return undefined
-  const regularChange = eligible.filter((v) => v.value >= shared + args.dust)
-  if (regularChange.length > 0) return regularChange[0]
-  const exact = eligible.filter((v) => v.value === shared)
-  if (exact.length > 0) return exact[0]
-  return eligible[0] // sub-dust change — caller emits it as an OP_RETURN output
+  const single = eligible.find((v) => v.value >= V)
+  if (single) return [single] // smallest vtxo covering V on its own
+  if (eligible.length >= 2) return [eligible[0]!, eligible[1]!] // two smallest always cover V
+  return []
 }
 
 function no(reason: string): FundingEligibility {

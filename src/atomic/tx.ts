@@ -279,35 +279,50 @@ export function cancelSpend(
   return collaborativeSpend(shared, shared.script.cancel(), outputs, unroll, [funder, claimer], ark)
 }
 
-// ── funding (F spends its own vtxo into the shared 4-leaf output) ─────────────
+// ── funding (F spends its own vtxo(s) whole into the shared 4-leaf output) ─────
 /**
- * Fund a shared vtxo: the funder spends one of its own regular vtxos into the
- * 4-leaf shared output (which MUST be `outputs[0]`) plus optional change, and
- * submits/finalizes the offchain tx. For a no-Wallet funder (boltz on receive);
- * a Wallet-backed funder can use `Wallet.sendBitcoin` instead. `funderInput` is
- * the funder's own vtxo spent via its forfeit leaf (DefaultVtxo.Script.forfeit).
- * Returns the resulting shared vtxo outpoint.
+ * Fund a shared vtxo: the funder spends one or two of its own regular vtxos
+ * WHOLE into the 4-leaf shared output (which MUST be `outputs[0]`) — no funding
+ * change — and submits/finalizes the offchain tx. For a no-Wallet funder (boltz
+ * on receive); a Wallet-backed funder can use `Wallet.sendBitcoin` instead. Each
+ * `funderInput` is one of the funder's vtxos spent via its forfeit leaf
+ * (DefaultVtxo.Script.forfeit); one checkpoint is produced per input. Returns
+ * the resulting shared vtxo outpoint (always vout 0 — shared output is first).
  */
 export async function fundShared(
-  funderInput: ArkTxInput,
+  funderInputs: ArkTxInput[],
   outputs: AtomicOutput[],
   unroll: CSVMultisigTapscript.Type,
   funder: Identity,
   ark: ArkProvider,
 ): Promise<{ txid: string; vout: number }> {
-  const { arkTx, checkpoints } = buildOffchainTx([funderInput], outputs, unroll)
-  const [checkpoint] = checkpoints
-  if (!checkpoint) throw new Error('funding tx must have exactly 1 checkpoint')
+  if (funderInputs.length === 0) throw new Error('fundShared needs at least one input')
+  const { arkTx, checkpoints } = buildOffchainTx(funderInputs, outputs, unroll)
+  if (checkpoints.length !== funderInputs.length) {
+    throw new Error(`expected ${funderInputs.length} checkpoints, got ${checkpoints.length}`)
+  }
 
-  // Standard collaborative send over the funder's forfeit leaf: funder signs
-  // arkTx + checkpoint, the server co-signs at submit.
+  // Standard collaborative send over each input's forfeit leaf: funder signs the
+  // arkTx (all inputs) + every checkpoint, the server co-signs each at submit.
   const arkSigned = await funder.sign(arkTx)
-  const ckptSigned = await funder.sign(checkpoint, [0])
-  const { arkTxid, signedCheckpointTxs } = await ark.submitTx(encodePsbt(arkSigned), [encodePsbt(checkpoint)])
-  const [serverCkptB64] = signedCheckpointTxs
-  if (!serverCkptB64) throw new Error('server returned no checkpoint')
-  combineTapscriptSigs(decodePsbt(serverCkptB64), ckptSigned)
-  await ark.finalizeTx(arkTxid, [encodePsbt(ckptSigned)])
+  const ckptSigned = await Promise.all(checkpoints.map((c) => funder.sign(c, [0])))
+  const { arkTxid, signedCheckpointTxs } = await ark.submitTx(
+    encodePsbt(arkSigned),
+    checkpoints.map(encodePsbt),
+  )
+  if (signedCheckpointTxs.length !== checkpoints.length) {
+    throw new Error('server did not return a checkpoint per input')
+  }
+  // Match server-signed checkpoints to ours by txid, not response order — the
+  // server only adds a signature, so the txid is unchanged.
+  const serverByTxid = new Map(signedCheckpointTxs.map((b64) => { const t = decodePsbt(b64); return [t.id, t] }))
+  const finalCheckpoints = ckptSigned.map((ckpt) => {
+    const server = serverByTxid.get(ckpt.id)
+    if (!server) throw new Error(`server returned no signature for checkpoint ${ckpt.id}`)
+    combineTapscriptSigs(server, ckpt)
+    return encodePsbt(ckpt)
+  })
+  await ark.finalizeTx(arkTxid, finalCheckpoints)
   return { txid: arkTxid, vout: 0 }
 }
 

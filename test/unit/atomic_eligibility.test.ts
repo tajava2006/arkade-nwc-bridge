@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { VirtualCoin } from '@arkade-os/sdk'
-import { isEligibleFundingInput, selectFundingInput } from '../../src/atomic/eligibility'
+import { isEligibleFundingInput, selectFundingInputs } from '../../src/atomic/eligibility'
 
 const T = 1893456000n // refund deadline (secs)
 const MARGIN = 3600
@@ -60,49 +60,48 @@ describe('isEligibleFundingInput', () => {
   })
 })
 
-describe('selectFundingInput', () => {
-  // dust=330, a=21 → V = 351; regular-change floor = V + dust = 681.
+describe('selectFundingInputs', () => {
+  // dust=330, a=21 → V = 351. Whole-vtxo funding: pick input(s) to spend WHOLE.
   const sel = { ...args, amount: 21 }
   const ok = FLOOR + 1000
+  const vals = (vtxos: VirtualCoin[]) => selectFundingInputs(vtxos, sel).map((v) => v.value)
 
-  test('prefers the smallest vtxo that yields a REGULAR change (value ≥ V + dust)', () => {
+  test('smallest single vtxo that alone covers V → fund it whole', () => {
     const vtxos = [
-      fakeVtxo({ value: 400, batchExpiry: ok }), // ≥ V but change 49 is sub-dust
-      fakeVtxo({ value: 700, batchExpiry: ok }), // change 349 ≥ dust → regular, smallest such
+      fakeVtxo({ value: 400, batchExpiry: ok }), // smallest ≥ V
+      fakeVtxo({ value: 700, batchExpiry: ok }),
       fakeVtxo({ value: 9000, batchExpiry: ok }),
     ]
-    expect(selectFundingInput(vtxos, sel)?.value).toBe(700)
+    expect(vals(vtxos)).toEqual([400])
   })
 
-  test('no regular-change option → prefers an EXACT vtxo (value == V, no change)', () => {
-    const vtxos = [fakeVtxo({ value: 400, batchExpiry: ok }), fakeVtxo({ value: 351, batchExpiry: ok })]
-    expect(selectFundingInput(vtxos, sel)?.value).toBe(351)
+  test('a below-V vtxo is skipped in favour of the smallest single that covers V', () => {
+    const vtxos = [fakeVtxo({ value: 340, batchExpiry: ok }), fakeVtxo({ value: 500, batchExpiry: ok })]
+    expect(vals(vtxos)).toEqual([500])
   })
 
-  test('only sub-dust-change vtxos → smallest that still covers V (caller OP_RETURNs the change)', () => {
-    const vtxos = [fakeVtxo({ value: 500, batchExpiry: ok }), fakeVtxo({ value: 400, batchExpiry: ok })]
-    expect(selectFundingInput(vtxos, sel)?.value).toBe(400)
+  test('no single covers V → combine the two smallest (always ≥ 2·dust > V)', () => {
+    const vtxos = [
+      fakeVtxo({ value: 340, batchExpiry: ok }),
+      fakeVtxo({ value: 330, batchExpiry: ok }),
+      fakeVtxo({ value: 335, batchExpiry: ok }),
+    ]
+    expect(vals(vtxos).sort((x, y) => x - y)).toEqual([330, 335]) // the two smallest
   })
 
-  // Regression for the mainnet false-funding (2026-07-17): a vtxo BELOW V must
-  // never be returned — funding with it builds an unbalanced tx arkd rejects
-  // ("input amount is not equal to output amount").
-  test('NEVER returns a vtxo below V — undefined when nothing covers V', () => {
-    const vtxos = [fakeVtxo({ value: 335, batchExpiry: ok }), fakeVtxo({ value: 340, batchExpiry: ok })]
-    expect(selectFundingInput(vtxos, sel)).toBeUndefined()
+  test('one below-V vtxo and no partner → [] (operator tops up)', () => {
+    expect(vals([fakeVtxo({ value: 340, batchExpiry: ok })])).toEqual([])
   })
 
-  test('returns undefined when nothing is eligible', () => {
+  test('[] when nothing is eligible', () => {
     const vtxos = [fakeVtxo({ value: 100, batchExpiry: ok }), fakeVtxo({ value: 1000, batchExpiry: FLOOR - 1 })]
-    expect(selectFundingInput(vtxos, sel)).toBeUndefined()
+    expect(vals(vtxos)).toEqual([])
   })
 
-  // The exact 2026-07-17 mainnet case: mini-wallet has a 669 (covers V=344,
-  // leaves sub-dust change) + a 330 (below V). `amount` is `a`, NOT V — the
-  // router regression was passing V, which excluded the 669 and fell back to
-  // the 330. Here amount=14 must pick the 669.
-  test('mainnet scenario: [669, 330] with a=14 picks the 669 (covers V, sub-dust change)', () => {
+  // The 2026-07-17 mainnet mini-wallet: [669, 330], a=14 (V=344). 669 covers V
+  // on its own → fund it whole (previously the router's amount=V bug skipped it).
+  test('mainnet scenario: [669, 330] with a=14 funds the 669 whole', () => {
     const vtxos = [fakeVtxo({ value: 669, batchExpiry: ok }), fakeVtxo({ value: 330, batchExpiry: ok })]
-    expect(selectFundingInput(vtxos, { ...args, amount: 14 })?.value).toBe(669)
+    expect(selectFundingInputs(vtxos, { ...args, amount: 14 }).map((v) => v.value)).toEqual([669])
   })
 })
