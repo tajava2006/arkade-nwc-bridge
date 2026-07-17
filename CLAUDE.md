@@ -84,12 +84,12 @@ src/
     get_balance.ts           — (available + recoverable) × 1000 msat
     make_invoice.ts          — invoice via the shared LN-receive core
                                (ln_receive.ts, same core as the CLINK noffer:
-                               reverse swap ≥ dust, boltz plain path below);
-                               sub-dust rows have no settlement event — a 30s
-                               reconciler flips them, see ln_receive.ts
+                               reverse swap ≥ dust; sub-dust <330 → ATOMIC
+                               receive, issueAtomicReceive + driveAtomicReceives
+                               reconciler, see atomic_receive.ts / ATOMIC_SUBDUST_PLAN.md)
     pay_invoice.ts           — submarine swap one-shot; amount stays the
                                invoice nominal, fees_paid = our cost
-                               (+ sub-dust <330 → boltz plain-send, see ln_send.ts)
+                               (+ sub-dust <330 → ATOMIC send, atomicSubdustSend, see ln_send.ts)
     lookup_invoice.ts        — connection-scoped SELECT
     list_transactions.ts     — connection-scoped, from/until/limit/offset
   lib/

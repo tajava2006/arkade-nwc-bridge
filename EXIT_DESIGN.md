@@ -187,6 +187,18 @@ Quarantined rows leave `vtxoCount`/`readyCount` (the server no longer claims
 them, so counting them as ready would inflate proven-vs-claimed) and get their
 own loud counter on the dashboard tile and the /exit tab.
 
+**Atomic-swap rows** (`exit_vtxos.source = 'atomic'`) sit outside all of the
+above: an in-flight atomic sub-dust send funds a shared vtxo at a script
+address the wallet never lists, so the wallet-diff machinery can't mirror it
+(the gap is *invisibility*, not quarantine) and would false-flag it every pass
+if it could. `captureVtxo` mirrors it explicitly at funding time, the
+disappearance GC skips `source='atomic'` rows (their eventual spend is by the
+claimer's key — never verifiable as ours), and the swap lifecycle deletes the
+row on terminal states. The uexit leaf is a standard CSV exit path, so the
+engine unrolls/sweeps it with no special casing — economics permitting (V is
+~a+dust; a solo sweep won't clear the dust floor, a batched ride-along will).
+Rationale + the full operator Q&A: `ATOMIC_SUBDUST_PLAN.md` §8 (2026-07-16).
+
 **Exit readiness is a first-class dashboard citizen** because proof freshness
 *is* exit possibility: if the ASP dies after the last sync, VTXOs received in
 the gap can't leave. The tile shows proven/ASP-claimed, last-sync freshness,

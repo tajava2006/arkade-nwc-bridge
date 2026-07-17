@@ -50,6 +50,7 @@ const vtxo = (txid: string, chain: ChainTx[], value = 1000): VaultVtxoSnapshot =
   txid,
   vout: 0,
   valueSat: value,
+  source: 'wallet',
   script: '5120' + 'ab'.repeat(32),
   tapTree: 'c0de',
   status: 'preconfirmed',

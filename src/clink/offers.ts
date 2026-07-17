@@ -12,7 +12,8 @@ import {
 import type { Wallet } from '@arkade-os/sdk'
 
 import { CLINK_OFFER_ID } from '../defaults'
-import { issueInvoice, subdustReceiveStatus, type IssuedInvoice } from '../ln_receive'
+import { issueInvoice, type IssuedInvoice } from '../ln_receive'
+import { SqliteAtomicSwapRepository, SwapDirection } from '../atomic'
 import { decryptContent, encryptContent } from '../nostr/crypto'
 import { openPersistentSub, type PersistentSub } from '../nostr/persistent_sub'
 import { normalizeRelayUrl, type OutboxWatcher } from '../nostr/outbox'
@@ -80,10 +81,12 @@ export interface OfferServiceDeps {
   secretKey: Uint8Array
   outbox: OutboxWatcher
   swaps: ArkadeSwaps
-  /** Ark wallet — sub-dust receives are paid out to its address by Boltz. */
+  /** Ark wallet — the sub-dust receive claims to its address; wallet.identity signs. */
   wallet: Wallet
-  /** Boltz REST base (no /v2 suffix); the sub-dust receive route lives there. */
+  /** Boltz REST base (no /v2 suffix). */
   boltzApiUrl: string
+  /** ASP (arkd) REST base — the atomic sub-dust receive needs server params. */
+  arkServerUrl: string
 }
 
 function loadStoredNoffer(db: Database): string | null {
@@ -111,7 +114,7 @@ function mint(secretKey: Uint8Array, outbox: OutboxWatcher): { noffer: string; r
 }
 
 export function startOfferService(deps: OfferServiceDeps): OfferService {
-  const { pool, db, secretKey, outbox, swaps, wallet, boltzApiUrl } = deps
+  const { pool, db, secretKey, outbox, swaps, wallet, boltzApiUrl, arkServerUrl } = deps
   const pub = getPublicKey(secretKey)
 
   // Reuse the stored code iff it decodes and was minted under this account
@@ -151,7 +154,7 @@ export function startOfferService(deps: OfferServiceDeps): OfferService {
       // case is an invoice nobody waits for — harmless, no funds move.
       resumeSince: true,
       onevent: (event) => {
-        handleOfferRequest({ pool, db, secretKey, swaps, wallet, boltzApiUrl, relay: state.relay }, event).catch((err) => {
+        handleOfferRequest({ pool, db, secretKey, swaps, wallet, boltzApiUrl, arkServerUrl, relay: state.relay }, event).catch((err) => {
           console.error('clink: offer handler crashed:', err)
         })
       },
@@ -187,6 +190,7 @@ interface HandlerCtx {
   swaps: ArkadeSwaps
   wallet: Wallet
   boltzApiUrl: string
+  arkServerUrl: string
   relay: string
 }
 
@@ -255,7 +259,7 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
   let issued: IssuedInvoice
   try {
     issued = await issueInvoice(
-      { swaps: ctx.swaps, wallet: ctx.wallet, boltzApiUrl: ctx.boltzApiUrl },
+      { swaps: ctx.swaps, wallet: ctx.wallet, boltzApiUrl: ctx.boltzApiUrl, arkServerUrl: ctx.arkServerUrl, db: ctx.db },
       { amountSats: amount, description, descriptionHash: zap?.descriptionHash },
     )
   } catch (err) {
@@ -446,25 +450,25 @@ export async function reconcileClinkAcks(deps: {
       'SELECT payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at FROM clink_subdust_receipts',
     )
     .all()
+  // The atomic receive swaps are driven to settle by reconcileAtomicReceives
+  // (ln_receive.ts); here we just publish the 9735 receipt once settled, using
+  // OUR OWN preimage (stored on the swap) — no polling boltz for it.
+  const repo = new SqliteAtomicSwapRepository(deps.db)
   for (const row of subRows) {
     try {
-      const status = await subdustReceiveStatus(deps.boltzApiUrl, row.payment_hash)
-      if (status.settled) {
-        await publishReceipt(deps, row, status.preimage)
+      const swap = repo.getByPaymentHash(row.payment_hash)
+      if (swap?.direction === SwapDirection.Receive && swap.state === 'settled') {
+        await publishReceipt(deps, row, swap.preimage ?? undefined)
         if (row.zap_request && row.zap_invoice) {
-          await publishZapReceipt(deps, row.zap_request, row.zap_invoice, status.preimage)
+          await publishZapReceipt(deps, row.zap_request, row.zap_invoice, swap.preimage ?? undefined)
         }
-        deps.db
-          .query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?')
-          .run(row.payment_hash)
+        deps.db.query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?').run(row.payment_hash)
         console.log(`clink: sent sub-dust payment receipt to ${row.payer_pubkey.slice(0, 8)}…`)
       } else if (now - row.created_at > SUBDUST_ACK_TTL_SECONDS) {
-        deps.db
-          .query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?')
-          .run(row.payment_hash)
+        deps.db.query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?').run(row.payment_hash)
       }
     } catch (err) {
-      // transient (boltz down) — leave the row, retry next pass
+      // transient — leave the row, retry next pass
       console.warn(`clink: sub-dust ack reconcile failed for ${row.payment_hash.slice(0, 8)}…:`, err)
     }
   }

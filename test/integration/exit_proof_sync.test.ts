@@ -9,7 +9,7 @@ import {
   listVaultVtxos,
   vaultStats,
 } from '../../src/exit/vault'
-import { syncProofs, type ProofSyncIndexer } from '../../src/exit/proof_sync'
+import { captureVtxo, syncProofs, type ProofSyncIndexer } from '../../src/exit/proof_sync'
 import { createOrRestartExitOp, setExitOpState } from '../../src/exit/ops'
 import { makeSpendEvidence } from '../helpers/evidence'
 
@@ -470,5 +470,64 @@ describe('proof sync', () => {
     expect(res.failed.some((f) => f.outpoint === `${ark.txid}:0`)).toBe(true)
     const row = getVaultVtxo(temp.db, ark.txid, 0)!
     expect(row.quarantinedAt).toBeNull() // our connectivity is not the server's guilt
+  })
+})
+
+describe('atomic-source rows (#13)', () => {
+  let temp: TempDb
+  beforeEach(() => {
+    temp = openTempDb()
+  })
+  afterEach(() => {
+    temp.cleanup()
+  })
+
+  const atomicSnapshot = {
+    txid: ark.txid,
+    vout: 0,
+    valueSat: 351, // V = a + dust for a 21-sat swap
+    source: 'atomic' as const,
+    script: '5120' + 'cd'.repeat(32),
+    tapTree: 'c0de',
+    status: 'preconfirmed',
+    expiresAt: 1783431985,
+  }
+
+  test('captureVtxo lands a shared vtxo with source=atomic, exit-ready', async () => {
+    const fake = makeFake({ chains: { [`${ark.txid}:0`]: chainOf(ark) }, txs: allTxs() })
+    const res = await captureVtxo(temp.db, fake.indexer, atomicSnapshot)
+    expect(res.complete).toBe(true)
+    const row = getVaultVtxo(temp.db, ark.txid, 0)
+    expect(row?.source).toBe('atomic')
+    expect(row?.valueSat).toBe(351)
+    expect(isVtxoExitReady(temp.db, ark.txid, 0)).toBe(true)
+  })
+
+  test('captureVtxo reports unserved proofs without failing (best-effort mirror)', async () => {
+    const fake = makeFake({ chains: { [`${ark.txid}:0`]: chainOf(ark) }, txs: new Map() })
+    const res = await captureVtxo(temp.db, fake.indexer, atomicSnapshot)
+    expect(res.complete).toBe(false)
+    expect(res.unserved.length).toBeGreaterThan(0)
+    // the row still lands — readiness is recomputed, a later pass can top up
+    expect(getVaultVtxo(temp.db, ark.txid, 0)?.source).toBe('atomic')
+    expect(isVtxoExitReady(temp.db, ark.txid, 0)).toBe(false)
+  })
+
+  test('disappearance GC skips atomic rows — no quarantine despite never being in the live set', async () => {
+    const fake = makeFake({ chains: { [`${ark.txid}:0`]: chainOf(ark) }, txs: allTxs() })
+    await captureVtxo(temp.db, fake.indexer, atomicSnapshot)
+
+    // A pass with an EMPTY live set and an indexer that can't explain the
+    // outpoint: a wallet row here would be quarantined as unexplained; the
+    // atomic row is lifecycle-owned and must survive untouched.
+    const gcFake = makeFake({ chains: {}, txs: new Map() })
+    const result = await syncProofs(temp.db, gcFake.indexer, [], PUBKEY, BEFORE_EXPIRY_NOW)
+    expect(result.gc.quarantined).toEqual([])
+    expect(result.gc.expired).toEqual([])
+    expect(result.gc.removedVtxos).toBe(0)
+    const row = getVaultVtxo(temp.db, ark.txid, 0)
+    expect(row?.quarantinedAt).toBeNull()
+    // and its proofs are still referenced (nothing orphan-collected)
+    expect(result.gc.removedProofTxs).toBe(0)
   })
 })

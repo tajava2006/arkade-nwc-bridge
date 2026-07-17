@@ -295,6 +295,50 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    description: 'atomic sub-dust swaps (ATOMIC_SUBDUST_PLAN.md §3.4)',
+    // In-flight atomic sub-dust LN swaps. Pre-signatures / preimage / state must
+    // survive a restart or the swap strands (can't refund, can't settle);
+    // payment_hash is UNIQUE so an invoice can't be swapped twice. The current
+    // DDL (with IF NOT EXISTS, for tests/standalone) lives in
+    // src/atomic/repository.ts — this migration text is frozen (append-only).
+    sql: `
+      CREATE TABLE atomic_swaps (
+        id                TEXT    PRIMARY KEY,
+        direction         TEXT    NOT NULL,
+        payment_hash      TEXT    NOT NULL UNIQUE,
+        state             TEXT    NOT NULL,
+        amount            INTEGER NOT NULL,
+        refund_locktime   INTEGER NOT NULL,
+        funding_outpoint  TEXT,
+        presigs_json      TEXT,
+        preimage          TEXT,
+        invoice           TEXT,
+        created_at        INTEGER NOT NULL,
+        updated_at        INTEGER NOT NULL
+      );
+      CREATE INDEX idx_atomic_swaps_state ON atomic_swaps(state);
+    `,
+  },
+  {
+    version: 3,
+    description: 'atomic swaps in the exit vault (ATOMIC_SUBDUST_PLAN.md §8 2026-07-16)',
+    // In-flight atomic-send shared vtxos live at a script address the wallet
+    // never lists, so ProofSync's wallet-driven passes can't mirror them and
+    // the ASP dying mid-swap would leave no exit material. They are captured
+    // into exit_vtxos explicitly at funding time; `source` marks such rows as
+    // lifecycle-owned (the swap code deletes them on terminal states) so the
+    // evidence-gated GC skips them instead of false-quarantining every pass.
+    // peer_pubkey/exit_delay make a send row self-contained for the refund
+    // path: rebuilding the 4-leaf script after a restart (or with boltz gone)
+    // must not depend on boltz answering /send/init again.
+    sql: `
+      ALTER TABLE exit_vtxos ADD COLUMN source TEXT NOT NULL DEFAULT 'wallet';
+      ALTER TABLE atomic_swaps ADD COLUMN peer_pubkey TEXT;
+      ALTER TABLE atomic_swaps ADD COLUMN exit_delay INTEGER;
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

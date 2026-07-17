@@ -1,9 +1,11 @@
+import type { Database } from 'bun:sqlite'
 import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { isSubdust, type Wallet } from '@arkade-os/sdk'
+import { atomicSubdustSend } from './atomic_send'
 
 // Below P2TR dust a Boltz submarine swap can't settle: the vHTLC lockup vtxo is
 // sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the claim, so the swap
-// strands. Sub-dust sends take boltz's non-atomic plain-send path instead.
+// strands. Sub-dust sends take the atomic sub-dust path instead (atomic_send.ts).
 const DUST_SATS = 330
 
 /**
@@ -23,6 +25,10 @@ export interface LnSendDeps {
   wallet: Wallet
   /** Boltz REST base (no /v2 suffix). */
   boltzApiUrl: string
+  /** ASP (arkd) REST base — the atomic sub-dust send needs server params. */
+  arkServerUrl: string
+  /** sqlite handle — the atomic sub-dust send persists swaps for refund recovery. */
+  db: Database
 }
 
 export interface LnSendResult {
@@ -94,7 +100,11 @@ export async function sendLightning(deps: LnSendDeps, invoice: string): Promise<
   }
 
   if (invoiceSats > 0 && invoiceSats < DUST_SATS) {
-    return sendSubdust(deps, invoice, invoiceSats)
+    return atomicSubdustSend(
+      { wallet: deps.wallet, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl },
+      invoice,
+      invoiceSats,
+    )
   }
   return sendSubmarine(deps, invoice)
 }
@@ -123,47 +133,3 @@ async function sendSubmarine(deps: LnSendDeps, invoice: string): Promise<LnSendR
   return { amount, preimage, txid }
 }
 
-async function sendSubdust(
-  deps: LnSendDeps,
-  invoice: string,
-  invoiceSats: number,
-): Promise<LnSendResult> {
-  // Match what a normal submarine swap would charge so boltz still collects its
-  // fee; boltz absorbs any routing over that. (Miner/fixed fee not added here —
-  // for sub-dust it's negligible and boltz's check is `>= invoice`.)
-  const fees = await deps.swaps.getFees()
-  const feeSats = Math.ceil((invoiceSats * fees.submarine.percentage) / 100)
-  const sendSats = invoiceSats + feeSats
-
-  // Per-invoice funding address: Boltz derives it from this invoice's payment
-  // hash, so the funding we're about to make can only ever pay THIS invoice (a
-  // vtxo Boltz holds for any other reason won't match). See SubdustRouter.
-  const { address } = await subdustFetch<{ address: string }>(
-    `${deps.boltzApiUrl}/v2/subdust/address?invoice=${encodeURIComponent(invoice)}`,
-  )
-  // Our own address — boltz plain-sends the funding back here if the LN payment
-  // fails terminally (refund-on-failure).
-  const refundAddress = await deps.wallet.getAddress()
-  // Boltz only requires funding >= invoice principal and keeps the surplus as
-  // margin, so the all-in drain costs nothing beyond the residue itself.
-  const funding = fundingAmount(sendSats, await spendableSats(deps.wallet))
-  const txid = await deps.wallet.send({ address, amount: funding })
-
-  const { preimage } = await subdustFetch<{ paid: boolean; preimage: string }>(
-    `${deps.boltzApiUrl}/v2/subdust/send`,
-    { arkTxid: txid, invoice, refundAddress },
-  )
-  return { amount: funding, preimage, txid }
-}
-
-async function subdustFetch<T>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  if (!res.ok) {
-    throw new Error(`${url} -> ${res.status}: ${await res.text().catch(() => '')}`)
-  }
-  return (await res.json()) as T
-}

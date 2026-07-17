@@ -93,6 +93,7 @@ export async function makeSignedExitFixture(
       txid,
       vout: 0,
       valueSat,
+      source: 'wallet' as const,
       script: hex.encode(p2tr.script),
       tapTree,
       status: 'preconfirmed',

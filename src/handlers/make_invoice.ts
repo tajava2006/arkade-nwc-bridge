@@ -14,6 +14,8 @@ export interface MakeInvoiceDeps {
   eventId: string
   /** Ark wallet — sub-dust receives are paid out to its address by Boltz. */
   wallet: Wallet
+  /** ASP (arkd) REST base — the atomic sub-dust receive needs server params. */
+  arkServerUrl: string
   /** Boltz REST base (no /v2 suffix). */
   boltzApiUrl: string
 }
