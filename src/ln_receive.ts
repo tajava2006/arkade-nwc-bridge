@@ -125,13 +125,54 @@ const EXPIRY_GRACE_SECONDS = 15 * 60
  *     invoice) — restart-safe, so a swap boltz funded while we were down resumes.
  *  2. flip the matching `transactions` row (NWC make_invoice, swap_id IS NULL)
  *     to settled with our own preimage, or to expired once the grace passes.
+ *  3. terminalize never-funded receives past their invoice expiry (below).
  * CLINK 9735 receipts read the same settled swaps (reconcileClinkAcks).
  */
+/** Absolute BOLT11 expiry (unix secs); injectable so the sweep is unit-testable. */
+export type ExpiryDecoder = (invoice: string) => number
+
+/**
+ * Terminalize never-funded receives past their invoice expiry. A receive stuck
+ * at `invoice_issued` (boltz never funded — empty mini-wallet, or the old
+ * funding bug) can't complete: its held hold-invoice htlc just times out and
+ * refunds the payer. Without this, driveAtomicReceives polls its status every
+ * tick forever. Keyed off the invoice's own expiry (decoded from the stored
+ * BOLT11), so it covers both NWC and CLINK receives (only NWC has a
+ * `transactions` row). funded/claimed are in-flight and left alone (boltz
+ * refunds funded past T; claimed retries settle). Returns the swept swap ids.
+ */
+export function sweepExpiredAtomicReceives(
+  db: Database,
+  nowSec: number,
+  decodeExpiry: ExpiryDecoder = (inv) => decodeInvoice(inv).expiry,
+): string[] {
+  const repo = new SqliteAtomicSwapRepository(db)
+  const swept: string[] = []
+  for (const swap of repo.listResumable()) {
+    if (swap.direction !== SwapDirection.Receive || swap.state !== 'invoice_issued' || !swap.invoice) continue
+    let expiry: number
+    try {
+      expiry = decodeExpiry(swap.invoice)
+    } catch {
+      continue // undecodable invoice — leave it, don't guess
+    }
+    if (nowSec > expiry + EXPIRY_GRACE_SECONDS) {
+      repo.transition(swap.id, 'failed')
+      swept.push(swap.id)
+    }
+  }
+  return swept
+}
+
 export async function reconcileAtomicReceives(deps: LnReceiveDeps): Promise<void> {
   await driveAtomicReceives(atomicDeps(deps))
 
   const repo = new SqliteAtomicSwapRepository(deps.db)
   const now = Math.floor(Date.now() / 1000)
+
+  for (const id of sweepExpiredAtomicReceives(deps.db, now)) {
+    console.log(`nwc: atomic sub-dust receive ${id.slice(0, 8)}… invoice expired, never funded → failed`)
+  }
   const rows = deps.db
     .query<{ id: number; payment_hash: string; expires_at: number | null }, []>(
       `SELECT id, payment_hash, expires_at FROM transactions
