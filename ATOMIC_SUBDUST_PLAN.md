@@ -449,14 +449,16 @@ git worktree remove ../asub-01-poc && git branch -d asub/01-regtest-poc
     refresh 수집 대상에 애초에 안 들어감(§8 2026-07-16 문답의 같은 원리).
   ⚠ 셋업 함정: block 모드(tree expiry 20블록+자동채굴)면 펀더 vtxo 즉시 만료 → **seconds 모드** 필수. hold invoice는 boltz-lnd에 있음(lnd 아님).
 
-- ⬜ **#15 `asub/15-mainnet-deploy`** (M) — **my-server 레포 작업 포함**
-  patch 재생성 → `bump-stack.sh` 재빌드/배포 → bridge 배포 → mainnet 21 sats **양방향** 실측
-  (보내기 zap out + 받기 noffer zap in, 빈 지갑 케이스 포함 여부는 운영 계정 사정에 따라).
-  DoD: mainnet 양방향 아토믹 21 sats 성공 + preimage/스플릿 대사.
+- ✅ **#15 mainnet-deploy** — **2026-07-17 완료.** my-server sub-dust 브랜치(bump-stack fork-branch 모델 +
+  compose 라벨 + boltz.template.conf subdust*), boltz fork `atomic-subdust` origin/upstream 재구성 + 배포,
+  bridge epic 배포. **mainnet 양방향 실측**: 받기 1 sat(noffer) + 보내기 77 sats. boltz.conf 필수:
+  `subdustRestUrl`+`subdustSignerKey`(전용 지갑, test-script로 주소도출/드레인)+`subdustSendWindow=86400`
+  (cltv 143블록). 라이브 버그 4종 잡아 수정(상태머신/receive-T표시/refund버튼 blocktime-gate/**poisoned-txid
+  false-refund**). ⚠ 닫힌 루프 불가(한 boltz=한 LN노드 자기지불) → 각 측 외부 LN.
 
-- ⬜ **#16 `asub/16-docs-merge`** (S)
-  `SUBDUST_LN_PATCH.md` 개정(plain historical 강등, atomic 승격), CLAUDE.md 차별화 #5 갱신,
-  메모리 갱신, 에픽 → main 머지. DoD: 문서 3종 + 머지 완료.
+- ✅ **#16 docs-merge** — **2026-07-17.** my-server CLAUDE.md(×2 사본)/SUBDUST_LN_PATCH(historical)/FEE_MODEL
+  개정, bridge CLAUDE.md make_invoice/pay_invoice atomic 반영, 메모리 갱신. 에픽→main + sub-dust→master 머지.
+  ⚠ **마이그레이션 재번호 안 함**: v2/v3가 이미 mainnet DB에 적용됨 → 재번호 시 배포 DB 파손. v1(main)→v2/v3 순차라 그대로 머지.
 
 ## 7. 리스크
 
