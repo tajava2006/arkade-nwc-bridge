@@ -61,24 +61,39 @@ describe('isEligibleFundingInput', () => {
 })
 
 describe('selectFundingInput', () => {
-  const sel = { ...args, amount: 21 } // change-regular threshold = dust + a = 351
+  // dust=330, a=21 → V = 351; regular-change floor = V + dust = 681.
+  const sel = { ...args, amount: 21 }
+  const ok = FLOOR + 1000
 
-  test('prefers the smallest vtxo that yields a regular change', () => {
+  test('prefers the smallest vtxo that yields a REGULAR change (value ≥ V + dust)', () => {
     const vtxos = [
-      fakeVtxo({ value: 340, batchExpiry: FLOOR + 1000 }), // eligible but change would be sub-dust
-      fakeVtxo({ value: 500, batchExpiry: FLOOR + 1000 }), // yields regular change, smallest such
-      fakeVtxo({ value: 9000, batchExpiry: FLOOR + 1000 }),
+      fakeVtxo({ value: 400, batchExpiry: ok }), // ≥ V but change 49 is sub-dust
+      fakeVtxo({ value: 700, batchExpiry: ok }), // change 349 ≥ dust → regular, smallest such
+      fakeVtxo({ value: 9000, batchExpiry: ok }),
     ]
-    expect(selectFundingInput(vtxos, sel)?.value).toBe(500)
+    expect(selectFundingInput(vtxos, sel)?.value).toBe(700)
   })
 
-  test('falls back to the smallest eligible when none yields a regular change', () => {
-    const vtxos = [fakeVtxo({ value: 340, batchExpiry: FLOOR + 1000 }), fakeVtxo({ value: 335, batchExpiry: FLOOR + 1000 })]
-    expect(selectFundingInput(vtxos, sel)?.value).toBe(335)
+  test('no regular-change option → prefers an EXACT vtxo (value == V, no change)', () => {
+    const vtxos = [fakeVtxo({ value: 400, batchExpiry: ok }), fakeVtxo({ value: 351, batchExpiry: ok })]
+    expect(selectFundingInput(vtxos, sel)?.value).toBe(351)
+  })
+
+  test('only sub-dust-change vtxos → smallest that still covers V (caller OP_RETURNs the change)', () => {
+    const vtxos = [fakeVtxo({ value: 500, batchExpiry: ok }), fakeVtxo({ value: 400, batchExpiry: ok })]
+    expect(selectFundingInput(vtxos, sel)?.value).toBe(400)
+  })
+
+  // Regression for the mainnet false-funding (2026-07-17): a vtxo BELOW V must
+  // never be returned — funding with it builds an unbalanced tx arkd rejects
+  // ("input amount is not equal to output amount").
+  test('NEVER returns a vtxo below V — undefined when nothing covers V', () => {
+    const vtxos = [fakeVtxo({ value: 335, batchExpiry: ok }), fakeVtxo({ value: 340, batchExpiry: ok })]
+    expect(selectFundingInput(vtxos, sel)).toBeUndefined()
   })
 
   test('returns undefined when nothing is eligible', () => {
-    const vtxos = [fakeVtxo({ value: 100, batchExpiry: FLOOR + 1000 }), fakeVtxo({ value: 1000, batchExpiry: FLOOR - 1 })]
+    const vtxos = [fakeVtxo({ value: 100, batchExpiry: ok }), fakeVtxo({ value: 1000, batchExpiry: FLOOR - 1 })]
     expect(selectFundingInput(vtxos, sel)).toBeUndefined()
   })
 })
