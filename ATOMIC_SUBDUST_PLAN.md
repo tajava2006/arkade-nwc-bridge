@@ -468,6 +468,16 @@ batch expiry 필터만 / 받기 그리핑 무대응.
 - verify-before-act 불변식 — 상대 구성물 blind 신뢰 금지. 놓치면 스플릿 변조/전액 탈취 벡터.
 - 사전서명·preimage 유실 — DB 영속 + 부팅 재개. 유실 = 해당 경로 실행 불능.
 - payment_hash dedup — 동일 인보이스 이중 스왑 차단 (pg UNIQUE).
+- **arkd poisoned-txid (2026-07-17 mainnet 실측 + 수정)**: refund arkTx는 결정적(arkd가
+  offchain.BuildTxs로 재빌드, VtxoInput에 sequence/locktime 없어 nonce 주입 불가)이고, arkd는
+  offchain 이벤트스트림을 arkTxid로 키잉 + 매 프로젝션 full-replay. blocktime<T에서 제출 실패
+  (FORFEIT_CLOSURE_LOCKED)가 그 txid에 Fail 이벤트를 심으면, MTP가 T 넘은 뒤 재제출이 **200 ACK지만
+  Accepted 브랜치(SpendVtxos) 스킵** → vtxo 미소비인데 성공 응답 = **false refund**. executor가 30s마다
+  재시도해서 poison 확정. 수정(`atomic_send.refundAtomicSend`, `atomic_refund_poison.spike.ts` 5/5):
+  ① esplora MTP 사전게이트(MTP<T면 제출 안 함) ② **verify-before-bookkeep**(ACK≠등록, 인덱서가
+  funding outpoint를 spendable에서 빼야만 refunded 전이) ③ poison된 txid는 `outputs`를 정규+k-sat
+  subdust로 쪼개 fresh txid 재발행(k sats는 recoverable로 착지, 전액 회수). ⚠ 일반 교훈: **arkd의
+  submit/finalize 200은 등록 보장 아님** — 결정적 재시도 tx는 항상 verify-before-act.
 
 **낮음/모니터링:**
 - checkpointTapscript(서버 설정) 변경 시 presig 무효 — self-host, 설정 본인 통제. F는 T 후
