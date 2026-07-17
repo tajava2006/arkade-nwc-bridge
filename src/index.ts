@@ -279,7 +279,7 @@ async function main(): Promise<void> {
       // have no settlement event at all (no swap object), so this poll is the
       // only thing that ever flips them (see ln_receive.ts).
       const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: cfg.boltzApiUrl }
-      const atomicDeps = { wallet, arkServerUrl: cfg.arkServerUrl, db, boltzApiUrl: cfg.boltzApiUrl }
+      const atomicDeps = { wallet, arkServerUrl: cfg.arkServerUrl, db, boltzApiUrl: cfg.boltzApiUrl, esploraUrl: cfg.esploraUrls[0] }
       const reconcileReceives = (): void => {
         void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
         void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: cfg.boltzApiUrl, arkServerUrl: cfg.arkServerUrl, db }).catch((err) =>

@@ -221,6 +221,16 @@ export async function collaborativeSpend(
   const [checkpoint] = checkpoints
   if (!checkpoint) throw new Error('expected 1 checkpoint')
 
+  // NOTE: this tx is DETERMINISTIC given (input outpoint, leaf, outputs) — arkd
+  // rebuilds it via offchain.BuildTxs and rejects any txid mismatch, so nSequence/
+  // nLockTime can't carry a nonce. arkd's offchain event stream is keyed by
+  // arkTxid with full-stream replay, so a failed submit (e.g.
+  // FORFEIT_CLOSURE_LOCKED while blocktime lags T) POISONS that txid: later
+  // submits ACK 200 but the projection's Accepted branch is tainted and never
+  // marks the vtxo spent (mainnet false-refund 2026-07-17,
+  // atomic_refund_poison.spike.ts). The only lever is `outputs` — the refund
+  // caller re-mints a fresh txid by varying its output split; see refundAtomicSend.
+
   // combineTapscriptSigs needs both sides signed, so seed with the first
   // signer's signed tx, then merge the rest onto it.
   let arkAcc: Transaction | undefined

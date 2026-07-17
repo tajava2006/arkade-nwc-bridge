@@ -40,6 +40,13 @@ export interface AtomicSendDeps {
   db: Database
   /** Boltz REST base (no /v2 suffix). */
   boltzApiUrl: string
+  /**
+   * Esplora REST base (optional). When set, the refund path estimates the
+   * chain's MTP before submitting — a submit while blocktime < T is not just
+   * rejected, it poisons that arkTxid's event stream on arkd (see
+   * collaborativeSpend), so not asking is better than asking early.
+   */
+  esploraUrl?: string
 }
 
 export interface AtomicSendResult {
@@ -219,6 +226,34 @@ const isBlocktimeLocked = (e: unknown): boolean =>
   (/FORFEIT_CLOSURE_LOCKED/.test(e.message) || (e as { code?: number }).code === 11)
 
 /**
+ * Estimate the chain's MTP (BIP-113 median time past) from esplora — the
+ * clock arkd enforces CLTV against. Best-effort: undefined on any failure
+ * (the jitter + post-verify still protect the submit path).
+ *
+ * Esplora's /blocks returns the 10 newest block headers; the true MTP is the
+ * median of the last 11. Sorting the 10 newest and taking index 4 equals the
+ * 11-median exactly when the missing 11th-newest block carries the window's
+ * smallest timestamp (the common case); otherwise it's off by one step —
+ * acceptable for a pre-flight gate.
+ */
+async function estimateMtp(esploraUrl: string): Promise<number | undefined> {
+  try {
+    const res = await fetch(`${esploraUrl}/blocks`)
+    if (!res.ok) return undefined
+    const blocks = (await res.json()) as { timestamp?: number }[]
+    const ts = blocks
+      .map((b) => b.timestamp)
+      .filter((t): t is number => typeof t === 'number')
+      .slice(0, 10)
+      .sort((a, b) => a - b)
+    if (ts.length < 5) return undefined
+    return ts[Math.max(0, ts.length - 6)] // 10 entries → index 4
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Reclaim the full funding V of a send swap through the refund leaf (CLTV T,
  * F+server — no boltz involvement). Callable from the dashboard and the boot
  * refund executor; rebuilds the 4-leaf script from the swap row alone
@@ -247,6 +282,16 @@ export async function refundAtomicSend(
       `refund locktime not reached — ${swap.refundLocktime - nowSec}s until T (CLTV would reject)`,
     )
   }
+  // Pre-flight MTP gate: arkd enforces T against blocktime (MTP), and a
+  // rejected submit POISONS that arkTxid's event stream (silent no-op on
+  // retry — see collaborativeSpend). Don't even ask until the chain clock
+  // has plausibly passed T.
+  if (deps.esploraUrl) {
+    const mtp = await estimateMtp(deps.esploraUrl)
+    if (mtp !== undefined && mtp < swap.refundLocktime) {
+      throw new RefundNotYetError(`chain MTP ${mtp} < T ${swap.refundLocktime} (esplora pre-check)`)
+    }
+  }
 
   const ark = new RestArkProvider(deps.arkServerUrl)
   const indexer = new RestIndexerProvider(deps.arkServerUrl)
@@ -273,17 +318,61 @@ export async function refundAtomicSend(
     throw new Error('shared vtxo not found or already spent — boltz may have claimed after all; check the swap status')
   }
 
-  // Full V back to the wallet's regular address (V = a + dust ≥ dust, so this
-  // is a normal vtxo — no sub-dust edge on the refund path).
   const ourAddr = ArkAddress.decode(await deps.wallet.getAddress())
-  const outputs: AtomicOutput[] = [{ script: ourAddr.pkScript, amount: BigInt(coin.value) }]
   const shared: SharedVtxo = { txid, vout, value: coin.value, script }
-  let refundTxid: string
-  try {
-    refundTxid = await refundSpend(shared, outputs, unroll, deps.wallet.identity, ark)
-  } catch (e) {
-    if (isBlocktimeLocked(e)) throw new RefundNotYetError(e instanceof Error ? e.message : String(e))
-    throw e
+  const dust = Number(info.dust)
+
+  // Attempt 1 is the clean single output (full V, one regular vtxo). If arkd
+  // ACKs but never registers the spend — the poisoned-txid no-op — the SAME
+  // txid can never succeed again, so subsequent attempts re-mint a fresh txid
+  // by splitting V across a regular + a sub-dust output to OUR OWN address, in
+  // varying ratios (k = the sub-dust part). Same total back to us; only the
+  // txid changes. This also self-heals a swap already poisoned by a prior
+  // build. maxK is bounded by the regular part staying ≥ dust.
+  const maxK = Math.min(20, coin.value - dust)
+  const attempts: AtomicOutput[][] = [[{ script: ourAddr.pkScript, amount: BigInt(coin.value) }]]
+  for (let k = 1; k <= maxK; k++) {
+    attempts.push([
+      { script: ourAddr.pkScript, amount: BigInt(coin.value - k) },
+      { script: ourAddr.subdustPkScript, amount: BigInt(k) },
+    ])
+  }
+
+  const registered = async (): Promise<boolean> => {
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 1000))
+      const { vtxos: check } = await indexer.getVtxos({
+        scripts: [hex.encode(script.pkScript)],
+        spendableOnly: true,
+      })
+      if (!check.some((x) => x.txid === txid && x.vout === vout)) return true
+    }
+    return false
+  }
+
+  let refundTxid = ''
+  for (const outputs of attempts) {
+    let attemptTxid: string
+    try {
+      attemptTxid = await refundSpend(shared, outputs, unroll, deps.wallet.identity, ark)
+    } catch (e) {
+      if (isBlocktimeLocked(e)) throw new RefundNotYetError(e instanceof Error ? e.message : String(e))
+      throw e
+    }
+    // Verify-before-bookkeep: arkd's ACK is NOT registration (its event save +
+    // projection are server-side-log-only; a poisoned stream no-ops silently —
+    // mainnet false-refund 2026-07-17). Only the indexer dropping the funding
+    // outpoint proves the spend landed.
+    if (await registered()) {
+      refundTxid = attemptTxid
+      break
+    }
+    console.warn(`atomic refund ${swapId}: ${attemptTxid.slice(0, 12)}… ACKed but not registered (poisoned txid) — re-minting`)
+  }
+  if (!refundTxid) {
+    throw new Error(
+      `refund never registered after ${attempts.length} txid variants (shared vtxo still spendable) — retrying next pass`,
+    )
   }
 
   if (swap.state !== 'refund_wait') repo.transition(swapId, 'refund_wait')

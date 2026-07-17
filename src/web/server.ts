@@ -821,7 +821,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           if (!swapId) return back(false, 'swapId is required')
           try {
             const res = await refundAtomicSend(
-              { wallet: r.ready.wallet, arkServerUrl: cfg.arkServerUrl, db },
+              { wallet: r.ready.wallet, arkServerUrl: cfg.arkServerUrl, db, esploraUrl: cfg.esploraUrls[0] },
               swapId,
             )
             return back(true, `refunded ${res.amount.toLocaleString()} sats (arkTx ${res.txid.slice(0, 12)}…)`)
