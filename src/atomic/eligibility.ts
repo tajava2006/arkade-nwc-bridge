@@ -60,9 +60,12 @@ export function isEligibleFundingInput(vtxo: VirtualCoin, args: EligibilityArgs)
  */
 export function selectFundingInput(
   vtxos: VirtualCoin[],
+  // `amount` is the sub-dust amount `a` — NOT V. The shared output the input
+  // must cover is V = dust + a, derived here. (Passing V by mistake inflates
+  // every threshold by `dust` — the 2026-07-17 mainnet false-funding.)
   args: EligibilityArgs & { amount: number },
 ): VirtualCoin | undefined {
-  const shared = args.dust + args.amount // V — the input must cover this
+  const shared = args.dust + args.amount // V = dust + a — the input must cover this
   const eligible = vtxos
     .filter((v) => isEligibleFundingInput(v, args).eligible && v.value >= shared)
     .sort((a, b) => a.value - b.value)

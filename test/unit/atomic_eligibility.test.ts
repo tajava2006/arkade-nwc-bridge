@@ -96,4 +96,13 @@ describe('selectFundingInput', () => {
     const vtxos = [fakeVtxo({ value: 100, batchExpiry: ok }), fakeVtxo({ value: 1000, batchExpiry: FLOOR - 1 })]
     expect(selectFundingInput(vtxos, sel)).toBeUndefined()
   })
+
+  // The exact 2026-07-17 mainnet case: mini-wallet has a 669 (covers V=344,
+  // leaves sub-dust change) + a 330 (below V). `amount` is `a`, NOT V — the
+  // router regression was passing V, which excluded the 669 and fell back to
+  // the 330. Here amount=14 must pick the 669.
+  test('mainnet scenario: [669, 330] with a=14 picks the 669 (covers V, sub-dust change)', () => {
+    const vtxos = [fakeVtxo({ value: 669, batchExpiry: ok }), fakeVtxo({ value: 330, batchExpiry: ok })]
+    expect(selectFundingInput(vtxos, { ...args, amount: 14 })?.value).toBe(669)
+  })
 })
