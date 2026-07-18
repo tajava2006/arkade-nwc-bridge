@@ -7,6 +7,11 @@
 > `a4b7096`)를 폐기하고 **단일 펀더** 설계로 전면 교체. 사전서명 12→2, 멀티파티 펀딩 소멸,
 > collateral 소멸, 빈 지갑 받기 성립. v1 대비 차이는 §8 결정 기록.
 >
+> **⚠️ 에픽 이후 진화 (2026-07-18): §10이 현행.** 돈통 단일화(boltz 키 = fulmine 지갑키)·
+> `boltzScriptDelay`/`feeSats` 프로토콜 필드·보내기 수수료(합산 출력)·오름차순 whole-input
+> 선택·send/receive 창 분리가 §3의 v2 서술 위에 얹혔다. §3·§8은 에픽 당시 기준 그대로 두고
+> 델타는 전부 §10에 기록.
+>
 > 세션 재개 절차: ① 이 문서 통독 → ② §6에서 다음 ⬜ 하위작업 확인 → ③ §8 결정 기록에
 > 선행 스파이크 결과가 채워졌는지 확인 → ④ 워크트리 파서 작업. §2는 재검증 불필요(코드 인용 완비).
 >
@@ -205,6 +210,18 @@ preimage(받기), presigs(보내기 — 자기가 F), funding_outpoint, state, �
 - 인풋 자격: funder vtxo expiresAt > now + T + margin (batch expiry 필터).
 - boltz 인풋 선호: B ≥ dust+a (체인지 정규화, OP_RETURN 1개 유지). 유저 보내기의 U−a<dust
   엣지는 maxOpReturnOutputs 실측값에 따라 허용/명시 에러 (§2.4).
+
+**확정값 (2026-07-18 — 상세는 §10):**
+- T(send) = now + **259200** (72h). cltv 한도 = (window−margin)/600 = **431블록** — 86400(143블록)은
+  final delta 144인 목적지(요즘 모바일 지갑 흔함)가 LND `FAILURE_REASON_NO_ROUTE`(=2)로 즉사했다.
+- T(receive) = now + **86400** (24h, `subdustReceiveWindow` 분리). receive는 밖으로 LN pay가 없어
+  cltv 압박이 0인데, 창을 키우면 펀딩 자격(batchExpiry > T+margin)만 좁아진다 — 7일 tree expiry
+  기준 72h 창이면 배치 수명 마지막 3일이 못 쓰는 구간이 되므로 분리.
+- fee(send) = `ceil(a × subdustSendFeePercent/100)` (운영값 0.5%). `/send/init`이 **sats 숫자로 명시**
+  (`feeSats`) — 스플릿은 바이트 일치 재구성이 전제라 수식 미러링의 ±1이 곧 presig 하드 실패라서.
+  받기는 수수료 0 유지 (인바운드 LN은 라우팅비를 payer가 부담 — 그리핑 벡터는 send뿐).
+- d(공유 스크립트) = 서버 info 그대로. 단 **boltz 자기 지갑 스크립트**는 `subdustSelfExitDelay`
+  (fulmine 키 공유 시 605184 — §10).
 
 ## 4. 아키텍처 / 구현 표면
 
@@ -648,7 +665,78 @@ batch expiry 필터만 / 받기 그리핑 무대응.
 - **co-funded 받기 (구 v1 설계의 부활 자리)**: 유저가 정규 vtxo를 co-fund하면 수취 a가
   U+a ≥ dust 정규 vtxo가 되어 **완전 일방 집행** 획득 — 잔고 있는 유저용 프리미엄 아토믹 받기.
   멀티파티 펀딩·상호 사전서명 복잡도가 돌아오므로 수요 확인 후.
-- multi-input 펀딩 (보내기에서 여러 vtxo 합산 — v1 스코프는 단일 인풋).
-- 수수료 정책 (델타에 fee 편입 — #04에 파라미터 자리).
+- ~~multi-input 펀딩~~ ✅ 2026-07-18 — 양방향 whole-input 오름차순 누적 (§10).
+- ~~수수료 정책~~ ✅ 2026-07-18 — send `feeSats` 합산 출력 (§10).
 - 받기 그리핑 rate-limit / unroll 워처.
 - claimer 클레임 자동화 고도화 (boltz claim 실패 재시도 백오프 등 운영 다듬기).
+- **[운영 분리 시 필수] boltz sendFund 펀딩 만료 체크** — §10.6. ark/boltz 운영 주체가
+  분리되지 않는 한 불필요 (분리 계획 없음).
+
+## 10. 에픽 이후 진화 (2026-07-18 — 전부 mainnet 검증 완료)
+
+에픽 머지 후 하루 운영에서 나온 델타들. bridge `main` / boltz fork `atomic-subdust`에 반영.
+
+### 10.1 돈통 단일화 — boltz 서명키 = fulmine 지갑키
+
+sub-dust 전용 미니지갑(운영자 수동 충전) 폐지. boltz.conf `subdustSignerKey`에 fulmine 백업
+hex를 그대로 넣어 fulmine 잔고 전체가 receive 펀딩 풀이 된다 (유동성 고갈·별도 잔고 관리·
+top-up 런북 소멸). 성립 조건 하나: **fulmine(client-lib)은 exit delay를 지갑 init 때
+스냅샷하고 mainnet에선 605184로 하드코드**한다(arkd `336cb544` "#1018" — 서버 설정이 런타임
+가변이라 주소 드리프트 방지용, TODO 딸린 임시책). 서버 info(86016)와 달라 같은 키여도
+스크립트/주소가 갈리므로, boltz는 자기 지갑 스크립트를 `subdustSelfExitDelay`(=605184)로
+재구성한다. 실제 값 역산 도구: `my-server/test-script/fulmine-script-probe.ts`.
+파생 파이프라인 자체는 ts-sdk == go-sdk 동일 (더미 키 교차 실험으로 증명).
+
+### 10.2 boltzScriptDelay 핸드셰이크 (프로토콜 필드)
+
+10.1의 귀결: boltz 몫 출력(claim 몫·잔돈)이 605184-스크립트가 되는데 상대는 info delay로
+재구성하면 txid가 어긋나 presig가 거부된다("presig arkTx txid mismatch"). **자기 지갑
+스크립트 파라미터는 추측시키지 말고 명시한다** — `/send/init`·`/receive/status` 응답에
+`boltzScriptDelay` 추가, 상대는 boltz 몫 출력에만 그 값을 쓴다(자기 몫은 자기 파생 고정 —
+상대 돈이 걸린 값이 아니라 신뢰 문제 없음). 부재 시 info delay 폴백(구버전 호환).
+**교훈: 아토믹 검증 = byte-identical 재구성이 전제. 자기 스크립트를 바꾸면 상대 재구성
+코드가 프로토콜 표면이다.**
+
+### 10.3 보내기 수수료 (subdustSendFeePercent, 운영값 0.5%)
+
+에픽 v1은 fee=0으로 봉인했었는데(§8 #04 자리), send는 boltz가 LN 라우팅비를 대납하므로
+무료면 그리핑 벡터다. `/send/init`이 `feeSats = ceil(a×pct/100)`을 **sats로 명시**(±1 수식
+불일치 = presig 하드실패 방지), 스플릿의 fee 훅으로 회수하되 **별도 출력이 아니라 claimer
+출력에 합산**(a+fee 한 장 — 노트 수 절반). a+fee ≥ dust 엣지(329+2)는 regular 승격 —
+"send claim 몫은 항상 sub-dust" 규칙의 유일한 의도적 예외. 받기는 0 유지.
+`feeRecipient` 지정 시 별도 출력 경로는 제3자 rail용으로 보존.
+
+### 10.4 whole-input 오름차순 펀딩 (양방향 공통)
+
+bridge send가 `wallet.sendBitcoin(V)`(지갑 잔돈이 sub-dust로 떨어질 수 있음)를 버리고
+boltz receive와 같은 `fundShared` whole-input으로 통일. 선택 규칙도 하나로: **오름차순으로
+커버될 때까지 누적** ("V 커버하는 최소 단일 우선" 지름길 삭제 — 입력 수 절약보다 작은 조각
+소진→스플릿 잔돈 한 장으로 자연 통합이 가치). eligibility에 합계 커버리지 체크 추가
+(a+fee가 dust를 넘으면 두 장으로 부족한 엣지). 결과: **스왑 어느 쪽에서도 sub-dust 잔돈이
+생성되지 않는다** (claim 몫 자체가 sub-dust인 건 본질 — fulmine 정기 settle이 흡수).
+
+### 10.5 창 분리 (send 72h / receive 24h)
+
+§3.5 확정값 참조. 한 줄 요약: send 창은 cltv 예산이고 receive 창은 펀딩 자격 잠식일 뿐이라
+같은 값일 이유가 없다. boltz `subdustReceiveWindow` 신설(기본 = sendWindow, 구설정 호환).
+
+### 10.6 위협 모델 결론 — sendFund 펀딩 만료 체크는 의도적 부재
+
+펀더 쪽 batchExpiry > T+margin 필터(§3.5)는 **비악의 경로**(정직한 LN 실패 + 정상 만료
+sweep의 조합만으로 펀더의 refund 권리 증발)라서 필수고, 있다. 반대편(boltz)이 펀딩 만료를
+검증 안 하는 건: 공격자(펀더)가 만료 임박 vtxo + 수신측 HTLC hold로 boltz의 pay→claim
+갭에 sweep을 꽂을 수 있으나, 손익이 공격자 **−fee**, boltz −a, arkd +a+fee — 즉 **통합
+운영(ark=boltz=동일인)에선 운영자 합산 +fee**로 공격 경제성이 없다(왼쪽 주머니→오른쪽
+주머니 + 공격자의 fee 기부). LN 라우팅비 누수·유동성 형태 변환만 실비용. **ark/boltz 운영
+주체가 분리될 때만** 진짜 도난 벡터가 되므로 그때 §3.5와 같은 조건 한 줄을 sendFund에
+추가하면 닫힌다 (§9 백로그 항목).
+
+### 10.7 부수 수정 기록
+
+- bridge `sweepExpiredAtomicReceives` 즉시-failed 버그: `decodeInvoice().expiry`가 docstring
+  ("절대 unix 초")과 달리 **상대값** — light-bolt11-decoder가 절대값 getter를 정의해놓고
+  TAGCODES defineProperty 루프로 스스로 덮어씀 + boltz-swap `?? 3600` 통과. `absoluteExpiry`
+  크기 정규화 헬퍼로 수정(발행 즉시 모든 receive가 failed 되던 것). SDK d.ts 거짓말 2호
+  (1호는 CLAUDE.md footgun의 boltz endpoint).
+- `driveAtomicReceive` 상태 페이징: 실패 후 재시도가 funded→funded 불법 전이로 막히던 것 +
+  claimed 후 settle 실패 시 영구 stuck 해소.
