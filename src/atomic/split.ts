@@ -20,7 +20,7 @@ export const MAX_OP_RETURN_OUTPUTS = 2
 export type ChangeKind = 'regular' | 'subdust' | 'omitted'
 
 export interface ClaimSplit {
-  /** claimer(a) first, then optional fee, then optional funder change. */
+  /** claimer first (a, or a + fee when folded in), then optional third-party fee, then optional funder change. */
   outputs: AtomicOutput[]
   /** Count of sub-dust OP_RETURN outputs (for the maxOpReturnOutputs guard). */
   opReturns: number
@@ -46,9 +46,14 @@ export interface ClaimSplitArgs {
   amount: number
   /** Server dust threshold (sats). */
   dust: number
-  /** Fee reserved for the claimer's rail (sats). v1 = 0. */
+  /** Fee reserved for the claimer's rail (sats). Default 0. */
   feeSats?: number
-  /** Where the fee goes when feeSats > 0 (required in that case). */
+  /**
+   * Where the fee goes as a SEPARATE output (third-party rail). Omit to fold
+   * the fee into the claimer's output instead — one output of a + fee (tiered
+   * by magnitude: still sub-dust normally, regular when a + fee crosses dust),
+   * so a fee doesn't double the claimer's sub-dust notes.
+   */
   feeRecipient?: ArkAddress
   /** Override the OP_RETURN cap (default MAX_OP_RETURN_OUTPUTS). */
   maxOpReturnOutputs?: number
@@ -65,9 +70,11 @@ function outputFor(address: ArkAddress, amount: number, dust: number): { output:
 }
 
 /**
- * Compute the claim split. The claimer's a is always sub-dust (OP_RETURN); the
- * funder's change V−a−fee is regular (≥ dust), sub-dust (OP_RETURN), or omitted
- * (0) — the three-way branch. Throws {@link SubdustEdgeError} if the split would
+ * Compute the claim split. The claimer's output is a (sub-dust OP_RETURN), or
+ * a + fee when the fee is folded in (no feeRecipient) — still sub-dust except
+ * at the a + fee ≥ dust edge, where it becomes a regular vtxo. The funder's
+ * change V−a−fee is regular (≥ dust), sub-dust (OP_RETURN), or omitted (0) —
+ * the three-way branch. Throws {@link SubdustEdgeError} if the split would
  * need more OP_RETURN outputs than the server allows (the U−a<dust edge, §2.4).
  */
 export function computeClaimSplit(args: ClaimSplitArgs): ClaimSplit {
@@ -84,14 +91,13 @@ export function computeClaimSplit(args: ClaimSplitArgs): ClaimSplit {
   const outputs: AtomicOutput[] = []
   let opReturns = 0
 
-  // claimer's a — always sub-dust.
-  const claimer = outputFor(claimerAddress, a, dust)
+  // claimer's output — a, plus the fee when no separate recipient is given.
+  const claimer = outputFor(claimerAddress, args.feeRecipient ? a : a + fee, dust)
   outputs.push(claimer.output)
   if (claimer.isOpReturn) opReturns++
 
-  // fee — optional; needs an explicit recipient so outputs still sum to V.
-  if (fee > 0) {
-    if (!args.feeRecipient) throw new SubdustEdgeError('feeSats > 0 requires a feeRecipient')
+  // fee as its own output — only for an explicit third-party recipient.
+  if (fee > 0 && args.feeRecipient) {
     const feeOut = outputFor(args.feeRecipient, fee, dust)
     outputs.push(feeOut.output)
     if (feeOut.isOpReturn) opReturns++

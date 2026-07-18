@@ -52,12 +52,12 @@ export function isEligibleFundingInput(vtxo: VirtualCoin, args: EligibilityArgs)
  * 2026-07-17 false-funding was exactly there) and stops sub-dust from
  * accreting in the funder's wallet.
  *
- *   1. smallest single vtxo that alone covers V = dust + amount → fund it whole;
- *   2. else accumulate ascending until the sum covers V — smallest-first also
- *      consolidates: the claim change comes back as one regular vtxo. (With
- *      amount = a < dust two inputs always suffice; when a fee rides on top,
- *      amount = a + fee can cross dust and need a third — hence the sum check
- *      instead of the old unconditional two-smallest.)
+ * One rule, no cases: accumulate ascending until the sum covers V = dust +
+ * amount. Smallest-first burns the wallet's smallest coins and the claim
+ * change comes back as ONE regular vtxo — every swap consolidates fragments
+ * as a side effect. (A "smallest single covering V" shortcut existed once; it
+ * saved an input but skipped exactly that consolidation, so it was dropped —
+ * input count isn't a value worth a second code path.)
  *
  * `amount` is what the claim must carve out of V beyond the dust buffer (the
  * sub-dust `a`, plus the claimer's feeSats when one is charged) — NOT V itself.
@@ -71,8 +71,6 @@ export function selectFundingInputs(
   const eligible = vtxos
     .filter((v) => isEligibleFundingInput(v, args).eligible)
     .sort((a, b) => a.value - b.value)
-  const single = eligible.find((v) => v.value >= V)
-  if (single) return [single] // smallest vtxo covering V on its own
   const picked: VirtualCoin[] = []
   let sum = 0
   for (const v of eligible) {

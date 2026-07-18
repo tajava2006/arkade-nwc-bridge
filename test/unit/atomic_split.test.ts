@@ -56,10 +56,25 @@ describe('computeClaimSplit', () => {
     expect(sum(r.outputs)).toBe(531n)
   })
 
-  test('fee > 0 without a recipient is rejected', () => {
-    expect(() =>
-      computeClaimSplit({ funderAddress: funder, claimerAddress: claimer, fundingValue: 1000, amount: 21, dust: DUST, feeSats: 5 }),
-    ).toThrow(SubdustEdgeError)
+  test('fee without a recipient folds into the claimer output (one note, not two)', () => {
+    const r = computeClaimSplit({ funderAddress: funder, claimerAddress: claimer, fundingValue: 1000, amount: 19, dust: DUST, feeSats: 1 })
+    expect(r.outputs).toHaveLength(2) // claimer(a+fee) + change — no separate fee output
+    expect(r.outputs[0]!.amount).toBe(20n)
+    expect(r.outputs[0]!.script).toEqual(claimer.subdustPkScript) // 20 < dust → still OP_RETURN
+    expect(r.changeAmount).toBe(980n)
+    expect(r.feeAmount).toBe(1n)
+    expect(r.opReturns).toBe(1)
+    expect(sum(r.outputs)).toBe(1000n)
+  })
+
+  test('folded fee crossing dust promotes the claimer output to regular', () => {
+    // a=329 + fee=2 = 331 ≥ dust — the one deliberate exception to "the send
+    // claimer always receives sub-dust": magnitude tiering wins over the rule.
+    const r = computeClaimSplit({ funderAddress: funder, claimerAddress: claimer, fundingValue: 1000, amount: 329, dust: DUST, feeSats: 2 })
+    expect(r.outputs[0]!.amount).toBe(331n)
+    expect(r.outputs[0]!.script).toEqual(claimer.pkScript) // regular, not OP_RETURN
+    expect(r.opReturns).toBe(0) // change 669 is regular too
+    expect(sum(r.outputs)).toBe(1000n)
   })
 
   test('rejects a ≥ dust and a + fee > V', () => {

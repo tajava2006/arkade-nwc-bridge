@@ -159,9 +159,10 @@ export async function atomicSubdustSend(
   })
 
   // 3. fund the shared vtxo with our own vtxos spent WHOLE (same selection the
-  // boltz receive funder uses — smallest covering input, else ascending until
-  // covered). No funding change ⇒ the wallet can never be left with a sub-dust
-  // remainder here; the claim split returns V′ − a − fee (≥ dust ⇒ regular).
+  // boltz receive funder uses — ascending accumulation until V is covered, so
+  // the smallest fragments get consolidated by the returning change). No
+  // funding change ⇒ the wallet can never be left with a sub-dust remainder
+  // here; the claim split returns V′ − a − fee (≥ dust ⇒ regular).
   // V′ ≥ a + fee + dust; net cost stays a + fee.
   const hrp = info.network === 'bitcoin' ? 'ark' : 'tark'
   const userScript = new DefaultVtxo.Script({
@@ -241,9 +242,9 @@ export async function atomicSubdustSend(
     fundingValue: Vp,
     amount: a,
     dust,
-    // boltz's advertised fee — must mirror its sendFund reconstruction exactly.
+    // boltz's advertised fee — folded into its claim output (a + fee, one
+    // note). Must mirror its sendFund reconstruction exactly.
     feeSats: fee,
-    feeRecipient: fee > 0 ? boltzAddr : undefined,
   })
   const presig = await presignClaim(shared, split.outputs, unroll, deps.wallet.identity)
   repo.setPresigs(init.swapId, presig)

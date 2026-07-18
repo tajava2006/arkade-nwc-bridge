@@ -66,27 +66,30 @@ describe('selectFundingInputs', () => {
   const ok = FLOOR + 1000
   const vals = (vtxos: VirtualCoin[]) => selectFundingInputs(vtxos, sel).map((v) => v.value)
 
-  test('smallest single vtxo that alone covers V → fund it whole', () => {
+  test('smallest vtxo already covers V → it funds alone', () => {
     const vtxos = [
-      fakeVtxo({ value: 400, batchExpiry: ok }), // smallest ≥ V
+      fakeVtxo({ value: 400, batchExpiry: ok }), // smallest, ≥ V
       fakeVtxo({ value: 700, batchExpiry: ok }),
       fakeVtxo({ value: 9000, batchExpiry: ok }),
     ]
     expect(vals(vtxos)).toEqual([400])
   })
 
-  test('a below-V vtxo is skipped in favour of the smallest single that covers V', () => {
+  test('ascending accumulation: a below-V vtxo is consumed first, not skipped', () => {
+    // [340, 500]: 340 < V=351 → add 500. The old "smallest single covering"
+    // shortcut returned [500] and left the 340 fragment behind — the whole
+    // point of ascending accumulation is burning that fragment into the swap.
     const vtxos = [fakeVtxo({ value: 340, batchExpiry: ok }), fakeVtxo({ value: 500, batchExpiry: ok })]
-    expect(vals(vtxos)).toEqual([500])
+    expect(vals(vtxos)).toEqual([340, 500])
   })
 
-  test('no single covers V → combine the two smallest (always ≥ 2·dust > V)', () => {
+  test('accumulates the smallest coins until V is covered', () => {
     const vtxos = [
       fakeVtxo({ value: 340, batchExpiry: ok }),
       fakeVtxo({ value: 330, batchExpiry: ok }),
       fakeVtxo({ value: 335, batchExpiry: ok }),
     ]
-    expect(vals(vtxos).sort((x, y) => x - y)).toEqual([330, 335]) // the two smallest
+    expect(vals(vtxos)).toEqual([330, 335]) // ascending, stops at coverage
   })
 
   test('one below-V vtxo and no partner → [] (operator tops up)', () => {
@@ -98,11 +101,11 @@ describe('selectFundingInputs', () => {
     expect(vals(vtxos)).toEqual([])
   })
 
-  // The 2026-07-17 mainnet mini-wallet: [669, 330], a=14 (V=344). 669 covers V
-  // on its own → fund it whole (previously the router's amount=V bug skipped it).
-  test('mainnet scenario: [669, 330] with a=14 funds the 669 whole', () => {
+  // The 2026-07-17 mainnet mini-wallet: [669, 330], a=14 (V=344). Ascending:
+  // 330 < 344 → 669 joins → both spent whole, change consolidates them to one.
+  test('mainnet scenario: [669, 330] with a=14 consumes both ascending', () => {
     const vtxos = [fakeVtxo({ value: 669, batchExpiry: ok }), fakeVtxo({ value: 330, batchExpiry: ok })]
-    expect(selectFundingInputs(vtxos, { ...args, amount: 14 }).map((v) => v.value)).toEqual([669])
+    expect(selectFundingInputs(vtxos, { ...args, amount: 14 }).map((v) => v.value)).toEqual([330, 669])
   })
 
   // amount = a + fee can cross dust (a=329, fee=2 → V=661 > 2·330), where the
