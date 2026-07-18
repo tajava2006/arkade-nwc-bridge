@@ -5,6 +5,7 @@ import {
   DefaultVtxo,
   RestArkProvider,
   RestIndexerProvider,
+  type ArkTxInput,
   type VirtualCoin,
   type Wallet,
 } from '@arkade-os/sdk'
@@ -13,8 +14,10 @@ import {
   AtomicVtxoScript,
   classifyResume,
   computeClaimSplit,
+  fundShared,
   presignClaim,
   refundSpend,
+  selectFundingInputs,
   serverUnrollScript,
   SqliteAtomicSwapRepository,
   SwapDirection,
@@ -50,7 +53,7 @@ export interface AtomicSendDeps {
 }
 
 export interface AtomicSendResult {
-  /** sats that left the wallet net of the returned change (= the invoice amount) */
+  /** sats that left the wallet net of the returned change (invoice amount + boltz feeSats) */
   amount: number
   preimage: string
   /** funding arkTxid */
@@ -69,6 +72,13 @@ interface InitResponse {
    * Absent on older boltz → fall back to exitDelay.
    */
   boltzScriptDelay?: string
+  /**
+   * Fee (sats) boltz reserves in the claim split for fronting the LN routing
+   * cost. Taken verbatim — the split must be byte-identical on both sides, so
+   * mirroring a percent formula would risk ±1 ceil disagreements (= hard
+   * presig rejection). Absent on older boltz → 0.
+   */
+  feeSats?: number
   dust: number
   vtxoMin: number
 }
@@ -76,11 +86,15 @@ interface InitResponse {
 const toXOnly = (k: Uint8Array): Uint8Array => (k.length === 32 ? k : k.subarray(1))
 const timelockType = (v: bigint): 'seconds' | 'blocks' => (v >= 512n ? 'seconds' : 'blocks')
 
+/** Funding-input batch expiry must clear T by this (mirror of boltz's payMargin). */
+const FUNDING_MARGIN_SECS = 600
+
 /**
  * Send a sub-dust amount over LN through the atomic path. The bridge funds a
- * shared vtxo of `a + dust` (so the claim change comes back as a regular vtxo),
- * pre-signs the split, then boltz pays + claims. Net wallet cost is exactly the
- * invoice amount `a`.
+ * shared vtxo from its own vtxos spent WHOLE (V′ ≥ a + fee + dust, no funding
+ * change), pre-signs the split, then boltz pays + claims a (+ its advertised
+ * feeSats — it fronts the LN routing cost). The claim change V′ − a − fee comes
+ * back as one regular vtxo; net wallet cost is a + fee.
  */
 export async function atomicSubdustSend(
   deps: AtomicSendDeps,
@@ -112,6 +126,12 @@ export async function atomicSubdustSend(
   const boltzXOnly = toXOnly(hex.decode(init.boltzPubkey))
   const T = BigInt(init.refundLocktime)
   const d = BigInt(init.exitDelay)
+  // boltz's advertised fee, sanity-capped: it rides on OUR funding, so refuse
+  // anything a sane operator wouldn't configure before locking coins to it.
+  const fee = init.feeSats ?? 0
+  if (!Number.isInteger(fee) || fee < 0 || fee > dust) {
+    throw new Error(`boltz advertised an unreasonable feeSats ${init.feeSats} — refusing to fund`)
+  }
 
   // 2. build the shared 4-leaf script (funder=user, claimer=boltz).
   const script = new AtomicVtxoScript({
@@ -138,14 +158,51 @@ export async function atomicSubdustSend(
     exitDelay: Number(d),
   })
 
-  // 3. fund the shared vtxo. V = a + dust → the claim change (V−a = dust) is a
-  // regular vtxo the user gets back; net cost stays `a`.
-  const V = a + dust
+  // 3. fund the shared vtxo with our own vtxos spent WHOLE (same selection the
+  // boltz receive funder uses — smallest covering input, else ascending until
+  // covered). No funding change ⇒ the wallet can never be left with a sub-dust
+  // remainder here; the claim split returns V′ − a − fee (≥ dust ⇒ regular).
+  // V′ ≥ a + fee + dust; net cost stays a + fee.
   const hrp = info.network === 'bitcoin' ? 'ark' : 'tark'
-  const sharedAddress = script.address(hrp, serverXOnly).encode()
-  const txid = await deps.wallet.sendBitcoin({ address: sharedAddress, amount: V })
+  const userScript = new DefaultVtxo.Script({
+    pubKey: userXOnly,
+    serverPubKey: serverXOnly,
+    csvTimelock: { type: timelockType(BigInt(info.unilateralExitDelay)), value: BigInt(info.unilateralExitDelay) },
+  })
+  const { vtxos: ownVtxos } = await indexer.getVtxos({
+    scripts: [hex.encode(userScript.pkScript)],
+    spendableOnly: true,
+  })
+  const funding = selectFundingInputs(ownVtxos, {
+    dust,
+    refundLocktime: T,
+    marginSecs: FUNDING_MARGIN_SECS,
+    amount: a + fee,
+  })
+  if (funding.length === 0) {
+    throw new Error(
+      `atomic send needs ${a + fee + dust} sats of eligible vtxos (regular, spendable, batch expiry past T+${FUNDING_MARGIN_SECS}s) — ` +
+        `sub-dust/swept funds and soon-expiring vtxos don't qualify`,
+    )
+  }
+  const funderInputs: ArkTxInput[] = funding.map((f) => ({
+    txid: f.txid,
+    vout: f.vout,
+    value: f.value,
+    tapLeafScript: userScript.forfeit(),
+    tapTree: userScript.encode(),
+  }))
+  const Vp = funding.reduce((n, f) => n + f.value, 0)
+  const outpoint = await fundShared(
+    funderInputs,
+    [{ script: script.pkScript, amount: BigInt(Vp) }],
+    unroll,
+    deps.wallet.identity,
+    ark,
+  )
+  const txid = outpoint.txid
 
-  const { shared, coin } = await locateFunding(indexer, script, V, txid)
+  const { shared, coin } = await locateFunding(indexer, script, Vp, txid)
   repo.setFundingOutpoint(init.swapId, `${shared.txid}:${shared.vout}`)
 
   // Mirror the shared vtxo's exit material into the vault before boltz gets to
@@ -181,9 +238,12 @@ export async function atomicSubdustSend(
   const split = computeClaimSplit({
     funderAddress: funderAddr,
     claimerAddress: boltzAddr,
-    fundingValue: V,
+    fundingValue: Vp,
     amount: a,
     dust,
+    // boltz's advertised fee — must mirror its sendFund reconstruction exactly.
+    feeSats: fee,
+    feeRecipient: fee > 0 ? boltzAddr : undefined,
   })
   const presig = await presignClaim(shared, split.outputs, unroll, deps.wallet.identity)
   repo.setPresigs(init.swapId, presig)
@@ -206,7 +266,7 @@ export async function atomicSubdustSend(
   // arrives at the wallet address, where ProofSync covers it) — release the
   // lifecycle-owned vault row.
   releaseVaultRow(deps.db, shared.txid, shared.vout)
-  return { amount: a, preimage: fund.preimage, txid }
+  return { amount: a + fee, preimage: fund.preimage, txid }
 }
 
 export interface AtomicRefundResult {

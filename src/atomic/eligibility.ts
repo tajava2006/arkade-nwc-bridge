@@ -46,19 +46,22 @@ export function isEligibleFundingInput(vtxo: VirtualCoin, args: EligibilityArgs)
 
 /**
  * Pick funding input(s) to spend WHOLE into the shared vtxo — no funding change.
- * The shared value V' then varies (it's the picked total, ≥ dust + a), and the
- * claim split gives the claimer `a` (sub-dust) + the funder `V'−a` (always ≥
- * dust ⇒ regular). This deletes all funding-change handling (the 2026-07-17
- * false-funding was exactly there) and stops sub-dust dust from accreting in
- * the funder's wallet.
+ * The shared value V' then varies (it's the picked total, ≥ V), and the claim
+ * split gives the claimer its amount + the funder `V'−…` change (≥ dust ⇒
+ * regular by the V bound). This deletes all funding-change handling (the
+ * 2026-07-17 false-funding was exactly there) and stops sub-dust from
+ * accreting in the funder's wallet.
  *
- *   1. smallest single vtxo that alone covers V = dust + a → fund it whole;
- *   2. else the two smallest eligible vtxos — two dust-or-greater vtxos sum to
- *      ≥ 2·dust > dust + a (a < dust), so they always cover V. This also
- *      consolidates: the claim change comes back as one regular vtxo.
+ *   1. smallest single vtxo that alone covers V = dust + amount → fund it whole;
+ *   2. else accumulate ascending until the sum covers V — smallest-first also
+ *      consolidates: the claim change comes back as one regular vtxo. (With
+ *      amount = a < dust two inputs always suffice; when a fee rides on top,
+ *      amount = a + fee can cross dust and need a third — hence the sum check
+ *      instead of the old unconditional two-smallest.)
  *
- * `amount` is the sub-dust `a`, NOT V (V = dust + a is derived here). Returns []
- * when nothing covers V (operator tops up the mini-wallet).
+ * `amount` is what the claim must carve out of V beyond the dust buffer (the
+ * sub-dust `a`, plus the claimer's feeSats when one is charged) — NOT V itself.
+ * Returns [] when the whole eligible pool can't cover V.
  */
 export function selectFundingInputs(
   vtxos: VirtualCoin[],
@@ -70,7 +73,13 @@ export function selectFundingInputs(
     .sort((a, b) => a.value - b.value)
   const single = eligible.find((v) => v.value >= V)
   if (single) return [single] // smallest vtxo covering V on its own
-  if (eligible.length >= 2) return [eligible[0]!, eligible[1]!] // two smallest always cover V
+  const picked: VirtualCoin[] = []
+  let sum = 0
+  for (const v of eligible) {
+    picked.push(v)
+    sum += v.value
+    if (sum >= V) return picked
+  }
   return []
 }
 

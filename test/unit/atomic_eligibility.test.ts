@@ -104,4 +104,20 @@ describe('selectFundingInputs', () => {
     const vtxos = [fakeVtxo({ value: 669, batchExpiry: ok }), fakeVtxo({ value: 330, batchExpiry: ok })]
     expect(selectFundingInputs(vtxos, { ...args, amount: 14 }).map((v) => v.value)).toEqual([669])
   })
+
+  // amount = a + fee can cross dust (a=329, fee=2 → V=661 > 2·330), where the
+  // old unconditional two-smallest under-covered — the sum check adds a third.
+  test('fee edge: two smallest under-cover V → a third is added', () => {
+    const vtxos = [
+      fakeVtxo({ value: 330, batchExpiry: ok }),
+      fakeVtxo({ value: 330, batchExpiry: ok }),
+      fakeVtxo({ value: 331, batchExpiry: ok }),
+    ]
+    expect(selectFundingInputs(vtxos, { ...args, amount: 331 }).map((v) => v.value)).toEqual([330, 330, 331])
+  })
+
+  test('fee edge: whole eligible pool cannot cover V → []', () => {
+    const vtxos = [fakeVtxo({ value: 330, batchExpiry: ok }), fakeVtxo({ value: 330, batchExpiry: ok })]
+    expect(selectFundingInputs(vtxos, { ...args, amount: 331 })).toEqual([])
+  })
 })
