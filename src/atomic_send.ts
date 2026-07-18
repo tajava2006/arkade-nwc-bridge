@@ -62,6 +62,13 @@ interface InitResponse {
   boltzPubkey: string
   refundLocktime: number
   exitDelay: string
+  /**
+   * BIP68 delay of boltz's OWN wallet script — its claim output must be built
+   * with this, not exitDelay: they differ when boltz shares the fulmine wallet
+   * key (fulmine pins its delay at wallet init — mainnet hardcode 605184).
+   * Absent on older boltz → fall back to exitDelay.
+   */
+  boltzScriptDelay?: string
   dust: number
   vtxoMin: number
 }
@@ -161,12 +168,15 @@ export async function atomicSubdustSend(
     console.warn(`atomic send ${init.swapId}: vault capture failed (swap unaffected):`, err)
   }
 
-  // 4. compute the split + pre-sign the claim pair.
+  // 4. compute the split + pre-sign the claim pair. boltz's output uses
+  // boltz's own wallet-script delay (boltzScriptDelay) — building it with d
+  // would make boltz's sendFund reconstruction reject our presigs.
   const funderAddr = ArkAddress.decode(await deps.wallet.getAddress())
+  const boltzD = init.boltzScriptDelay !== undefined ? BigInt(init.boltzScriptDelay) : d
   const boltzAddr = new DefaultVtxo.Script({
     pubKey: boltzXOnly,
     serverPubKey: serverXOnly,
-    csvTimelock: { type: timelockType(d), value: d },
+    csvTimelock: { type: timelockType(boltzD), value: boltzD },
   }).address(hrp, serverXOnly)
   const split = computeClaimSplit({
     funderAddress: funderAddr,

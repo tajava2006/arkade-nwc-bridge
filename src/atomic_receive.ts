@@ -109,6 +109,13 @@ interface ReceiveStatus {
   boltzPubkey?: string
   refundLocktime?: number
   exitDelay?: string
+  /**
+   * BIP68 delay of boltz's OWN wallet script (its change output in the
+   * presigned claim). Differs from the arkd info delay when boltz shares the
+   * fulmine wallet key (fulmine pins its delay at wallet init — mainnet
+   * hardcode 605184). Absent on older boltz → fall back to the info delay.
+   */
+  boltzScriptDelay?: string
 }
 
 /**
@@ -157,16 +164,30 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
 
   const shared: SharedVtxo = { txid, vout: Number(voutStr), value: v.value, script }
   const hrp = info.network === 'bitcoin' ? 'ark' : 'tark'
-  const boltzAddr = new DefaultVtxo.Script({ pubKey: boltzXOnly, serverPubKey: server, csvTimelock: { type: timelockType(d), value: d } }).address(hrp, server)
+  // boltz's change output rides on boltz's OWN wallet-script delay, not the
+  // info delay — a wrong guess shifts the reconstructed claim txid off the
+  // presig. Only boltz's money depends on this value; our output stays pinned
+  // to our own derivation below.
+  const boltzD = status.boltzScriptDelay !== undefined ? BigInt(status.boltzScriptDelay) : d
+  const boltzAddr = new DefaultVtxo.Script({ pubKey: boltzXOnly, serverPubKey: server, csvTimelock: { type: timelockType(boltzD), value: boltzD } }).address(hrp, server)
   // The claimer receive address is the bridge wallet's default vtxo address.
   const bridgeAddr = new DefaultVtxo.Script({ pubKey: userXOnly, serverPubKey: server, csvTimelock: { type: timelockType(d), value: d } }).address(hrp, server)
   const split = computeClaimSplit({ funderAddress: boltzAddr, claimerAddress: bridgeAddr, fundingValue: v.value, amount: a, dust })
   const unroll = serverUnrollScript(info.checkpointTapscript)
 
-  repo.setFundingOutpoint(swapId, status.fundingOutpoint)
-  repo.transition(swapId, 'funded')
-  await finishClaim(shared, split.outputs, unroll, status.presigs, deps.identity, preimage, ark)
-  repo.transition(swapId, 'claimed')
+  // Phase on the persisted state so a failed pass can retry: an attempt that
+  // died after a phase must not re-run it (transition() rejects funded →
+  // funded, and re-claiming an already-spent shared vtxo can't succeed).
+  let state = swap.state
+  if (state === 'invoice_issued') {
+    repo.setFundingOutpoint(swapId, status.fundingOutpoint)
+    repo.transition(swapId, 'funded')
+    state = 'funded'
+  }
+  if (state === 'funded') {
+    await finishClaim(shared, split.outputs, unroll, status.presigs, deps.identity, preimage, ark)
+    repo.transition(swapId, 'claimed')
+  }
 
   // Reveal the preimage to boltz so it settles the hold invoice.
   await boltzFetch(`${deps.boltzApiUrl}/v2/subdust/atomic/receive/settle`, { swapId, preimage: swap.preimage })
