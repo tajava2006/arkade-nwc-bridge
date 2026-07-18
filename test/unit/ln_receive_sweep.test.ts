@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { SqliteAtomicSwapRepository, SwapDirection } from '../../src/atomic'
-import { sweepExpiredAtomicReceives } from '../../src/ln_receive'
+import { absoluteExpiry, sweepExpiredAtomicReceives } from '../../src/ln_receive'
 
 // EXPIRY_GRACE_SECONDS = 15*60 in ln_receive; the sweep fails a receive only
 // once now > invoice-expiry + grace.
@@ -66,5 +66,25 @@ describe('sweepExpiredAtomicReceives', () => {
     const throwing = () => { throw new Error('bad bolt11') }
     expect(sweepExpiredAtomicReceives(db, NOW, throwing)).toEqual([])
     expect(repo.get('r-bad')?.state).toBe('invoice_issued')
+  })
+})
+
+describe('absoluteExpiry (the default decoder)', () => {
+  // BOLT11 spec vector: timestamp 1496314658, expiry tag x=60. The library's
+  // .expiry returns the relative 60 — treating it as absolute made the sweep
+  // fail every fresh invoice on its first tick.
+  const SPEC_INVOICE =
+    'lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpuaztrnwngzn3kdzw5hydlzf03qdgm2hdq27cqv3agm2awhz5se903vruatfhq77w3ls4evs3ch9zw97j25emudupq63nyw24cg27h2rspfj9srp'
+
+  test('returns timestamp + relative expiry as an absolute unix time', () => {
+    expect(absoluteExpiry(SPEC_INVOICE)).toBe(1496314658 + 60)
+  })
+
+  test('a fresh 24h invoice must NOT sweep as expired at issuance time', () => {
+    receive('r-live', 'invoice_issued')
+    // simulate "issued moments ago": decoder returns now + 86400 (absolute)
+    const fresh = () => NOW + 86400
+    expect(sweepExpiredAtomicReceives(db, NOW, fresh)).toEqual([])
+    expect(repo.get('r-live')?.state).toBe('invoice_issued')
   })
 })

@@ -41,6 +41,19 @@ export interface IssueInvoiceParams {
   descriptionHash?: string
 }
 
+/**
+ * Absolute BOLT11 expiry (unix secs). decodeInvoice().expiry is documented as
+ * an absolute timestamp but actually returns the raw relative `x`-tag seconds:
+ * light-bolt11-decoder defines an absolute getter, then its TAGCODES
+ * defineProperty loop clobbers it with the raw section value (and boltz-swap
+ * passes that through with a relative 3600 fallback). Normalize by magnitude
+ * so an upstream fix can't double-count.
+ */
+export function absoluteExpiry(invoice: string): number {
+  const decoded = decodeInvoice(invoice)
+  return decoded.expiry > 1e9 ? decoded.expiry : decoded.timestamp + decoded.expiry
+}
+
 export type IssuedInvoice = {
   invoice: string
   paymentHash: string
@@ -87,12 +100,11 @@ export async function issueInvoice(
 
   if (amountSats < DUST_SATS) {
     const r = await issueAtomicReceive(atomicDeps(deps), amountSats, descriptionHash)
-    const decoded = decodeInvoice(r.invoice)
     return {
       kind: 'subdust',
       invoice: r.invoice,
       paymentHash: r.paymentHash,
-      expiresAt: decoded.expiry,
+      expiresAt: absoluteExpiry(r.invoice),
       receivedSats: amountSats, // 1:1 — no swap fee on the atomic path (v1)
       swapId: r.swapId,
       preimage: r.preimage,
@@ -108,7 +120,7 @@ export async function issueInvoice(
     kind: 'swap',
     invoice: result.invoice,
     paymentHash: result.paymentHash,
-    expiresAt: result.expiry,
+    expiresAt: absoluteExpiry(result.invoice),
     receivedSats: result.amount,
     swapId: result.pendingSwap.id,
   }
@@ -144,7 +156,7 @@ export type ExpiryDecoder = (invoice: string) => number
 export function sweepExpiredAtomicReceives(
   db: Database,
   nowSec: number,
-  decodeExpiry: ExpiryDecoder = (inv) => decodeInvoice(inv).expiry,
+  decodeExpiry: ExpiryDecoder = absoluteExpiry,
 ): string[] {
   const repo = new SqliteAtomicSwapRepository(db)
   const swept: string[] = []
