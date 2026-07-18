@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 
 import { issueInvoice } from '../../src/ln_receive'
-import { fakeInvoiceResponse, makeSwapsStub, makeWalletStub } from '../helpers/mocks'
+import { INVOICE_2000_SAT, fakeInvoiceResponse, makeSwapsStub, makeWalletStub } from '../helpers/mocks'
 
 // The sub-dust receive branch now routes through the ATOMIC path
 // (issueAtomicReceive → boltz /v2/subdust/atomic/receive/*), which needs the
@@ -29,7 +29,8 @@ describe('issueInvoice — ≥dust reverse swap', () => {
     const swaps = makeSwapsStub({
       createLightningInvoice: async (args) => {
         expect(args.amount).toBe(330)
-        return fakeInvoiceResponse({ amount: 320, invoice: 'lnbc1u', paymentHash: 'aa'.repeat(32) })
+        // Real decodable bolt11: issueInvoice decodes it for absoluteExpiry.
+        return fakeInvoiceResponse({ amount: 320, invoice: INVOICE_2000_SAT, paymentHash: 'aa'.repeat(32) })
       },
     })
 
@@ -41,7 +42,7 @@ describe('issueInvoice — ≥dust reverse swap', () => {
     expect(issued.kind).toBe('swap')
     if (issued.kind !== 'swap') throw new Error('unreachable')
     expect(issued.swapId).toBe('swap-id-fake')
-    expect(issued.invoice).toBe('lnbc1u')
+    expect(issued.invoice).toBe(INVOICE_2000_SAT)
     expect(issued.paymentHash).toBe('aa'.repeat(32))
     expect(issued.receivedSats).toBe(320) // post-fee on-Ark amount
   })

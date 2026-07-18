@@ -198,10 +198,11 @@ export function fakeInvoiceResponse(
 /**
  * 20μBTC = 2000 sat mainnet invoice with a valid bech32 checksum, borrowed
  * from light-bolt11-decoder's own test vectors. Long expired — tests only
- * ever decode it, never pay it. Also stands in for boltz's sub-dust plain
- * invoices: issueInvoice only decodes paymentHash/expiry from what boltz
- * returns, so the nominal being 2000 sats doesn't matter to the branch
- * under test.
+ * ever decode it, never pay it. Use this (not a short stub) wherever a mock
+ * boltz response feeds issueInvoice: absoluteExpiry now bech32-decodes the
+ * returned invoice string, so anything under 8 chars throws. The nominal
+ * being 2000 sats doesn't matter to the branch under test — paymentHash and
+ * the invoice string are what the assertions read.
  */
 export const INVOICE_2000_SAT =
   'lnbc20u1p3y0x3hpp5743k2g0fsqqxj7n8qzuhns5gmkk4djeejk3wkp64ppevgekvc0jsdqcve5kzar2v9nr5gpqd4hkuetesp5ez2g297jduwc20t6lmqlsg3man0vf2jfd8ar9fh8fhn2g8yttfkqxqy9gcqcqzys9qrsgqrzjqtx3k77yrrav9hye7zar2rtqlfkytl094dsp0ms5majzth6gt7ca6uhdkxl983uywgqqqqlgqqqvx5qqjqrzjqd98kxkpyw0l9tyy8r8q57k7zpy9zjmh6sez752wj6gcumqnj3yxzhdsmg6qq56utgqqqqqqqqqqqeqqjq7jd56882gtxhrjm03c93aacyfy306m4fq0tskf83c0nmet8zc2lxyyg3saz8x6vwcp26xnrlagf9semau3qm2glysp7sv95693fphvsp54l567'

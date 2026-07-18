@@ -120,7 +120,9 @@ describe('handlers', () => {
           expect(args.amount).toBe(1000)
           return fakeInvoiceResponse({
             amount: 990,
-            invoice: 'lnbc10u',
+            // A real decodable bolt11 — issueInvoice now decodes it for the
+            // absolute expiry (absoluteExpiry), so a short stub throws.
+            invoice: INVOICE_2000_SAT,
             paymentHash: 'aa'.repeat(32),
           })
         },
@@ -132,7 +134,7 @@ describe('handlers', () => {
 
       expect(r.type).toBe('incoming')
       expect(r.state).toBe('pending')
-      expect(r.invoice).toBe('lnbc10u')
+      expect(r.invoice).toBe(INVOICE_2000_SAT)
       expect(r.amount).toBe(1_000_000) // the nominal the client asked for — never inflated
       expect(r.fees_paid).toBe(10_000) // the credit is derived: 1000 − 10 lands on Ark
       expect(r.description).toBe('tea')
