@@ -90,6 +90,29 @@ const timelockType = (v: bigint): 'seconds' | 'blocks' => (v >= 512n ? 'seconds'
 const FUNDING_MARGIN_SECS = 600
 
 /**
+ * Verify-before-bookkeep (F4, SUBDUST_ATOMIC_SECURITY_REVIEW.md): boltz replying
+ * `status: 'claimed'` is NOT proof it actually spent our funding — a lying/buggy
+ * boltz (or a claim that ACKed but never registered) would otherwise get us to
+ * terminal-claim + delete the vault row while our whole V is still locked in the
+ * shared vtxo. Only the indexer showing the outpoint spent (spentBy set) is
+ * proof. Polls to tolerate indexer lag; conservative — an ambiguous/absent read
+ * returns false, keeping the swap recoverable (the refund executor reclaims V).
+ */
+async function confirmClaimSpent(indexer: RestIndexerProvider, txid: string, vout: number): Promise<boolean> {
+  for (let i = 0; i < 6; i++) {
+    try {
+      const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid, vout }] })
+      const coin = vtxos.find((v) => v.txid === txid && v.vout === vout)
+      if (coin?.spentBy) return true
+    } catch {
+      // transient indexer error — retry
+    }
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  return false
+}
+
+/**
  * Send a sub-dust amount over LN through the atomic path. The bridge funds a
  * shared vtxo from its own vtxos spent WHOLE (V′ ≥ a + fee + dust, no funding
  * change), pre-signs the split, then boltz pays + claims a (+ its advertised
@@ -262,11 +285,24 @@ export async function atomicSubdustSend(
     repo.transition(init.swapId, fund.status === 'failed' ? 'refund_wait' : 'failed')
     throw new Error(`atomic send did not complete (${fund.status}): ${fund.error ?? ''} — funds refundable after T`)
   }
-  repo.transition(init.swapId, 'claimed')
-  // Terminal success: the shared vtxo is spent by the claim split (our change
-  // arrives at the wallet address, where ProofSync covers it) — release the
-  // lifecycle-owned vault row.
-  releaseVaultRow(deps.db, shared.txid, shared.vout)
+  // Verify-before-bookkeep (F4): confirm boltz actually spent our funding before
+  // terminal-claiming + releasing the vault row. The LN payment already
+  // succeeded (we hold the preimage), so we still report success either way —
+  // but if the claim hasn't landed on-chain we keep the swap recoverable in
+  // ln_inflight so the refund executor reclaims V after T (boltz can't have it
+  // both ways: it took V, or we get it back).
+  if (await confirmClaimSpent(indexer, shared.txid, shared.vout)) {
+    repo.transition(init.swapId, 'claimed')
+    // Terminal success: the shared vtxo is spent by the claim split (our change
+    // arrives at the wallet address, where ProofSync covers it) — release the
+    // lifecycle-owned vault row.
+    releaseVaultRow(deps.db, shared.txid, shared.vout)
+  } else {
+    repo.setPreimage(init.swapId, fund.preimage)
+    console.warn(
+      `atomic send ${init.swapId}: boltz reported claimed but the shared vtxo isn't spent per the indexer — keeping recoverable (F4); refund executor reclaims V after T`,
+    )
+  }
   return { amount: a + fee, preimage: fund.preimage, txid }
 }
 
@@ -497,12 +533,29 @@ async function sendStatusSafe(boltzApiUrl: string, swapId: string): Promise<Send
 export async function resumeAtomicSends(
   deps: AtomicSendDeps,
   refund: (d: Omit<AtomicSendDeps, 'boltzApiUrl'>, id: string) => Promise<AtomicRefundResult> = refundAtomicSend,
+  // injectable for unit tests; production binds it to the arkd indexer (F4).
+  confirmSpent?: (txid: string, vout: number) => Promise<boolean>,
 ): Promise<AtomicSendResumeResult> {
   const repo = new SqliteAtomicSwapRepository(deps.db)
+  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const confirm =
+    confirmSpent ?? ((txid: string, vout: number): Promise<boolean> => confirmClaimSpent(indexer, txid, vout))
   const nowSecs = BigInt(Math.floor(Date.now() / 1000))
   const result: AtomicSendResumeResult = { refunded: [], claimed: [], refundWait: [], waiting: 0, failed: [] }
 
-  const markClaimed = (swapId: string, preimage: string | undefined, fundingOutpoint: string | undefined): void => {
+  const markClaimed = async (swapId: string, preimage: string | undefined, fundingOutpoint: string | undefined): Promise<void> => {
+    // Verify-before-bookkeep (F4): don't terminal-claim + release the vault on
+    // boltz's word alone — confirm the shared vtxo is actually spent first. If
+    // it isn't, persist the preimage and leave the swap recoverable (the refund
+    // executor reclaims V after T); a later pass reconciles if boltz claims late.
+    if (fundingOutpoint) {
+      const [txid, vout] = fundingOutpoint.split(':')
+      if (txid && vout !== undefined && !(await confirm(txid, Number(vout)))) {
+        if (preimage) repo.setPreimage(swapId, preimage)
+        console.warn(`atomic send ${swapId}: boltz status=claimed but the shared vtxo isn't spent — not releasing (F4)`)
+        return
+      }
+    }
     const cur = repo.get(swapId)!
     if (cur.state === 'funded') repo.transition(swapId, 'ln_inflight')
     repo.transition(swapId, 'claimed')
@@ -527,7 +580,7 @@ export async function resumeAtomicSends(
         const st = await sendStatusSafe(deps.boltzApiUrl, swap.id)
         if (st?.state === 'claimed' && swap.state !== 'refund_wait') {
           // crash landed between boltz's claim and our bookkeeping
-          markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
+          await markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
           continue
         }
         // (a refund_wait row boltz claims to have claimed would mean boltz paid
@@ -539,7 +592,7 @@ export async function resumeAtomicSends(
       } else if (action === 'poll') {
         const st = await sendStatusSafe(deps.boltzApiUrl, swap.id)
         if (st?.state === 'claimed') {
-          markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
+          await markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
         } else if (st?.state === 'failed' || st?.state === 'refund_wait') {
           if (swap.state !== 'refund_wait') repo.transition(swap.id, 'refund_wait')
           result.refundWait.push(swap.id)

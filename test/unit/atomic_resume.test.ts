@@ -8,9 +8,14 @@ import {
 } from '../../src/atomic_send'
 import type { Wallet } from '@arkade-os/sdk'
 
-// resumeAtomicSends touches the network in exactly two places: boltz's
-// /send/status (global fetch — stubbed per test) and the refund executor
-// (injected). Everything else is sqlite bookkeeping, asserted directly.
+// resumeAtomicSends touches the network in three places: boltz's /send/status
+// (global fetch — stubbed per test), the refund executor (injected), and the
+// F4 spend confirmation (injected). Everything else is sqlite bookkeeping,
+// asserted directly.
+
+// Default F4 confirmation for the claimed path: pretend boltz's claim landed.
+const spent = async (): Promise<boolean> => true
+const notSpent = async (): Promise<boolean> => false
 
 let db: Database
 let repo: SqliteAtomicSwapRepository
@@ -81,16 +86,28 @@ describe('resumeAtomicSends', () => {
     expect(repo.get('s-refund')?.state).toBe('refunded')
   })
 
-  test('post-T funded whose vtxo boltz already claimed → reconciled to claimed, not refunded', async () => {
+  test('post-T funded whose vtxo boltz already claimed (spend confirmed) → reconciled to claimed, not refunded', async () => {
     // crash between boltz's claim and our bookkeeping
     plantSend('s-crashed', 'funded', NOW - 600)
     stubStatus({ 's-crashed': { state: 'claimed', preimage: 'ef'.repeat(32) } })
-    const r = await resumeAtomicSends(makeDeps(), noRefund)
+    const r = await resumeAtomicSends(makeDeps(), noRefund, spent)
     expect(r.claimed).toEqual(['s-crashed'])
     expect(r.refunded).toEqual([])
     const row = repo.get('s-crashed')
     expect(row?.state).toBe('claimed')
     expect(row?.preimage).toBe('ef'.repeat(32))
+  })
+
+  test('F4: boltz says claimed but the shared vtxo is NOT spent → not claimed, kept recoverable', async () => {
+    // a lying/buggy boltz (or a claim that ACKed but never registered): we must
+    // not terminal-claim + release the vault while V is still in the shared vtxo
+    plantSend('s-liar', 'ln_inflight', NOW + 3600) // pre-T so the poll path runs
+    stubStatus({ 's-liar': { state: 'claimed', preimage: 'ab'.repeat(32) } })
+    const r = await resumeAtomicSends(makeDeps(), noRefund, notSpent)
+    expect(r.claimed).toEqual([]) // NOT reconciled to claimed on boltz's word alone
+    const row = repo.get('s-liar')
+    expect(row?.state).toBe('ln_inflight') // stays recoverable — refund executor handles T
+    expect(row?.preimage).toBe('ab'.repeat(32)) // preimage still persisted (LN did pay)
   })
 
   test('pre-T funded + boltz says failed → moves to refund_wait and waits for T', async () => {
