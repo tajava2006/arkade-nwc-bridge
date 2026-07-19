@@ -110,6 +110,29 @@ describe('resumeAtomicSends', () => {
     expect(row?.preimage).toBe('ab'.repeat(32)) // preimage still persisted (LN did pay)
   })
 
+  test('F11: post-T claimed-but-unspent → falls through to auto-refund (not skipped)', async () => {
+    // boltz's claim ACKed but never registered (poison / lie): boltz DB says
+    // 'claimed' yet the shared vtxo is unspent. Post-T we must NOT stop at the
+    // failed confirmation — the old code did `continue`, stranding V forever.
+    plantSend('s-poison', 'ln_inflight', NOW - 600) // post-T
+    stubStatus({ 's-poison': { state: 'claimed', preimage: 'ab'.repeat(32) } })
+    const calls: string[] = []
+    const r = await resumeAtomicSends(
+      makeDeps(),
+      async (_d, id) => {
+        calls.push(id)
+        repo.transition(id, 'refund_wait')
+        repo.transition(id, 'refunded')
+        return { txid: 'r'.repeat(64), amount: 351 }
+      },
+      notSpent, // F4 confirmation fails → markClaimed returns false → refund
+    )
+    expect(calls).toEqual(['s-poison']) // refund actually ran
+    expect(r.refunded).toEqual(['s-poison'])
+    expect(r.claimed).toEqual([])
+    expect(repo.get('s-poison')?.state).toBe('refunded')
+  })
+
   test('pre-T funded + boltz says failed → moves to refund_wait and waits for T', async () => {
     plantSend('s-failing', 'funded', NOW + 3600)
     stubStatus({ 's-failing': { state: 'failed' } })

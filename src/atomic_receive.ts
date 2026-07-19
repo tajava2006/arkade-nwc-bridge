@@ -11,12 +11,14 @@ import {
 } from '@arkade-os/sdk'
 import {
   AtomicVtxoScript,
+  canTransition,
   computeClaimSplit,
   finishClaim,
   serverUnrollScript,
   SqliteAtomicSwapRepository,
   SwapDirection,
   isTerminal,
+  type AtomicSwapState,
   type AtomicPresig,
   type SharedVtxo,
 } from './atomic'
@@ -52,6 +54,24 @@ export interface AtomicReceiveInvoice {
 
 const toXOnly = (k: Uint8Array): Uint8Array => (k.length === 32 ? k : k.subarray(1))
 const timelockType = (v: bigint): 'seconds' | 'blocks' => (v >= 512n ? 'seconds' : 'blocks')
+
+/**
+ * Walk a receive swap forward through its legal transition chain to a terminal
+ * state, doing only the steps that are legal from the current state (so it's a
+ * safe no-op when the swap is already there or past it). Used to converge the
+ * local row when boltz reached a terminal state while we were down (F12) — e.g.
+ * boltz's preimage harvester settled the hold invoice before our drive ran, so
+ * our `/receive/status` poll never sees 'funded' again and the row would poll
+ * forever otherwise.
+ */
+function advanceReceive(repo: SqliteAtomicSwapRepository, swapId: string, target: 'settled' | 'refunded'): void {
+  const path: AtomicSwapState[] = target === 'settled' ? ['funded', 'claimed', 'settled'] : ['refund_wait', 'refunded']
+  for (const next of path) {
+    const cur = repo.get(swapId)
+    if (!cur || cur.state === target || isTerminal(SwapDirection.Receive, cur.state)) return
+    if (canTransition(SwapDirection.Receive, cur.state, next)) repo.transition(swapId, next)
+  }
+}
 
 /**
  * Begin an atomic sub-dust receive: generate the preimage, have boltz mint a
@@ -131,6 +151,21 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   if (isTerminal(SwapDirection.Receive, swap.state)) return swap.state === 'settled'
 
   const status = await boltzGet<ReceiveStatus>(`${deps.boltzApiUrl}/v2/subdust/atomic/receive/status?swapId=${swapId}`)
+
+  // boltz reached a terminal state while we were down — converge locally so we
+  // stop polling forever (F12). 'settled': our claim's preimage was collected
+  // (our /receive/settle, or boltz's harvester racing ahead of this drive) — a
+  // successful receive, so return true to fire the receipt. 'refunded': boltz
+  // gave the payer back (unclaimed past T); nothing to claim, terminalize quietly.
+  if (status.state === 'settled') {
+    advanceReceive(repo, swapId, 'settled')
+    return true
+  }
+  if (status.state === 'refunded' || status.state === 'refund_wait') {
+    advanceReceive(repo, swapId, 'refunded')
+    return false
+  }
+
   if (status.state !== 'funded' || !status.fundingOutpoint || !status.presigs || status.boltzPubkey === undefined || status.refundLocktime === undefined) {
     return false // boltz hasn't funded yet
   }
@@ -189,10 +224,34 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
     repo.transition(swapId, 'claimed')
   }
 
+  // Verify-before-reveal (F18, symmetry with the send-side F4): only tell boltz
+  // to settle once our claim is actually on-chain. If finishClaim ACKed but
+  // didn't register, the preimage isn't public yet — revealing it would let boltz
+  // collect the LN payment while we hold nothing. Not confirmed → leave for the
+  // next pass (once the claim really lands, boltz's own harvester is the backstop).
+  if (!(await confirmSpent(indexer, txid, Number(voutStr)))) {
+    console.warn(`atomic receive ${swapId}: claim not confirmed on-chain yet — deferring settle`)
+    return false
+  }
+
   // Reveal the preimage to boltz so it settles the hold invoice.
   await boltzFetch(`${deps.boltzApiUrl}/v2/subdust/atomic/receive/settle`, { swapId, preimage: swap.preimage })
   repo.transition(swapId, 'settled')
   return true
+}
+
+/** Has `txid:vout` been spent per the indexer? Short poll to tolerate lag. */
+async function confirmSpent(indexer: RestIndexerProvider, txid: string, vout: number): Promise<boolean> {
+  for (let i = 0; i < 6; i++) {
+    try {
+      const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid, vout }] })
+      if (vtxos.find((v) => v.txid === txid && v.vout === vout)?.spentBy) return true
+    } catch {
+      // transient indexer error — retry
+    }
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  return false
 }
 
 /**

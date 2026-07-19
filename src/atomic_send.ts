@@ -22,6 +22,7 @@ import {
   SqliteAtomicSwapRepository,
   SwapDirection,
   type AtomicOutput,
+  type AtomicSwapRow,
   type SharedVtxo,
 } from './atomic'
 import { captureVtxo, expirySec } from './exit/proof_sync'
@@ -166,21 +167,6 @@ export async function atomicSubdustSend(
     exitDelay: d,
   })
 
-  // Persist BEFORE funding so a crash mid-swap is recoverable (refund after T).
-  // peerPubkey/exitDelay make the row self-contained: the refund path rebuilds
-  // the script from the row alone, without boltz answering ever again.
-  repo.create({
-    id: init.swapId,
-    direction: SwapDirection.Send,
-    paymentHash,
-    state: 'init',
-    amount: a,
-    refundLocktime: init.refundLocktime,
-    invoice,
-    peerPubkey: hex.encode(boltzXOnly),
-    exitDelay: Number(d),
-  })
-
   // 3. fund the shared vtxo with our own vtxos spent WHOLE (same selection the
   // boltz receive funder uses — ascending accumulation until V is covered, so
   // the smallest fragments get consolidated by the returning change). No
@@ -209,6 +195,26 @@ export async function atomicSubdustSend(
         `sub-dust/swept funds and soon-expiring vtxos don't qualify`,
     )
   }
+
+  // Persist now — BEFORE funding (fundShared), so a crash mid-swap is
+  // recoverable (refund after T); peerPubkey/exitDelay make the row
+  // self-contained for the offline refund path. NOT earlier: a pre-funding
+  // failure (insufficient balance above) must not leave an 'init' row behind
+  // that blocks retrying the same invoice — boltz's /send/init is idempotent for
+  // an unfunded row, so the retry gets the same swapId and this create runs
+  // cleanly (F17).
+  repo.create({
+    id: init.swapId,
+    direction: SwapDirection.Send,
+    paymentHash,
+    state: 'init',
+    amount: a,
+    refundLocktime: init.refundLocktime,
+    invoice,
+    peerPubkey: hex.encode(boltzXOnly),
+    exitDelay: Number(d),
+  })
+
   const funderInputs: ArkTxInput[] = funding.map((f) => ({
     txid: f.txid,
     vout: f.vout,
@@ -488,6 +494,48 @@ export async function refundAtomicSend(
   return { txid: refundTxid, amount: coin.value }
 }
 
+/**
+ * Crash-window recovery (F15): a send row can be left at 'init' with no
+ * fundingOutpoint if the bridge died between fundShared and setFundingOutpoint —
+ * the shared vtxo is on-chain but unrecorded, so classifyResume never refunds it
+ * and V stays locked. Rebuild the 4-leaf script from the row, look for the
+ * shared vtxo at that address, and if it's there record the outpoint + advance
+ * to 'funded' so the normal refund path reclaims it after T. Returns true if
+ * recovered. Needs peerPubkey + exitDelay (rows predating that metadata are left
+ * alone — nothing to rebuild the script from). boltz never got presigs in this
+ * window, so the vtxo can't have been claimed: a spendable coin at the script is
+ * ours.
+ */
+async function recoverFundingOutpoint(
+  deps: AtomicSendDeps,
+  repo: SqliteAtomicSwapRepository,
+  swap: AtomicSwapRow,
+): Promise<boolean> {
+  if (swap.fundingOutpoint || swap.state !== 'init' || !swap.peerPubkey || swap.exitDelay === undefined) {
+    return false
+  }
+  const ark = new RestArkProvider(deps.arkServerUrl)
+  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const info = await ark.getInfo()
+  const serverXOnly = toXOnly(hex.decode(info.signerPubkey))
+  const userXOnly = toXOnly(await deps.wallet.identity.xOnlyPublicKey())
+  const script = new AtomicVtxoScript({
+    funder: userXOnly,
+    claimer: toXOnly(hex.decode(swap.peerPubkey)),
+    server: serverXOnly,
+    paymentHash: hex.decode(swap.paymentHash),
+    refundLocktime: BigInt(swap.refundLocktime),
+    exitDelay: BigInt(swap.exitDelay),
+  })
+  const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(script.pkScript)], spendableOnly: true })
+  const coin = vtxos[0]
+  if (!coin) return false
+  repo.setFundingOutpoint(swap.id, `${coin.txid}:${coin.vout}`)
+  repo.transition(swap.id, 'funded')
+  console.log(`atomic send ${swap.id}: recovered funding ${coin.txid}:${coin.vout} lost to a crash before bookkeeping (F15)`)
+  return true
+}
+
 // ── boot / periodic resume (the "#14 timer") ─────────────────────────────────
 
 export interface AtomicSendResumeResult {
@@ -543,7 +591,10 @@ export async function resumeAtomicSends(
   const nowSecs = BigInt(Math.floor(Date.now() / 1000))
   const result: AtomicSendResumeResult = { refunded: [], claimed: [], refundWait: [], waiting: 0, failed: [] }
 
-  const markClaimed = async (swapId: string, preimage: string | undefined, fundingOutpoint: string | undefined): Promise<void> => {
+  // Returns true when the swap was actually terminal-claimed, false when boltz's
+  // claim couldn't be confirmed on-chain (caller decides what to do with a
+  // false — post-T it must fall through to refund, F11).
+  const markClaimed = async (swapId: string, preimage: string | undefined, fundingOutpoint: string | undefined): Promise<boolean> => {
     // Verify-before-bookkeep (F4): don't terminal-claim + release the vault on
     // boltz's word alone — confirm the shared vtxo is actually spent first. If
     // it isn't, persist the preimage and leave the swap recoverable (the refund
@@ -553,7 +604,7 @@ export async function resumeAtomicSends(
       if (txid && vout !== undefined && !(await confirm(txid, Number(vout)))) {
         if (preimage) repo.setPreimage(swapId, preimage)
         console.warn(`atomic send ${swapId}: boltz status=claimed but the shared vtxo isn't spent — not releasing (F4)`)
-        return
+        return false
       }
     }
     const cur = repo.get(swapId)!
@@ -565,6 +616,20 @@ export async function resumeAtomicSends(
       if (txid && vout !== undefined) releaseVaultRow(deps.db, txid, Number(vout))
     }
     result.claimed.push(swapId)
+    return true
+  }
+
+  // Crash-window recovery pre-pass (F15): promote any 'init' send whose funding
+  // is already on-chain but unrecorded to 'funded', so the loop below refunds it
+  // after T instead of polling boltz forever with V stranded in the shared vtxo.
+  for (const swap of repo.listResumable()) {
+    if (swap.direction === SwapDirection.Send && !swap.fundingOutpoint && swap.state === 'init') {
+      try {
+        await recoverFundingOutpoint(deps, repo, swap)
+      } catch (e) {
+        result.failed.push({ id: swap.id, error: e instanceof Error ? e.message : String(e) })
+      }
+    }
   }
 
   for (const swap of repo.listResumable()) {
@@ -579,9 +644,12 @@ export async function resumeAtomicSends(
       if (action === 'refund') {
         const st = await sendStatusSafe(deps.boltzApiUrl, swap.id)
         if (st?.state === 'claimed' && swap.state !== 'refund_wait') {
-          // crash landed between boltz's claim and our bookkeeping
-          await markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
-          continue
+          // crash landed between boltz's claim and our bookkeeping — reconcile
+          // to claimed only if the spend is actually on-chain (F4). If it isn't
+          // (boltz lying / ACK-but-no-register), DON'T continue: fall through to
+          // refund — our V is still in the shared vtxo and T has passed (F11).
+          // refund fails loudly if the vtxo turns out spent, so no double-spend.
+          if (await markClaimed(swap.id, st.preimage, swap.fundingOutpoint)) continue
         }
         // (a refund_wait row boltz claims to have claimed would mean boltz paid
         // after reporting failure — a §3.5 discipline violation; the refund
@@ -592,7 +660,9 @@ export async function resumeAtomicSends(
       } else if (action === 'poll') {
         const st = await sendStatusSafe(deps.boltzApiUrl, swap.id)
         if (st?.state === 'claimed') {
-          await markClaimed(swap.id, st.preimage, swap.fundingOutpoint)
+          // pre-T: if the spend isn't confirmed yet, keep it recoverable and
+          // count it as still waiting (the next tick re-checks / T-refund covers).
+          if (!(await markClaimed(swap.id, st.preimage, swap.fundingOutpoint))) result.waiting++
         } else if (st?.state === 'failed' || st?.state === 'refund_wait') {
           if (swap.state !== 'refund_wait') repo.transition(swap.id, 'refund_wait')
           result.refundWait.push(swap.id)
@@ -635,7 +705,9 @@ async function locateFunding(
   const pk = hex.encode(script.pkScript)
   for (let i = 0; i < 20; i++) {
     const { vtxos } = await indexer.getVtxos({ scripts: [pk], spendableOnly: true })
-    const v = vtxos.find((x) => x.value === value && (x.txid === fundingTxid || true))
+    // The shared vtxo's txid IS the funding arkTxid (vout 0), so match on it
+    // precisely; fall back to a value match only if the txid isn't indexed yet.
+    const v = vtxos.find((x) => x.txid === fundingTxid) ?? vtxos.find((x) => x.value === value)
     if (v) return { shared: { txid: v.txid, vout: v.vout, value: v.value, script }, coin: v }
     await new Promise((r) => setTimeout(r, 500))
   }
