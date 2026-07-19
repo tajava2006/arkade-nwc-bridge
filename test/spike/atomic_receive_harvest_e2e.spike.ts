@@ -5,7 +5,17 @@
 // own, by harvesting the preimage from the claim tx — else a griefer takes `a`
 // for free. Asserts boltz auto-settles WITHOUT our settle call.
 //
-//   arkade-regtest up --profile boltz (seconds mode) with BOLTZ_IMAGE=boltz-atomic:regtest
+// ── Regtest setup (self-contained; the arkade-regtest submodule is UPSTREAM
+//    code — do NOT commit config there) ───────────────────────────────────────
+// Add to its docker/compose.ark.yml, boltz service, BOLTZ_CONFIG [ark] table
+// (revert after the drill):
+//     subdustRestUrl   = "http://arkd:7070"
+//     subdustSignerKey = "3820bf24c99fd1a1d20205e0237c73af9a0f998b6844aa1e87a09585354abe86"  # = BOLTZ_KEY below
+//     subdustReceiveWindow = 60      # small so a receive T elapses within a drill
+//     subdustSendWindow    = 86400   # large so a send's cltvLimit stays routable
+// Bring the stack up with a long tree-expiry (the 1024 default expires funding
+// vtxos mid-drill) and the custom image:
+//     ARKD_VTXO_TREE_EXPIRY=7200 BOLTZ_IMAGE=boltz-atomic:regtest node regtest.mjs start --clean --profile boltz
 //   bun test/spike/atomic_receive_harvest_e2e.spike.ts
 //
 // NOTE: boltz's harvester runs on a 60s scan, so this drill waits up to ~90s
