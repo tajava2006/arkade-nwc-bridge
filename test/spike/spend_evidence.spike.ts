@@ -27,7 +27,7 @@
 //       script (run on the machine that holds the funded bridge db).
 //       Nothing is signed, broadcast or settled.
 //
-// Same polyfills footgun as offline_finalize.spike.ts: import first.
+// Polyfills footgun (@noble/@scure ESM warming): import '../../src/polyfills' first.
 
 import '../../src/polyfills'
 import { Database } from 'bun:sqlite'
