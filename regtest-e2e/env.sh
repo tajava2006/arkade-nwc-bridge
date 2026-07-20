@@ -43,6 +43,31 @@ if [ -z "${REGTEST_DIR:-}" ]; then
   fi
 fi
 
+# arkade-regtest pins its own arkd/fulmine in .env.defaults, and those trail the
+# operator machine badly (arkd v0.9.9-rc.1 vs v0.9.14 at the time of writing —
+# a gap that spans the marker-DAG migration that dropped vtxo.swept). Drilling
+# the exit against a stale arkd proves nothing about the ASP you actually run,
+# so pick the tags up from the operator workspace's docker-compose.yml when this
+# checkout sits inside one. The submodule stays untouched: loadEnv only fills
+# UNSET vars, so exporting here wins. Standalone clones (no workspace) fall
+# through to the submodule defaults, and an explicit ARKD_IMAGE always wins.
+if [ -z "${ARKD_IMAGE:-}" ]; then
+  for cand in \
+    "${BRIDGE_REPO}/../../docker-compose.yml" \
+    "${BRIDGE_REPO}/../../../docker-compose.yml"; do
+    [ -f "${cand}" ] || continue
+    _arkd_tag="$(grep -oE 'image: arkd:v[0-9][0-9A-Za-z.+-]*' "${cand}" | head -1)"; _arkd_tag="${_arkd_tag##*:}"
+    _fulmine_tag="$(grep -oE 'arklabshq/fulmine:v[0-9][0-9A-Za-z.+-]*' "${cand}" | head -1)"; _fulmine_tag="${_fulmine_tag##*:}"
+    if [ -n "${_arkd_tag}" ]; then
+      export ARKD_IMAGE="ghcr.io/arkade-os/arkd:${_arkd_tag}"
+      export ARKD_WALLET_IMAGE="ghcr.io/arkade-os/arkd-wallet:${_arkd_tag}"
+      [ -n "${_fulmine_tag}" ] && export FULMINE_IMAGE="ghcr.io/arklabshq/fulmine:${_fulmine_tag}"
+      echo "▶ pinned to the operator workspace: arkd ${_arkd_tag}, fulmine ${_fulmine_tag:-<default>}" >&2
+    fi
+    break
+  done
+fi
+
 # Regtest service endpoints (arkade-regtest defaults — README "Service URLs").
 ARKD_URL="http://localhost:7070"
 ESPLORA_URL="http://localhost:3000/api"
