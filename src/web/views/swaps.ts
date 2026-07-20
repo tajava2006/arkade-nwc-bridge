@@ -2,6 +2,15 @@ import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import type { AtomicSwapRow } from '../../atomic'
 import { isTerminal } from '../../atomic'
+import {
+  isChainFinalStatus,
+  isChainSuccessStatus,
+  isReverseFinalStatus,
+  isReverseSuccessStatus,
+  isSubmarineFinalStatus,
+  isSubmarineSuccessStatus,
+  type BoltzSwap,
+} from '@arkade-os/boltz-swap'
 
 // Atomic sub-dust swap monitor (ATOMIC_SUBDUST_PLAN.md #13). Swaps are
 // initiated over NWC/CLINK, not here — this page is for watching in-flight
@@ -73,8 +82,63 @@ function stateBadge(s: AtomicSwapRow): RawHtml {
   return html`<span style="color: ${color}; font-weight: ${terminal ? 'normal' : '600'}">${s.state}</span>`
 }
 
+// Regular dust+ LN swaps (reverse = receive, submarine = send) go through
+// @arkade-os/boltz-swap's own SwapManager, which auto-claims/refunds and
+// persists to boltz_swaps — no bridge-side state machine or manual refund
+// lever, unlike the atomic sub-dust swaps above. 'chain' is part of the SDK's
+// type union but this bridge never creates one; handled defensively so an
+// unexpected row still renders instead of throwing.
+function dustDirection(swap: BoltzSwap): 'send' | 'receive' {
+  return swap.type === 'reverse' ? 'receive' : 'send'
+}
+
+function dustAmount(swap: BoltzSwap): number {
+  if (swap.type === 'reverse') return swap.request.invoiceAmount
+  if (swap.type === 'submarine') return swap.response.expectedAmount ?? 0
+  return swap.amount
+}
+
+/** undefined = still in flight; true/false = terminal success/failure. */
+function dustTerminalGood(swap: BoltzSwap): boolean | undefined {
+  if (swap.type === 'reverse') {
+    return isReverseFinalStatus(swap.status) ? isReverseSuccessStatus(swap.status) : undefined
+  }
+  if (swap.type === 'submarine') {
+    return isSubmarineFinalStatus(swap.status) ? isSubmarineSuccessStatus(swap.status) : undefined
+  }
+  return isChainFinalStatus(swap.status) ? isChainSuccessStatus(swap.status) : undefined
+}
+
+function dustStateBadge(swap: BoltzSwap): RawHtml {
+  const good = dustTerminalGood(swap)
+  const color = good === undefined ? '#b60' : good ? '#080' : '#c00'
+  return html`<span style="color: ${color}; font-weight: ${good === undefined ? '600' : 'normal'}">${swap.status}</span>`
+}
+
+const dustRow = (swap: BoltzSwap) => html`
+  <tr>
+    <td title="${swap.id}">${shortId(swap.id)}</td>
+    <td>${dustDirection(swap)}</td>
+    <td>${dustStateBadge(swap)}</td>
+    <td class="num">${dustAmount(swap).toLocaleString()} sats</td>
+    <td class="muted">${formatDate(swap.createdAt * 1000)}</td>
+  </tr>
+`
+
+function dustTable(swaps: BoltzSwap[]): RawHtml {
+  return swaps.length === 0
+    ? html`<p class="muted">No swaps yet.</p>`
+    : html`<table>
+        <tr>
+          <th>swap</th><th>dir</th><th>status</th><th class="num">amount</th><th>created</th>
+        </tr>
+        ${swaps.map(dustRow)}
+      </table>`
+}
+
 export function swapsView(args: {
   swaps: AtomicSwapRow[]
+  dustSwaps: BoltzSwap[]
   nowSec: number
   notice?: { ok: boolean; text: string }
 }): RawHtml {
@@ -114,19 +178,28 @@ export function swapsView(args: {
         </table>`
 
   const body = html`
-    <h1>Atomic swaps</h1>
     ${args.notice
       ? html`<p style="color: ${args.notice.ok ? '#080' : '#c00'}">${args.notice.text}</p>`
       : html``}
+
+    <h2>Sub-dust swaps <span class="muted">(custom, beta)</span></h2>
     <p class="muted">
-      Sub-dust Lightning swaps ride a shared 4-leaf vtxo. In-flight <em>send</em> funding is
-      mirrored into the exit vault (visible on the Exit tab) until the swap resolves; if boltz
-      never pays, the full funding is reclaimable here once T passes.
+      Sub-dust Lightning swaps ride a shared 4-leaf vtxo — a custom, beta protocol built for this
+      bridge, not a stock Ark/Boltz feature. In-flight <em>send</em> funding is mirrored into the
+      exit vault (visible on the Exit tab) until the swap resolves; if boltz never pays, the full
+      funding is reclaimable here once T passes.
     </p>
-    <h2>In flight (${inflight.length})</h2>
+    <h3>In flight (${inflight.length})</h3>
     ${table(inflight, 'No swaps in flight.')}
-    <h2>Recent</h2>
+    <h3>Recent</h3>
     ${table(done, 'No completed swaps yet.')}
+
+    <h2>Dust+ swaps</h2>
+    <p class="muted">
+      Regular Lightning swaps (≥ dust) — stock Ark/Boltz reverse &amp; submarine swaps, auto-claimed
+      and auto-refunded by the SDK. Read-only here; no manual refund lever needed.
+    </p>
+    ${dustTable(args.dustSwaps)}
   `
-  return layout({ title: 'Atomic swaps', current: 'swaps', body })
+  return layout({ title: 'Swaps', current: 'swaps', body })
 }

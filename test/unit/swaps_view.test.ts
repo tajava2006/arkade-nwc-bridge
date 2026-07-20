@@ -27,7 +27,7 @@ describe('swapsView', () => {
     const eligible = swap({ id: 'refundable', state: 'refund_wait', fundingOutpoint: 'f'.repeat(64) + ':0' })
     const terminal = swap({ id: 'done', state: 'claimed', fundingOutpoint: 'f'.repeat(64) + ':0' })
     const receive = swap({ id: 'rcv', direction: SwapDirection.Receive, state: 'funded', fundingOutpoint: 'f'.repeat(64) + ':0' })
-    const html = swapsView({ swaps: [eligible, terminal, receive], nowSec }).value
+    const html = swapsView({ swaps: [eligible, terminal, receive], dustSwaps: [], nowSec }).value
     // exactly one refund form — the eligible send
     expect(html.split('/swaps/refund').length - 1).toBe(1)
     expect(html).toContain('refundable')
@@ -40,6 +40,7 @@ describe('swapsView', () => {
     const nowSec = 1752603600 + 600 // 10m past T, well inside the ~1h lag
     const html = swapsView({
       swaps: [swap({ state: 'refund_wait', fundingOutpoint: 'f'.repeat(64) + ':0' })],
+      dustSwaps: [],
       nowSec,
     }).value
     expect(html).not.toContain('/swaps/refund')
@@ -49,6 +50,7 @@ describe('swapsView', () => {
     const nowSec = 1752603600 - 90 // before T
     const html = swapsView({
       swaps: [swap({ fundingOutpoint: 'f'.repeat(64) + ':0' })],
+      dustSwaps: [],
       nowSec,
     }).value
     expect(html).not.toContain('/swaps/refund')
@@ -60,6 +62,7 @@ describe('swapsView', () => {
     // as a "…h ago" countdown.
     const html = swapsView({
       swaps: [swap({ direction: SwapDirection.Receive, state: 'settled', refundLocktime: 0 })],
+      dustSwaps: [],
       nowSec: 1752603600,
     }).value
     expect(html).toContain('— (boltz)')
@@ -67,7 +70,7 @@ describe('swapsView', () => {
   })
 
   test('notice renders', () => {
-    const html = swapsView({ swaps: [], nowSec: 0, notice: { ok: true, text: 'refunded 351 sats' } }).value
+    const html = swapsView({ swaps: [], dustSwaps: [], nowSec: 0, notice: { ok: true, text: 'refunded 351 sats' } }).value
     expect(html).toContain('refunded 351 sats')
   })
 })

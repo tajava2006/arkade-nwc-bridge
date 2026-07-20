@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet, WalletBalance, RestArkProvider } from '@arkade-os/sdk'
 import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { SqliteSwapRepository } from '../boltz_repository'
 
 import type { Config } from '../config'
 import { sendLightning } from '../ln_send'
@@ -793,7 +794,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/swaps': {
-        GET: (req) => {
+        GET: async (req) => {
           const r = requireReady()
           if (!r.ok) return r.response
           const url = new URL(req.url)
@@ -801,6 +802,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             swapsView({
               swaps: new SqliteAtomicSwapRepository(db).list(),
+              dustSwaps: await new SqliteSwapRepository(db).getAllSwaps({ orderDirection: 'desc' }),
               nowSec: Math.floor(Date.now() / 1000),
               notice: msg ? { ok: url.searchParams.get('ok') === '1', text: msg } : undefined,
             }),
