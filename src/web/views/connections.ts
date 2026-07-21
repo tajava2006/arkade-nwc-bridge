@@ -1,5 +1,6 @@
 import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
+import { localTime } from './ui'
 import type { Connection } from '../../nostr/connections'
 import {
   renderOutboxPanel,
@@ -22,8 +23,8 @@ function formatSpent(c: Connection): string {
   return `${Math.floor(c.spentMsat / 1000).toLocaleString()} sats`
 }
 
-function formatDate(unix: number): string {
-  return new Date(unix * 1000).toLocaleString()
+function formatDate(unix: number): RawHtml {
+  return localTime(unix * 1000)
 }
 
 export function connectionsListView(args: {

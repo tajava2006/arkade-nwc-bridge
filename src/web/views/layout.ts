@@ -62,7 +62,19 @@ const STYLES = `
   .dag-edges line { stroke: #ccc; stroke-width: 1.5; }
   .dag-row { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 0.8em; margin-bottom: 1.4em; }
   .dag-row:last-child { margin-bottom: 0; }
-  .dag-node { background: #fbfbfb; border: 1px solid #ddd; border-radius: 6px; padding: 0.3em 0.7em; font-size: 0.85em; white-space: nowrap; text-align: center; }
+  /* Exit detail shows full txids (no truncation — the graph is already tall, and
+     full ids are worth the height). Let the id wrap within the card instead of
+     forcing a nowrap card wider than the page; labels stay on their own lines. */
+  .dag-node { background: #fbfbfb; border: 1px solid #ddd; border-radius: 6px; padding: 0.3em 0.7em; font-size: 0.85em; text-align: center; max-width: 100%; }
+  .dag-node code, li[data-step] code { word-break: break-all; }
+  /* Click-to-copy chip: a truncated id whose full value copies on click. */
+  .copy { cursor: pointer; border-bottom: 1px dotted #bbb; }
+  .copy:hover { background: #eef4ff; }
+  .copy-icon { border: none; background: none; cursor: pointer; padding: 0 0.3em; font-size: 0.9em; color: #06c; line-height: 1; vertical-align: baseline; }
+  .copy-icon:hover { color: #003a8c; }
+  /* Copy confirmation toast — fixed, so it never shifts table layout. */
+  #copy-toast { position: fixed; bottom: 1.5em; left: 50%; transform: translateX(-50%) translateY(2em); background: #222; color: #fff; padding: 0.4em 0.9em; border-radius: 6px; font-size: 0.85em; opacity: 0; pointer-events: none; transition: opacity 0.15s, transform 0.15s; z-index: 50; }
+  #copy-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 `
 
 type Nav = 'dashboard' | 'send' | 'swaps' | 'exit' | 'connections' | 'setup'
@@ -113,6 +125,51 @@ export function layout(args: {
 // behavior, but the request just sits idle).
 const LIVE_SCRIPT = `<script>
 (function () {
+  // --- Click-to-copy + local-time rendering (independent of SSE) ---
+  function toast(msg) {
+    var t = document.getElementById('copy-toast')
+    if (!t) { t = document.createElement('div'); t.id = 'copy-toast'; document.body.appendChild(t) }
+    t.textContent = msg
+    t.classList.add('show')
+    clearTimeout(t._hide)
+    t._hide = setTimeout(function () { t.classList.remove('show') }, 1200)
+  }
+  function copy(text) {
+    // navigator.clipboard needs a secure context; 127.0.0.1 qualifies, but fall
+    // back to execCommand if the bridge is ever reached over a non-secure origin.
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('Copied') }, legacy)
+    } else { legacy() }
+    function legacy() {
+      var ta = document.createElement('textarea')
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'
+      document.body.appendChild(ta); ta.focus(); ta.select()
+      try { document.execCommand('copy'); toast('Copied') } catch (e) { toast('Copy failed') }
+      document.body.removeChild(ta)
+    }
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest && e.target.closest('[data-copy]')
+    if (!t) return
+    e.preventDefault()
+    copy(t.getAttribute('data-copy'))
+  })
+  // Rewrite <time data-ts> from the server's UTC fallback to the viewer's local
+  // timezone. Idempotent (data-localized guard) so re-runs after SSE swaps are
+  // cheap and don't touch already-formatted nodes elsewhere on the page.
+  function localizeTimes(root) {
+    ;(root || document).querySelectorAll('time[data-ts]:not([data-localized])').forEach(function (el) {
+      var ms = Number(el.getAttribute('data-ts'))
+      if (!isFinite(ms)) return
+      var d = new Date(ms)
+      el.textContent = d.toLocaleString()
+      el.title = d.toString()
+      el.setAttribute('data-localized', '1')
+    })
+  }
+  localizeTimes(document)
+
+  // --- SSE live fragments ---
   if (typeof EventSource === 'undefined') return
   var es = new EventSource('/events')
   // Close the stream the instant we navigate away. Every full page load opens
@@ -124,6 +181,7 @@ const LIVE_SCRIPT = `<script>
   function swap(selector, html) {
     document.querySelectorAll(selector).forEach(function (el) {
       el.innerHTML = html
+      localizeTimes(el)
     })
   }
   function on(name, fn) {

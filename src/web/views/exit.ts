@@ -5,6 +5,7 @@ import type { ExitOp } from '../../exit/ops'
 import type { ExitDest } from '../../exit/dest'
 import type { FinalSendInfo } from '../../exit/final_send'
 import { layout } from './layout'
+import { copyIcon } from './ui'
 
 // The /exit tab (EXIT_PLAN #12): one row per mirrored vtxo, execution
 // strictly per-vtxo (§1 — no bulk button, ever). Every number a user needs
@@ -92,7 +93,7 @@ export function renderExitRows(rows: ExitRow[], nowSec: number): RawHtml {
   return html`${rows.map(
     (row) => html`
       <tr data-exit-row="${row.vtxo.txid}:${row.vtxo.vout}">
-        <td><a href="/exit/${row.vtxo.txid}/${row.vtxo.vout}"><code>${short(row.vtxo.txid)}:${row.vtxo.vout}</code></a></td>
+        <td><a href="/exit/${row.vtxo.txid}/${row.vtxo.vout}"><code>${short(row.vtxo.txid)}:${row.vtxo.vout}</code></a>${copyIcon(`${row.vtxo.txid}:${row.vtxo.vout}`)}</td>
         <td class="num">${fmtSats(row.vtxo.valueSat)}</td>
         <td>${expiryCountdown(row.vtxo.expiresAt, nowSec)}</td>
         <td>${estimateCell(row.estimate)}</td>

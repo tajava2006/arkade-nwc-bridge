@@ -1,5 +1,6 @@
 import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
+import { copyable, localTime } from './ui'
 import type { AtomicSwapRow } from '../../atomic'
 import { isTerminal } from '../../atomic'
 import {
@@ -22,8 +23,11 @@ function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 12)}…` : id
 }
 
-function formatDate(unixMs: number): string {
-  return new Date(unixMs).toLocaleString()
+// swap ids are boltz-issued (not txids), so they're never chain-lookup targets;
+// still click-to-copy for parity, since operators do paste them into logs.
+function swapIdCell(id: string): RawHtml {
+  const short = shortId(id)
+  return short === id ? html`<code>${id}</code>` : copyable(id, short)
 }
 
 // arkd enforces the CLTV against BLOCKTIME (MTP), which lags wall clocks by
@@ -117,11 +121,11 @@ function dustStateBadge(swap: BoltzSwap): RawHtml {
 
 const dustRow = (swap: BoltzSwap) => html`
   <tr>
-    <td title="${swap.id}">${shortId(swap.id)}</td>
+    <td>${swapIdCell(swap.id)}</td>
     <td>${dustDirection(swap)}</td>
     <td>${dustStateBadge(swap)}</td>
     <td class="num">${dustAmount(swap).toLocaleString()} sats</td>
-    <td class="muted">${formatDate(swap.createdAt * 1000)}</td>
+    <td class="muted">${localTime(swap.createdAt * 1000)}</td>
   </tr>
 `
 
@@ -148,13 +152,13 @@ export function swapsView(args: {
 
   const row = (s: AtomicSwapRow) => html`
     <tr>
-      <td title="${s.id}">${shortId(s.id)}</td>
+      <td>${swapIdCell(s.id)}</td>
       <td>${s.direction}</td>
       <td>${stateBadge(s)}</td>
       <td class="num">${s.amount.toLocaleString()} sats</td>
       <td>${refundTCell(s, nowSec)}</td>
-      <td class="muted">${s.fundingOutpoint ? html`<code>${s.fundingOutpoint.slice(0, 12)}…</code>` : '—'}</td>
-      <td class="muted">${formatDate(s.createdAt)}</td>
+      <td class="muted">${s.fundingOutpoint ? copyable(s.fundingOutpoint, `${s.fundingOutpoint.slice(0, 12)}…`) : '—'}</td>
+      <td class="muted">${localTime(s.createdAt)}</td>
       <td>
         ${refundable(s, nowSec)
           ? html`<form method="post" action="/swaps/refund" style="max-width:none">

@@ -5,6 +5,7 @@ import type { ExitEstimate } from '../../exit/estimate'
 import type { StepBoostInfo, SweepBoostInfo } from '../../exit/boost'
 import { qrSvg } from '../qr'
 import { layout } from './layout'
+import { localTime } from './ui'
 
 export interface FundingStatus {
   address: string
@@ -131,10 +132,6 @@ function icon(status: string): string {
   }
 }
 
-function short(txid: string): string {
-  return `${txid.slice(0, 10)}…${txid.slice(-8)}`
-}
-
 const TYPE_LABEL: Record<string, string> = {
   [ChainTxType.COMMITMENT]: 'commitment (onchain root)',
   [ChainTxType.TREE]: 'tree',
@@ -210,7 +207,7 @@ export function stepLine(step: ExitStep, boost?: StepBoostView | null): RawHtml 
       : html``
     return html`<div class="dag-node" data-step="${step.txid}">
       ${icon(step.status)} <strong>${TYPE_LABEL[step.txType] ?? 'tx'}</strong>
-      <code>${short(step.txid)}</code>${vsize}<br />
+      <code>${step.txid}</code>${vsize}<br />
       <span class="muted">${state}</span>${feeCtx}${boostUi}
     </div>`
   }
@@ -230,7 +227,7 @@ export function stepLine(step: ExitStep, boost?: StepBoostView | null): RawHtml 
   if (step.status === 'done') {
     return html`<li data-step="sweep">
       ${icon(step.status)} <strong>swept</strong> → <code>${step.destAddress ?? '—'}</code>
-      ${step.sweepTxid ? html`<br /><span class="muted">tx <code>${short(step.sweepTxid)}</code></span>` : html``}
+      ${step.sweepTxid ? html`<br /><span class="muted">tx <code>${step.sweepTxid}</code></span>` : html``}
     </li>`
   }
   return html`<li data-step="sweep">
@@ -254,7 +251,7 @@ export function sweepStatusLine(
   if (info.confirmed) {
     return html`<li data-step="sweep">
       ✅ <strong>swept</strong> → <code>${step.destAddress ?? '—'}</code>
-      <br /><span class="muted">tx <code>${short(info.sweepTxid)}</code> · confirmed</span>
+      <br /><span class="muted">tx <code>${info.sweepTxid}</code> · confirmed</span>
     </li>`
   }
   const boostUi = info.boostable
@@ -266,7 +263,7 @@ export function sweepStatusLine(
     : html`<br /><span class="ok">fee is competitive — should confirm soon</span>`
   return html`<li data-step="sweep">
     🕐 <strong>sweep</strong> → <code>${step.destAddress ?? '—'}</code>
-    <br /><span class="muted">tx <code>${short(info.sweepTxid)}</code> · in mempool — waiting for a block</span>
+    <br /><span class="muted">tx <code>${info.sweepTxid}</code> · in mempool — waiting for a block</span>
     ${feeContextLine({
       rate: info.rateSatVb,
       targetRate: info.targetRateSatVb,
@@ -458,7 +455,7 @@ export function exitDetailView(args: {
                     (no login before the deadline), even if the server could have been
                     more forgiving. Nothing was deleted without telling you — that's
                     this notice. When you've made peace with it, clean up:`
-                : html`⚠ QUARANTINED since ${new Date(args.quarantine.at * 1000).toISOString().slice(0, 16).replace('T', ' ')}
+                : html`⚠ QUARANTINED since ${localTime(args.quarantine.at * 1000)}
                     — ${args.quarantine.reason ?? 'the ASP dropped this vtxo without evidence'}.
                     The proofs below stay usable until expiry; exiting is the recourse if the
                     server is cheating. If YOU know why it's gone (e.g. spent from another

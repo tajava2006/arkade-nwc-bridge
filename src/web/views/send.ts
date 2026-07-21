@@ -2,6 +2,7 @@ import type { ArkInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
 import type { FeesResponse } from '@arkade-os/boltz-swap'
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
+import { copyable, localTime } from './ui'
 import type { OffboardRow } from '../../offboards'
 import {
   classifyVtxos,
@@ -37,7 +38,7 @@ function vtxoRows(vtxos: ExtendedVirtualCoin[], tag: RawHtml): RawHtml {
         <td class="num">${fmtSats(v.value)}</td>
         <td>${tag}</td>
         <td>${expiryHint(v)}</td>
-        <td class="muted" title="${v.txid}:${v.vout}">${v.txid.slice(0, 8)}…:${v.vout}</td>
+        <td class="muted">${copyable(`${v.txid}:${v.vout}`, `${v.txid.slice(0, 8)}…:${v.vout}`)}</td>
       </tr>`,
   )}`
 }
@@ -91,12 +92,12 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
       ${rows.map(
         (r) => html`
           <tr>
-            <td class="muted">${new Date(r.created_at * 1000).toLocaleString()}</td>
+            <td class="muted">${localTime(r.created_at * 1000)}</td>
             <td class="num">${fmtSats(r.amount_sat)}${r.is_max ? html` <span class="muted">(max)</span>` : ''}</td>
             <td><span class="pill ${stateClass(r.state)}">${r.state}</span></td>
-            <td class="muted" title="${r.address}">${r.address.slice(0, 12)}…</td>
+            <td class="muted">${copyable(r.address, `${r.address.slice(0, 12)}…`)}</td>
             <td class="muted">
-              ${r.ark_txid ? html`<span title="${r.ark_txid}">${r.ark_txid.slice(0, 10)}…</span>` : ''}
+              ${r.ark_txid ? copyable(r.ark_txid, `${r.ark_txid.slice(0, 10)}…`) : ''}
               ${r.error ? html`<span title="${r.error}">${r.error.slice(0, 40)}</span>` : ''}
             </td>
           </tr>`,

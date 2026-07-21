@@ -1,6 +1,7 @@
 import { nextRenewalSec } from '../../lib/budget'
 import { html, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
+import { copyable, localTime } from './ui'
 import type { Connection } from '../../nostr/connections'
 import type { TransactionRow } from '../../lib/transaction'
 import { renderRelayDetail, type RelayStatus } from '../../lib/relay_status'
@@ -10,8 +11,9 @@ function statePill(state: string): RawHtml {
   return html`<span class="pill ${cls}">${state}</span>`
 }
 
-function formatDate(unix: number): string {
-  return new Date(unix * 1000).toLocaleString()
+// stored as unix seconds; localTime wants ms and renders in the viewer's tz.
+function formatDate(unix: number): RawHtml {
+  return localTime(unix * 1000)
 }
 
 function formatBudget(c: Connection, spentNowMsat: number): string {
@@ -95,7 +97,7 @@ export function connectionDetailView(args: {
                   <td class="num">${Math.floor(r.amount_msat / 1000).toLocaleString()} sats</td>
                   <td class="num">${r.fees_paid_msat == null ? '-' : Math.floor(r.fees_paid_msat / 1000).toLocaleString() + ' sats'}</td>
                   <td>${statePill(r.state)}</td>
-                  <td>${r.description ?? (r.error ? html`<span class="muted">${r.error}</span>` : html`<span class="muted">${r.payment_hash.slice(0, 12)}…</span>`)}</td>
+                  <td>${r.description ?? (r.error ? html`<span class="muted">${r.error}</span>` : html`<span class="muted">${copyable(r.payment_hash, `${r.payment_hash.slice(0, 12)}…`)}</span>`)}</td>
                 </tr>
               `)}
             </table>
