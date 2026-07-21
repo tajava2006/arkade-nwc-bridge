@@ -74,19 +74,21 @@ export type IssuedInvoice = {
  * Mint a BOLT11 that lands on Ark — the single LN-receive entry point shared
  * by every caller (CLINK offers, NWC make_invoice). For amounts >= dust it's a
  * Boltz reverse swap: on payment the SwapManager (boltz.ts) auto-claims the
- * VHTLC into the Ark wallet. For sub-dust amounts a reverse swap can't settle,
- * so it routes through boltz's non-atomic plain-invoice path: boltz collects
- * the invoice itself and, on settlement, plain-sends the amount to the wallet
- * address — 1:1, no swap object, no swap fee.
+ * VHTLC into the Ark wallet. For sub-dust amounts a reverse swap can't settle
+ * (the VHTLC lockup vtxo would be sub-dust -> arkd VTXO_RECOVERABLE -> the
+ * claim strands), so it routes through the atomic sub-dust path
+ * (atomic_receive.ts): boltz funds a shared 4-leaf vtxo against a hold
+ * invoice, we verify its pre-signed claim before revealing anything, then
+ * claim with our own preimage — 1:1, no swap fee on this leg.
  *
- * The plain path drops the reverse swap's atomicity: the external payer
- * settles a real invoice with no on-chain guarantee, trusting Boltz to
- * deliver the vtxo afterward. The counterparty risk is the payer's; below
- * dust there is no atomic alternative anyway, and the amounts are tiny.
+ * Atomicity is preserved, not traded away: either the preimage is revealed
+ * and both legs settle, or T passes and boltz refunds the payer. There is no
+ * state where the payer is debited and the vtxo never arrives. See
+ * ATOMIC_SUBDUST_PLAN.md §3 for the split construction.
  *
- * Sub-dust limitation: boltz's receive route takes only
- * amount/address/descriptionHash, so a plaintext `description` is dropped on
- * that branch (same trade-off CLINK has always made).
+ * Sub-dust limitation: the atomic receive route takes only
+ * amount/paymentHash/userPubkey/descriptionHash, so a plaintext `description`
+ * is dropped on that branch (same trade-off CLINK has always made).
  *
  * Any new LN receive entry point MUST go through here, not raw
  * swaps.createLightningInvoice — that mints a reverse swap unconditionally,

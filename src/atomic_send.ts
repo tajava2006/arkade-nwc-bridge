@@ -34,7 +34,7 @@ import { gcOrphanProofs, removeVtxo } from './exit/vault'
 // never pays, the bridge reclaims the full funding after T (refund executor,
 // wired at boot). Trustless for the user: worst case is unilateral exit.
 //
-// Replaces the non-atomic plain-send branch in ln_send.ts. Everything the bridge
+// The sub-dust branch of ln_send.ts, and the only one. Everything the bridge
 // needs to verify is local — boltz can't take more than the pre-signed `a`.
 
 export interface AtomicSendDeps {

@@ -286,7 +286,7 @@ describe.skipIf(!SHOULD_RUN)('live NWC e2e', () => {
   )
 
   // make_invoice tests are kept last: the invoices are never paid, so the
-  // only side effect is an expiring reverse swap / plain invoice — free.
+  // only side effect is an expiring reverse swap / hold invoice — free.
   test(
     'make_invoice ≥dust creates a real reverse swap (unpaid → expires free)',
     async () => {

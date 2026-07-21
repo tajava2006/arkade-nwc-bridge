@@ -63,9 +63,9 @@ export async function handlePayInvoice(
     .run(deps.conn.id, deps.eventId, invoice, decoded.paymentHash, invoiceMsat, createdAt)
 
   // sendLightning is the shared LN-send path (src/ln_send.ts): a Boltz
-  // submarine swap for amounts >= dust, or boltz's non-atomic plain-send for
-  // sub-dust (where a submarine swap can't settle). Can take minutes — bounded
-  // by Boltz's LN payment timeout, not by our code.
+  // submarine swap for amounts >= dust, the atomic sub-dust send below it
+  // (where a submarine swap can't settle). Both are atomic. Can take minutes —
+  // bounded by Boltz's LN payment timeout, not by our code.
   let result
   try {
     result = await sendLightning(deps, invoice)

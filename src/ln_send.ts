@@ -77,10 +77,12 @@ function fundingAmount(requiredSat: number, spendableSat: number): number {
  * point shared by every caller (NWC pay_invoice, dashboard /send LN rail). For
  * amounts >= dust it's a Boltz submarine swap. For sub-dust amounts the
  * submarine swap can't settle (vHTLC lockup is sub-dust -> arkd
- * VTXO_RECOVERABLE -> claim strands), so it routes through boltz's non-atomic
- * plain-send path: move a plain vtxo of (invoice + fee) to boltz's ARK address,
- * then ask boltz to pay. No vHTLC, so no swept-vtxo garbage and the send shows
- * up as a normal vtxo. Boltz dedups on the arkTxid, so a replay can't double-pay.
+ * VTXO_RECOVERABLE -> claim strands), so it routes through the atomic sub-dust
+ * path (atomic_send.ts): fund a shared 4-leaf vtxo whole-input, hand boltz a
+ * pre-signed claim, and let it pay the invoice only against that. No vHTLC, so
+ * no swept-vtxo garbage, and the funder's remainder comes back as one regular
+ * vtxo. Atomicity holds either way — boltz pays and claims, or T passes and we
+ * refund ourselves; it cannot take the funding without paying.
  *
  * Both paths fund all-in when the whole balance is within DRAIN_SLACK_SATS of
  * the requirement, so a drain invoice (send.ts lnDrainInvoiceSat) empties the
@@ -88,8 +90,8 @@ function fundingAmount(requiredSat: number, spendableSat: number): number {
  *
  * Any new LN send entry point MUST go through here, not raw
  * swaps.sendLightningPayment — that helper funds exactly expectedAmount
- * (re-stranding drain residue) and silently regresses sub-dust to the old
- * graceful-abandon path.
+ * (re-stranding drain residue) and pushes sub-dust amounts into a submarine
+ * swap that cannot settle, bypassing the atomic path entirely.
  */
 export async function sendLightning(deps: LnSendDeps, invoice: string): Promise<LnSendResult> {
   let invoiceSats = 0

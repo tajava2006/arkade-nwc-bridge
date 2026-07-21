@@ -254,8 +254,9 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
   // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: a Boltz
   // reverse swap ≥ dust (auto-claimed by the SwapManager; tracked in
   // boltz_swaps, so the ack reconciler can look it up — no transactions row),
-  // boltz's non-atomic plain-invoice path below it. Which branch we got
-  // decides where the ack bookkeeping lands.
+  // the atomic sub-dust receive below it (no swap object — driven by
+  // reconcileAtomicReceives). Which branch we got decides where the ack
+  // bookkeeping lands.
   let issued: IssuedInvoice
   try {
     issued = await issueInvoice(
@@ -408,9 +409,10 @@ const SUBDUST_ACK_TTL_SECONDS = 24 * 60 * 60
  *  - ≥dust (clink_offer_receipts): the swap is in the SDK's boltz_swaps mirror
  *    (re-synced from boltz on boot). Terminal-success → sendOfferReceipt (which
  *    publishes + deletes the row); terminal-failure → just drop the row.
- *  - sub-dust (clink_subdust_receipts): no swap, so ask boltz
- *    (/v2/subdust/receive/status). Settled → publish receipt (+ preimage) and
- *    delete; past TTL → drop.
+ *  - sub-dust (clink_subdust_receipts): no swap object, so read the local
+ *    atomic_swaps row (reconcileAtomicReceives drives it to 'settled' and we
+ *    already hold the preimage — boltz is never asked). Settled → publish
+ *    receipt (+ preimage) and delete; past TTL → drop.
  *
  * Best-effort and idempotent: rows that the live path already acked are gone, so
  * they're skipped; one row failing doesn't abort the rest.

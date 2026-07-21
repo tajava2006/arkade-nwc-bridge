@@ -176,8 +176,9 @@ const MIGRATIONS: readonly Migration[] = [
 
       -- Same ack bookkeeping for sub-dust receives, which create no Boltz
       -- swap object (no swap_id) — keyed on the invoice payment hash instead.
-      -- The ack reconciler polls /v2/subdust/receive/status and publishes on
-      -- settle; a TTL pass drops never-paid rows.
+      -- The ack reconciler reads the local atomic_swaps row (settled by
+      -- reconcileAtomicReceives) and publishes on settle; a TTL pass drops
+      -- never-paid rows.
       CREATE TABLE clink_subdust_receipts (
         payment_hash TEXT PRIMARY KEY,
         payer_pubkey TEXT    NOT NULL,

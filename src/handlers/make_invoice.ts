@@ -42,11 +42,11 @@ export async function handleMakeInvoice(
   }
 
   // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: a Boltz
-  // reverse swap ≥ dust, boltz's non-atomic plain-invoice path below it. We
-  // return the invoice immediately; the row stays pending until settlement
-  // flips it — via onSwapCompleted → syncSwapToDb (boltz.ts) for the swap
-  // branch, via reconcileSubdustReceives (no swap object → no settlement
-  // event) for the sub-dust branch.
+  // reverse swap ≥ dust, the atomic sub-dust receive below it. We return the
+  // invoice immediately; the row stays pending until settlement flips it —
+  // via onSwapCompleted → syncSwapToDb (boltz.ts) for the swap branch, via
+  // reconcileAtomicReceives (no swap object → no settlement event) for the
+  // sub-dust branch.
   let issued: IssuedInvoice
   try {
     issued = await issueInvoice(deps, { amountSats, description, descriptionHash })

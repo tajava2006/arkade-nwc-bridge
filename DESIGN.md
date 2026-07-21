@@ -243,14 +243,15 @@ same reason.
 1. msat → sat; reject non-multiple-of-1000. Optional `description_hash`
    (64-hex) passes through to the invoice — a client serving its own
    LNURL/zap flow can commit its descriptionHash. A plaintext `description`
-   is dropped on the sub-dust branch (boltz's plain route takes only
-   amount/address/descriptionHash — same trade-off CLINK makes).
+   is dropped on the sub-dust branch (the atomic receive route takes only
+   amount/paymentHash/userPubkey/descriptionHash — same trade-off CLINK makes).
 2. `issueInvoice` — ≥330 sats: `swaps.createLightningInvoice` reverse swap
    (BOLT11 + payment_hash + expiry; `result.amount` is the post-fee on-Ark
-   amount). <330 sats: POST `/v2/subdust/receive` mints a plain invoice
-   boltz collects itself; on settlement boltz plain-sends 1:1 to the wallet
-   address (non-atomic — the payer trusts boltz; below dust there is no
-   atomic alternative).
+   amount). <330 sats: POST `/v2/subdust/atomic/receive/init` against our
+   payment hash mints a **hold** invoice; on payment boltz funds a shared
+   4-leaf vtxo and pre-signs the claim, we verify it and claim `a` out of that
+   output as a split, revealing the preimage boltz needs to settle. Atomic in
+   both directions — see [ATOMIC_SUBDUST_PLAN.md](ATOMIC_SUBDUST_PLAN.md).
 3. Write a pending `transactions` row with `amount_msat` = the BOLT11
    nominal (exactly what the client asked for — the invoice is never
    inflated), `fees_paid_msat` = the swap provider's cut that will come
@@ -261,11 +262,12 @@ same reason.
    - swap branch: Boltz drops a VHTLC once the LN side is paid; the
      `SwapManager` auto-claims it; `onSwapCompleted` → `syncSwapToDb` flips
      the row (boot backstop: `reconcilePendingIncoming`).
-   - sub-dust branch: no swap object → no settlement event, ever. The vtxo
-     just arrives in the wallet. `reconcileSubdustReceives`
-     (`src/ln_receive.ts`, same 30s cadence as the CLINK ack reconciler)
-     polls `/v2/subdust/receive/status`: settled → row `settled`
-     (+preimage); unsettled past the BOLT11 expiry (+15 min HTLC grace) →
+   - sub-dust branch: no swap object → no settlement event, ever.
+     `reconcileAtomicReceives` (`src/ln_receive.ts`, same 30s cadence as the
+     CLINK ack reconciler) polls `/v2/subdust/atomic/receive/status` and
+     drives the swap forward: once boltz is funded and pre-signed, verify →
+     claim → settle, then row `settled` (+preimage, which was ours all
+     along); unsettled past the BOLT11 expiry (+15 min HTLC grace) →
      `expired`. Clients observe it through `lookup_invoice` /
      `list_transactions` polling (we advertise no notifications).
 
@@ -279,8 +281,10 @@ same reason.
 3. Insert pending `transactions` row with `amount_msat = invoiceMsat`
    — the BOLT11 nominal, final from the start.
 4. `sendLightning` (`src/ln_send.ts`, shared with the dashboard LN
-   rail): a submarine swap ≥ dust, boltz's plain-send path below it.
-   Auto-refunds on failure via `SwapManager`.
+   rail): a submarine swap ≥ dust, the atomic sub-dust send below it
+   (fund a shared 4-leaf vtxo whole-input, hand boltz a pre-signed claim
+   it can only take by paying). Auto-refunds on failure via `SwapManager`
+   above dust, via the T-refund executor below it.
 5. On success: `UPDATE` `fees_paid_msat = paidMsat − invoiceMsat`
    (everything we paid beyond the nominal: swap fee + any drain
    residue); `amount_msat` stays the nominal. Bump

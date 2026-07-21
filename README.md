@@ -119,6 +119,32 @@ missing fields fall through to the static defaults in
 Outside of docker the file simply isn't there and the bridge stays
 zero-config.
 
+### Pointing at a different Ark server (advanced)
+
+The defaults point at the author's Ark server and Boltz instance —
+that's the whole reason `bun install && bun run dev` just works with no
+sample env to copy and edit. The same `config.json` override retargets
+them, but three things are worth knowing first:
+
+- **`arkServerUrl` and `boltzApiUrl` are a set, not two knobs.** A
+  Boltz instance keeps its Ark-side liquidity in one wallet on one Ark
+  server, so it can only swap for that server. Pointing the bridge at
+  your own ASP while leaving Boltz at someone else's leaves no working
+  Lightning path at all. Change both to a pair that belong together,
+  or change neither.
+- **Only on a fresh start.** VTXOs exist on one Ark server and mean
+  nothing on another, and the unilateral-exit proof vault mirrors the
+  tree of the server it synced from — stale proofs don't merely go
+  useless, they describe an exit that isn't there. Drain the wallet
+  first (cooperative offboard, or exit), then wipe `data/`. There is no
+  in-place migration, and the bridge won't stop you from trying.
+- **Sub-dust Lightning won't work, but nothing breaks.** Those swaps
+  need endpoints that exist only in the operator's Boltz fork; against
+  stock Boltz they fail per payment and leave everything else alone.
+  Dust+ Lightning, on-chain, and unilateral exit behave normally —
+  exit in particular is pure SDK + Esplora and works against any Ark
+  server, which is the part most worth having on your own terms.
+
 ## Connecting a nostr client
 
 1. Open <http://127.0.0.1:4282/connections/new>, give the connection
@@ -173,11 +199,25 @@ connection.
 
 ### Sub-dust amounts
 
-Lightning works **both directions** below the ~330-sat dust limit
-(zap-sized sends and receives). Sub-dust swaps **give up atomicity** —
-there's no vHTLC to hang the swap on at those amounts — an acceptable
-trade for tiny sums. Mechanics in [`SEND_DESIGN.md`](SEND_DESIGN.md) and
-[`RECEIVE_DESIGN.md`](RECEIVE_DESIGN.md).
+Lightning works **both directions** below the 330-sat dust limit
+(zap-sized sends and receives), and it is **atomic** — you don't trust
+the swap provider to hold up its end.
+
+A sub-dust amount can't be its own VTXO: it would be below the on-chain
+dust threshold, so it can't be spent into a mempool, which means no
+vHTLC to hang an ordinary swap on. Instead both sides share a single
+regular (≥ dust) VTXO carrying four spend leaves, and pre-sign the claim
+pair up front. The payment is a *split* of that shared output rather
+than a transfer of the whole thing — the claimer takes its amount, the
+funder's remainder comes back as one regular VTXO. Either the preimage
+is revealed and both legs settle, or the refund timelock passes and the
+funder recovers everything; there is no state where one side is paid and
+the other isn't. Sends carry a 0.5% fee, folded into the claim output.
+
+Full mechanics, including the failure analysis, in
+[`ATOMIC_SUBDUST_PLAN.md`](ATOMIC_SUBDUST_PLAN.md) (§10 is current).
+[`SEND_DESIGN.md`](SEND_DESIGN.md) and
+[`RECEIVE_DESIGN.md`](RECEIVE_DESIGN.md) describe the dust+ swap rails.
 
 ### Unilateral exit (works with the Ark server dead)
 

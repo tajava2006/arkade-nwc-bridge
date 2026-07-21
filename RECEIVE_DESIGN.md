@@ -86,31 +86,38 @@ request)` so the kind-9735 receipt verifies (NIP-57 / nips/57.md). The chain:
   to the relays in the 9734 `relays` tag — distinct from our nip44-encrypted
   CLINK receipt on the noffer relay).
 
-### Sub-dust receive (< 330 sats) — non-atomic plain-invoice path
+### Sub-dust receive (< 330 sats) — atomic shared-vtxo path
 
 A Boltz reverse swap can't settle below P2TR dust (330 sats): the vHTLC lockup
 vtxo is sub-dust, arkd marks it `VTXO_RECOVERABLE` and refuses to let the claim
 spend it, so the swap strands. This is the receive-side mirror of the send-side
-sub-dust problem (operator-workspace `SUBDUST_LN_PATCH.md`).
-`createLightningInvoice` would reject or strand it.
+sub-dust problem. `createLightningInvoice` would reject or strand it.
 
-So `handleOfferRequest` branches on `amount < 330` and instead calls an endpoint
-we added to Boltz (operator workspace `patches/boltz-subdust-receive.patch`,
-`POST /v2/subdust/receive {amount, address}`):
+So `handleOfferRequest` branches on `amount < 330` and calls the atomic sub-dust
+route on Boltz (`POST /v2/subdust/atomic/receive/init {amount, paymentHash,
+userPubkey, descriptionHash?}`), driven from
+[`atomic_receive.ts`](src/atomic_receive.ts):
 
-1. Boltz issues a **plain** invoice it collects (no hold).
+1. We generate the preimage and send only its hash; Boltz issues a **hold**
+   invoice against it.
 2. We reply with that bolt11, same as the normal path.
-3. On settlement Boltz sends a plain vtxo of the same amount to our wallet
-   address — 1:1, **no swap fee** (the payer already paid routing; off-chain
-   transfers are free).
+3. On payment Boltz funds a **shared 4-leaf vtxo** (regular, ≥ dust) and
+   pre-signs the claim. We verify that pre-signature locally before revealing
+   anything.
+4. We claim — which reveals the preimage — taking `a` out of the shared output
+   as a *split*, Boltz's remainder returning to it as one regular vtxo. Boltz
+   settles the hold invoice with the revealed preimage (its own harvester does
+   this even if we never call `/receive/settle`). 1:1, **no swap fee** on this
+   leg.
 
-This drops the reverse swap's atomicity. The trust sits on the **paying** side:
-the external third party settles a real invoice with no on-chain guarantee or
-refund, and only then does Boltz deliver the vtxo. The payer carries the
-counterparty risk — this does **not** depend on the ASP and Boltz being one
-operator (and the bridge is neither: it's the standalone user app). Below dust
-there's no atomic alternative anyway, and the amounts are tiny — this is what
-makes "21-sat zap receive" work where every other wallet refuses.
+Atomicity is preserved. Either the preimage is revealed — in which case Boltz
+can always settle, because the preimage is on-chain in our claim witness — or
+the refund locktime T passes with no claim and Boltz cancels the hold, so the
+payer is never debited. There is no state where the payer pays and the vtxo
+doesn't arrive, and none where we hold `a` while the payer gets refunded. The
+guarantee does **not** rest on the ASP and Boltz being one operator (and the
+bridge is neither: it's the standalone user app). This is what makes "21-sat zap
+receive" work where every other wallet refuses.
 
 The received vtxo lands sub-dust (the `recoverable` balance bucket): not
 spendable on its own until a settlement round folds it into a ≥dust vtxo (or a
@@ -119,13 +126,15 @@ cooperative exit), like any sub-dust receive. Expected, not a bug.
 CLINK Payment Receipt (kind 21001): there's no Boltz swap to hook
 `onReverseSettled`, so the sub-dust branch persists the ack info in
 `clink_subdust_receipts` (keyed on the invoice payment hash) and
-`reconcileClinkAcks` (boot + 30s, [`offers.ts`](src/clink/offers.ts)) asks boltz
-`GET /v2/subdust/receive/status` whether it settled — if so, publishes
+`reconcileClinkAcks` (boot + 30s, [`offers.ts`](src/clink/offers.ts)) reads the
+local `atomic_swaps` row — `reconcileAtomicReceives` drives it to `settled`, and
+the preimage is ours to begin with, so Boltz is never asked. Settled → publishes
 `{res:ok,preimage}` and deletes the row; a TTL drops never-paid rows. Same
 reconciler also makes the ≥dust ack restart-safe (catches swaps the live
 `onReverseSettled` missed while the bridge was down). Best-effort per spec.
 
-**Status: verified end-to-end on mainnet (2026-06-27)** — noffer sub-dust zap → plain vtxo received.
+**Status: verified end-to-end on mainnet (2026-07-17)** — noffer sub-dust zap
+received over the atomic path (1 sat), alongside an atomic sub-dust send.
 
 ## 4. Onchain onboarding: native boarding vs Boltz chain swap
 
