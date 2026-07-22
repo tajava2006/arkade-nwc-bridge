@@ -133,6 +133,8 @@ function readyState(): AppStateRef {
   return {
     current: {
       mode: 'ready',
+      arkServerUrl: 'https://stub',
+      boltzApiUrl: 'https://stub',
       wallet,
       swaps: makeSwapsStub() as ArkadeSwaps,
       nostr: STUB_NOSTR,
@@ -403,6 +405,9 @@ describe('web server — setup mode', () => {
       state,
       sseHub: new SseHub(),
       outbox: STUB_OUTBOX,
+      // Stub the server probe so /setup doesn't make real network calls to the
+      // default (mainnet) URLs during tests. Rejection is covered separately.
+      validateServer: async () => ({ ok: true }),
       bootReady: async (pk) => {
         // Don't actually bring up wallet/boltz/nostr in tests — just record
         // the key the route handed us and flip mode like index.ts would.
@@ -410,6 +415,8 @@ describe('web server — setup mode', () => {
         const wallet = makeWalletStub({ address: 'tark1stub' })
         state.current = {
           mode: 'ready',
+          arkServerUrl: 'https://stub',
+          boltzApiUrl: 'https://stub',
           wallet,
           swaps: makeSwapsStub() as ArkadeSwaps,
           nostr: STUB_NOSTR,
@@ -443,7 +450,8 @@ describe('web server — setup mode', () => {
     const res = await fetch(`${base}/setup`)
     expect(res.status).toBe(200)
     const body = await res.text()
-    expect(body).toContain('Paste an existing nsec')
+    expect(body).toContain('Ark server URL')
+    expect(body).toContain('Boltz API URL')
     expect(body).toContain('Generate new nsec')
   })
 
@@ -473,6 +481,12 @@ describe('web server — setup mode', () => {
     // Account row exists, and GET / now serves the dashboard instead of redirecting.
     const accountRow = temp.db.query<{ c: number }, []>('SELECT COUNT(*) AS c FROM accounts').get()
     expect(accountRow?.c).toBe(1)
+    // the fresh-start server row was written alongside the account (defaults,
+    // since the form left the URL fields blank)
+    const serverRow = temp.db
+      .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM bridge_server')
+      .get()
+    expect(serverRow?.c).toBe(1)
     const dashRes = await fetch(`${base}/`)
     expect(dashRes.status).toBe(200)
     const dashBody = await dashRes.text()
@@ -483,6 +497,78 @@ describe('web server — setup mode', () => {
     const res = await fetch(`${base}/setup`, { redirect: 'manual' })
     expect(res.status).toBe(303)
     expect(res.headers.get('location')).toBe('/')
+  })
+})
+
+// The server choice is immutable once it sticks (change = drain + fresh
+// sqlite), so /setup must persist NOTHING unless the set validates AND the
+// wallet actually comes up. Both halves are covered here with an injected
+// validator / bootReady so no real network is touched.
+describe('web server — setup validation & rollback', () => {
+  test('a rejected server set returns 400 and persists nothing', async () => {
+    const temp = openTempDb()
+    const state: AppStateRef = { current: { mode: 'setup' } }
+    const web = startWebServer({
+      cfg: CFG,
+      db: temp.db,
+      state,
+      sseHub: new SseHub(),
+      outbox: STUB_OUTBOX,
+      validateServer: async () => ({ ok: false, reason: 'Ark server reports network regtest' }),
+      bootReady: async () => {
+        throw new Error('bootReady must not run when validation fails')
+      },
+    })
+    try {
+      const form = new FormData()
+      form.set('mode', 'generate')
+      const res = await fetch(`${web.url}/setup`, { method: 'POST', body: form })
+      expect(res.status).toBe(400)
+      expect(await res.text()).toContain('reports network regtest')
+      const accounts = temp.db.query<{ c: number }, []>('SELECT COUNT(*) AS c FROM accounts').get()
+      const servers = temp.db
+        .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM bridge_server')
+        .get()
+      expect(accounts?.c).toBe(0)
+      expect(servers?.c).toBe(0)
+      expect(state.current.mode).toBe('setup')
+    } finally {
+      await web.stop()
+      temp.cleanup()
+    }
+  })
+
+  test('a failed bring-up rolls back BOTH the account and the server row', async () => {
+    const temp = openTempDb()
+    const state: AppStateRef = { current: { mode: 'setup' } }
+    const web = startWebServer({
+      cfg: CFG,
+      db: temp.db,
+      state,
+      sseHub: new SseHub(),
+      outbox: STUB_OUTBOX,
+      validateServer: async () => ({ ok: true }),
+      bootReady: async () => {
+        throw new Error('ASP unreachable')
+      },
+    })
+    try {
+      const form = new FormData()
+      form.set('mode', 'generate')
+      const res = await fetch(`${web.url}/setup`, { method: 'POST', body: form })
+      expect(res.status).toBe(500)
+      expect(await res.text()).toContain('failed to start the wallet')
+      const accounts = temp.db.query<{ c: number }, []>('SELECT COUNT(*) AS c FROM accounts').get()
+      const servers = temp.db
+        .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM bridge_server')
+        .get()
+      expect(accounts?.c).toBe(0)
+      expect(servers?.c).toBe(0)
+      expect(state.current.mode).toBe('setup')
+    } finally {
+      await web.stop()
+      temp.cleanup()
+    }
   })
 })
 

@@ -379,8 +379,11 @@ There is no `.env` and no environment-variable surface. Static
 defaults live as TypeScript constants in [`src/defaults.ts`](src/defaults.ts);
 edit the source to deviate. They are:
 
-- `NETWORK` / `ARK_SERVER_URL` / `HTTP_BIND` / `HTTP_PORT` /
-  `DB_PATH` — boring single values.
+- `NETWORK` / `HTTP_BIND` / `HTTP_PORT` / `DB_PATH` — boring single
+  values.
+- `ARK_SERVER_URL` / `BOLTZ_API_URL` — the *fallback* ASP pair. The
+  effective pair is chosen once at `/setup` and then frozen (below);
+  these serve as the setup pre-fill and the last-resort default.
 - `OUTBOX_DISCOVERY_PUBKEY` — the operator's nostr pubkey, whose
   NIP-65 (kind 10002) outbox list is the source of truth for which
   relays new NWC connections will use.
@@ -392,12 +395,20 @@ edit the source to deviate. They are:
   `OUTBOX_INITIAL_TIMEOUT_MS` at boot. Keeps the bridge usable
   even with every bootstrap relay down.
 
-The identity (`nsec`) is *not* a constant — it's captured at
-runtime through the `/setup` flow and persisted in the `accounts`
-sqlite table; see §2 *Identity input*.
+The identity (`nsec`) and the ASP pair (ark + boltz) are *not*
+constants — both are captured at the first `/setup` and persisted
+(the `nsec` in `accounts`, the pair in the single-row `bridge_server`
+table). The pair is then **immutable**: there is no multi-server
+wallet, so changing it means draining funds and starting from a fresh
+sqlite. See §2 *Identity input*.
 
-The Boltz endpoint is intentionally not configurable — SDK default
-is the right answer (§2).
+Effective ark/boltz precedence: `data/config.json` > `bridge_server`
+row > `defaults.ts`. A `data/config.json` that pins a URL (the
+docker / regtest override) still wins over the fresh-start row, so
+that path is unchanged; a disagreement is logged. The Boltz endpoint
+is our own instance either way — never the SDK default (§2, and
+operating principle #2 in the workspace CLAUDE.md), so `swapProvider`
+stays explicit.
 
 ### Two-phase boot
 
@@ -406,13 +417,20 @@ inspects the `accounts` table:
 
 - **No row** → start the web server in *setup mode*. Every route
   except `/setup` redirects there. POST `/setup` parses or generates
-  an nsec, INSERTs the account row, and calls `bootReady` in-process
-  to bring up wallet → boltz → nostr. On `bootReady` failure the
-  just-inserted row is deleted so the user can retry cleanly (the
-  /setup response includes the generated nsec on failure so a
-  generate-mode crash doesn't silently lose the key).
-- **Row exists** → call `bootReady` synchronously, then start the
-  web server in *ready mode*.
+  an nsec, then **validates the chosen ark/boltz** (arkd `getInfo`
+  network assert + boltz reachability) *before* writing anything —
+  the choice is immutable, so a typo'd or wrong-network URL would
+  brick the install (or strand funds on an unreachable chain). On
+  success it writes the `bridge_server` row and the account row
+  together and calls `bootReady` in-process to bring up wallet →
+  boltz → nostr. On `bootReady` failure BOTH rows are deleted so the
+  user can retry cleanly (the /setup response includes the generated
+  nsec on failure so a generate-mode crash doesn't silently lose the
+  key).
+- **Row exists** → call `bootReady` synchronously (it resolves
+  ark/boltz from the `bridge_server` row, backfilling it from
+  defaults for a pre-v4 DB), then start the web server in *ready
+  mode*.
 
 The mutable handle lives in `AppStateRef` ([`src/web/server.ts`](src/web/server.ts)).
 Shutdown checks `state.current.mode` so SIGINT during setup mode

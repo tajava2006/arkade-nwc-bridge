@@ -24,6 +24,16 @@ export const ARK_SERVER_URL = 'https://ark.hoppe-relay.it.com'
 // SDK's network-derived default flipping under us across version bumps.
 export const BOLTZ_API_URL = 'https://boltz.hoppe-relay.it.com'
 
+// Well-known official Arkade (Ark Labs) mainnet ASP pair, offered as the
+// non-default preset at /setup. NOT a fallback the bridge uses on its own — the
+// fresh-start picker writes whichever pair the user chooses into bridge_server.
+// The official Boltz has no custom sub-dust endpoints, so sub-dust / 21-sat
+// swaps only work against the pair above; everything else (offboard, full
+// drain, unilateral exit, ≥dust swaps) works against either, since those fees
+// come from the connected server, not a constant.
+export const OFFICIAL_ARK_SERVER_URL = 'https://arkade.computer'
+export const OFFICIAL_BOLTZ_API_URL = 'https://api.boltz.exchange'
+
 // Esplora endpoints, priority-ordered — the wallet's onchain view and the
 // unilateral-exit path's only onchain dependency (EXIT_PLAN.md). Pinned here
 // instead of letting the SDK derive its default from ASP info: the exit path

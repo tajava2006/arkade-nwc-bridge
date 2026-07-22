@@ -4,6 +4,21 @@ import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { SqliteSwapRepository } from '../boltz_repository'
 
 import type { Config } from '../config'
+import { readServerOverrides } from '../config'
+import {
+  ARK_SERVER_URL,
+  BOLTZ_API_URL,
+  OFFICIAL_ARK_SERVER_URL,
+  OFFICIAL_BOLTZ_API_URL,
+  type Network,
+} from '../defaults'
+import {
+  setServerRow,
+  clearServerRow,
+  validateServerSet,
+  type ServerSet,
+  type ValidateResult,
+} from '../server_config'
 import { sendLightning } from '../ln_send'
 import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
 import { nip19 } from 'nostr-tools'
@@ -53,7 +68,7 @@ import { dashboardView } from './views/dashboard'
 import { connectionsListView } from './views/connections'
 import { newConnectionForm, newConnectionResultView } from './views/new_connection'
 import { connectionDetailView } from './views/connection_detail'
-import { setupGeneratedView, setupView } from './views/setup'
+import { setupGeneratedView, setupView, type ServerChoice } from './views/setup'
 import { degradedView } from './views/degraded'
 import { swapsView } from './views/swaps'
 import { SqliteAtomicSwapRepository } from '../atomic'
@@ -110,6 +125,11 @@ export type AppState =
     }
   | {
       mode: 'ready'
+      // The ASP endpoint pair this ready session is bound to — resolved from the
+      // fresh-start row (config.json > row > defaults) at bootReady. /send and
+      // /swaps/refund read these; cfg no longer carries the runtime ark/boltz.
+      arkServerUrl: string
+      boltzApiUrl: string
       wallet: Wallet
       swaps: ArkadeSwaps
       nostr: NostrService
@@ -157,6 +177,12 @@ export interface WebServerDeps {
    * the partial state (POST /setup deletes the just-created row on error).
    */
   bootReady: (privateKey: Uint8Array) => Promise<void>
+  /**
+   * Validate the chosen server set before the /setup POST commits it. Injected
+   * so tests can stub the network probe; production defaults to
+   * validateServerSet (arkd getInfo network assert + boltz reachability).
+   */
+  validateServer?: (set: ServerSet, network: Network) => Promise<ValidateResult>
 }
 
 export interface WebServer {
@@ -165,7 +191,7 @@ export interface WebServer {
 }
 
 export function startWebServer(deps: WebServerDeps): WebServer {
-  const { cfg, db, state, sseHub, outbox, bootReady } = deps
+  const { cfg, db, state, sseHub, outbox, bootReady, validateServer = validateServerSet } = deps
 
   const redirectToSetup = (): Response => Response.redirect('/setup', 303)
 
@@ -219,12 +245,52 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       '/setup': {
         GET: () => {
           if (state.current.mode !== 'setup') return Response.redirect('/', 303)
-          return htmlResponse(setupView())
+          const override = readServerOverrides()
+          return htmlResponse(
+            setupView({
+              choice: 'hoppe',
+              configPinned: override.arkServerUrl != null || override.boltzApiUrl != null,
+            }),
+          )
         },
         POST: async (req) => {
           if (state.current.mode !== 'setup') return Response.redirect('/', 303)
           const form = await req.formData()
           const mode = form.get('mode')
+          const pastedNsec =
+            typeof form.get('nsec') === 'string' ? (form.get('nsec') as string) : ''
+
+          // Server selection (fresh-start only, then immutable). Two fixed
+          // presets — the operator's own pair (default) and the official Arkade
+          // pair — plus a custom pair. Read first so a re-render after any later
+          // error preserves the choice. Trailing slash trimmed so URL joins
+          // don't double up.
+          const override = readServerOverrides()
+          const configPinned = override.arkServerUrl != null || override.boltzApiUrl != null
+          const choiceRaw = (form.get('server_choice') ?? 'hoppe').toString()
+          const choice: ServerChoice =
+            choiceRaw === 'official' ? 'official' : choiceRaw === 'custom' ? 'custom' : 'hoppe'
+          const trimUrl = (raw: string): string => raw.trim().replace(/\/+$/, '')
+          const customArk = trimUrl((form.get('ark_url') ?? '').toString())
+          const customBoltz = trimUrl((form.get('boltz_url') ?? '').toString())
+          const chosen =
+            choice === 'official'
+              ? { arkServerUrl: OFFICIAL_ARK_SERVER_URL, boltzApiUrl: OFFICIAL_BOLTZ_API_URL }
+              : choice === 'custom'
+                ? { arkServerUrl: customArk, boltzApiUrl: customBoltz }
+                : { arkServerUrl: ARK_SERVER_URL, boltzApiUrl: BOLTZ_API_URL }
+          const serverArgs = { choice, customArk, customBoltz, configPinned }
+
+          if (choice === 'custom' && (!chosen.arkServerUrl || !chosen.boltzApiUrl)) {
+            return htmlResponse(
+              setupView({
+                error: 'Enter both the Ark server URL and the Boltz API URL for a custom server.',
+                pastedNsec,
+                ...serverArgs,
+              }),
+              { status: 400 },
+            )
+          }
 
           let privateKey: Uint8Array
           let generated = false
@@ -235,39 +301,66 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             } else if (mode === 'paste') {
               const raw = form.get('nsec')
               if (typeof raw !== 'string' || raw.trim() === '') {
-                return htmlResponse(setupView({ error: 'nsec is required' }), { status: 400 })
+                return htmlResponse(setupView({ error: 'nsec is required', ...serverArgs }), {
+                  status: 400,
+                })
               }
               privateKey = parseNsecInput(raw)
             } else {
-              return htmlResponse(setupView({ error: 'invalid setup mode' }), { status: 400 })
+              return htmlResponse(setupView({ error: 'invalid setup mode', ...serverArgs }), {
+                status: 400,
+              })
             }
           } catch (err) {
             return htmlResponse(
               setupView({
                 error: `Could not parse nsec: ${err instanceof Error ? err.message : String(err)}`,
-                pastedNsec: typeof form.get('nsec') === 'string' ? (form.get('nsec') as string) : '',
+                pastedNsec,
+                ...serverArgs,
               }),
               { status: 400 },
             )
           }
 
+          // Validate the effective set (data/config.json still wins at runtime)
+          // BEFORE any DB write. The choice is immutable — change = drain + fresh
+          // sqlite — so a typo'd or wrong-network server here would brick the
+          // install, and a wrong-network arkd could silently strand funds on a
+          // chain we can't reach (the load-bearing check). Nothing is persisted
+          // until this passes.
+          const effective = {
+            arkServerUrl: override.arkServerUrl ?? chosen.arkServerUrl,
+            boltzApiUrl: override.boltzApiUrl ?? chosen.boltzApiUrl,
+          }
+          const check = await validateServer(effective, cfg.network)
+          if (!check.ok) {
+            return htmlResponse(setupView({ error: check.reason, pastedNsec, ...serverArgs }), {
+              status: 400,
+            })
+          }
+
+          // Server row + account are written together and rolled back together:
+          // the choice locks exactly when the account exists (setup mode ends).
+          setServerRow(db, chosen)
           const account = createAccount(db, privateKey)
           try {
             await bootReady(privateKey)
           } catch (err) {
-            // Wallet/Boltz/relay bring-up failed. Undo the row so the user
-            // can retry without a half-configured DB. The just-generated
-            // (or pasted) nsec is only in memory here — surface it in the
-            // error so a generate run doesn't silently lose the key.
+            // Bring-up failed (usually ASP/Boltz unreachable). Undo BOTH rows so
+            // the user retries from a clean DB. The just-generated (or pasted)
+            // nsec is only in memory here — surface it in the error so a generate
+            // run doesn't silently lose the key.
             db.query('DELETE FROM accounts WHERE id = ?').run(account.id)
+            clearServerRow(db)
             const detail = err instanceof Error ? err.message : String(err)
             return htmlResponse(
               setupView({
                 error:
-                  `Saved the account but failed to start the wallet: ${detail}. ` +
+                  `Saved the setup but failed to start the wallet: ${detail}. ` +
                   (generated
                     ? `The generated nsec was: ${nip19.nsecEncode(privateKey)} — save it if you want to retry with the same key.`
                     : 'Try again.'),
+                ...serverArgs,
               }),
               { status: 500 },
             )
@@ -823,7 +916,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           if (!swapId) return back(false, 'swapId is required')
           try {
             const res = await refundAtomicSend(
-              { wallet: r.ready.wallet, arkServerUrl: cfg.arkServerUrl, db, esploraUrl: cfg.esploraUrls[0] },
+              { wallet: r.ready.wallet, arkServerUrl: r.ready.arkServerUrl, db, esploraUrl: cfg.esploraUrls[0] },
               swapId,
             )
             return back(true, `refunded ${res.amount.toLocaleString()} sats (arkTx ${res.txid.slice(0, 12)}…)`)
@@ -1027,8 +1120,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 {
                   swaps: ready.swaps,
                   wallet: ready.wallet,
-                  boltzApiUrl: cfg.boltzApiUrl,
-                  arkServerUrl: cfg.arkServerUrl,
+                  boltzApiUrl: ready.boltzApiUrl,
+                  arkServerUrl: ready.arkServerUrl,
                   db,
                 },
                 destination,

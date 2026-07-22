@@ -1,8 +1,10 @@
 import './polyfills'
 import { SimplePool } from 'nostr-tools/pool'
 
-import { loadConfig } from './config'
+import { loadConfig, readServerOverrides } from './config'
 import {
+  ARK_SERVER_URL,
+  BOLTZ_API_URL,
   NWC_RELAYS_FALLBACK,
   OUTBOX_BOOTSTRAP_RELAYS,
   OUTBOX_FALLBACK_PUBKEY,
@@ -11,6 +13,7 @@ import {
 import { getPublicKey } from 'nostr-tools/pure'
 import { openDatabase } from './db'
 import { loadAccount } from './account'
+import { resolveServerSet, getServerRow, setServerRow } from './server_config'
 import { EsploraProvider, OnchainWallet, RestArkProvider, SingleKey } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
 import { initBoltz } from './boltz'
@@ -37,8 +40,6 @@ async function main(): Promise<void> {
 
   console.log('arkade-nwc-bridge starting')
   console.log(`  network        ${cfg.network}`)
-  console.log(`  ark server     ${cfg.arkServerUrl}`)
-  console.log(`  boltz          ${cfg.boltzApiUrl}`)
   console.log(`  http           http://${cfg.httpBind}:${cfg.httpPort}`)
   console.log(`  sqlite         ${cfg.dbPath}`)
 
@@ -47,6 +48,15 @@ async function main(): Promise<void> {
     .query<{ count: number }, []>('SELECT COUNT(*) as count FROM schema_migrations')
     .get()
   console.log(`  schema         v${migrationCount?.count ?? 0}`)
+
+  // ark/boltz come from the fresh-start row, not the process cfg: they resolve
+  // (config.json > bridge_server row > defaults) only after the DB is open, and
+  // on a fresh install the row doesn't exist until /setup writes it — the
+  // default shown then is exactly what /setup pre-fills. A config.json that
+  // overrides a disagreeing row is warned inside resolveServerSet.
+  const bootServer = resolveServerSet(db)
+  console.log(`  ark server     ${bootServer.arkServerUrl}`)
+  console.log(`  boltz          ${bootServer.boltzApiUrl}`)
 
   const appState: AppStateRef = { current: { mode: 'setup' } }
   const sseHub = new SseHub()
@@ -210,6 +220,13 @@ async function main(): Promise<void> {
   // handler (after the user submits /setup). Same path either way; mutates
   // appState in place so the web server's open closures see the new mode.
   const bootReady = async (privateKey: Uint8Array): Promise<void> => {
+    // ark/boltz for THIS bring-up come from the fresh-start row, resolved here
+    // (not at process start): the row doesn't exist until /setup writes it, and
+    // this runs on both boot paths. Precedence config.json > row > defaults
+    // (src/server_config.ts). network/esplora/http stay from the process cfg.
+    const server = resolveServerSet(db)
+    const bootCfg = { ...cfg, arkServerUrl: server.arkServerUrl, boltzApiUrl: server.boltzApiUrl }
+
     // The account key is the bridge's own nostr identity (noffer pubkey,
     // NWC service pubkey). Make it the primary outbox target so relay
     // discovery follows the same key everything else is published under;
@@ -227,7 +244,7 @@ async function main(): Promise<void> {
     const undo: Array<() => Promise<unknown> | unknown> = []
     try {
 
-      const { identity, wallet, address } = await initArkWallet(cfg, privateKey)
+      const { identity, wallet, address } = await initArkWallet(bootCfg, privateKey)
       console.log(`  ark address    ${address}`)
       undo.push(() => wallet.dispose())
 
@@ -239,7 +256,7 @@ async function main(): Promise<void> {
       const { swaps } = await initBoltz({
         db,
         wallet,
-        cfg,
+        cfg: bootCfg,
         // When an offer-originated reverse swap settles, ack the payer with a
         // CLINK Payment Receipt. No-op for NWC make_invoice swaps.
         onReverseSettled: (swap) => {
@@ -255,7 +272,7 @@ async function main(): Promise<void> {
       )
 
       const nostr = await startNostrService({
-        cfg,
+        cfg: bootCfg,
         db,
         wallet,
         swaps,
@@ -269,7 +286,7 @@ async function main(): Promise<void> {
       // key (same key as the Ark wallet). Minted from the current outbox relay
       // and persisted; on boot it listens on the relay frozen into the stored
       // code (see clink/offers.ts). Operator regenerates by hand if it dies.
-      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: cfg.boltzApiUrl, arkServerUrl: cfg.arkServerUrl })
+      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl })
       console.log(`  noffer         ${offers.snapshot().noffer}`)
       undo.push(() => offers.stop())
 
@@ -278,11 +295,11 @@ async function main(): Promise<void> {
       // were down) + sub-dust acks, and NWC make_invoice sub-dust rows — those
       // have no settlement event at all (no swap object), so this poll is the
       // only thing that ever flips them (see ln_receive.ts).
-      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: cfg.boltzApiUrl }
-      const atomicDeps = { wallet, arkServerUrl: cfg.arkServerUrl, db, boltzApiUrl: cfg.boltzApiUrl, esploraUrl: cfg.esploraUrls[0] }
+      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl }
+      const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0] }
       const reconcileReceives = (): void => {
         void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
-        void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: cfg.boltzApiUrl, arkServerUrl: cfg.arkServerUrl, db }).catch((err) =>
+        void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db }).catch((err) =>
           console.error('nwc: atomic sub-dust receive reconcile failed:', err),
         )
         // Send-side resume (§3.4 classifyResume): post-T rows are refunded (the
@@ -305,7 +322,7 @@ async function main(): Promise<void> {
 
       // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
       // Stateless REST; the wallet keeps its own internal one for signing.
-      const arkProvider = new RestArkProvider(cfg.arkServerUrl)
+      const arkProvider = new RestArkProvider(bootCfg.arkServerUrl)
 
       // SWR caches for the slow ark-side reads. minIntervalMs keeps
       // back-to-back page visits from hammering the upstream — opening
@@ -400,6 +417,10 @@ async function main(): Promise<void> {
 
       appState.current = {
         mode: 'ready',
+        // the ASP pair this ready session is bound to — /send and /swaps/refund
+        // read these, since cfg no longer carries the runtime ark/boltz URLs
+        arkServerUrl: bootCfg.arkServerUrl,
+        boltzApiUrl: bootCfg.boltzApiUrl,
         wallet,
         swaps,
         nostr,
@@ -486,6 +507,15 @@ async function main(): Promise<void> {
 
   const account = loadAccount(db)
   if (account) {
+    // Grandfather a pre-v4 DB: it has an account but no fresh-start row. Freeze
+    // its current server into the row now so a later defaults.ts change can't
+    // silently repoint an existing wallet. Skip when data/config.json pins the
+    // URLs — that override is the source there and wins over the row anyway.
+    const override = readServerOverrides()
+    if (!getServerRow(db) && !override.arkServerUrl && !override.boltzApiUrl) {
+      setServerRow(db, { arkServerUrl: ARK_SERVER_URL, boltzApiUrl: BOLTZ_API_URL })
+      console.log('  server         backfilled fresh-start row from defaults (grandfathered DB)')
+    }
     await bootReadyOrDegrade(account.privateKey)
   } else {
     console.log('  account        none — open /setup to create or import one')

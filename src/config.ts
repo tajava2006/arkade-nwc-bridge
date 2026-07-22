@@ -51,6 +51,19 @@ export function loadConfig(): Config {
   }
 }
 
+/**
+ * The ark/boltz endpoints set by data/config.json only (each undefined when the
+ * file is absent or doesn't pin it). Kept separate from loadConfig so
+ * resolveServerSet (src/server_config.ts) can layer this override *over* the
+ * fresh-start DB row: config.json > row > defaults.ts. loadConfig's own
+ * arkServerUrl/boltzApiUrl are unchanged — they stay the setup-mode display
+ * fallback for a process that hasn't resolved the row yet.
+ */
+export function readServerOverrides(): { arkServerUrl?: string; boltzApiUrl?: string } {
+  const { overrides } = readOverrides()
+  return { arkServerUrl: overrides.arkServerUrl, boltzApiUrl: overrides.boltzApiUrl }
+}
+
 function readOverrides(): { overrides: Partial<Config>; baseDir: string } {
   const path = OVERRIDE_CANDIDATES.find((p) => existsSync(p))
   if (!path) return { overrides: {}, baseDir: defaults.REPO_ROOT }

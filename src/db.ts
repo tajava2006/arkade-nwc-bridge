@@ -340,6 +340,27 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE atomic_swaps ADD COLUMN exit_delay INTEGER;
     `,
   },
+  {
+    version: 4,
+    description: 'fresh-start server selection (ark+boltz), single immutable row',
+    // The ASP the bridge talks to — an arkd + its matched boltz — is chosen once
+    // at the first /setup and then frozen: there is no multi-server wallet, so
+    // changing it means draining funds and starting over from a fresh sqlite.
+    // Exactly one row (id=1, upserted), mirroring clink_offer / exit_dest. It is
+    // resolved at bootReady with precedence data/config.json > this row >
+    // defaults.ts (src/server_config.ts) — a stray config.json (the docker /
+    // regtest override) still wins, so that path is unchanged. network/esplora
+    // are deliberately NOT here: a chosen set is assumed mainnet (defaults.ts),
+    // matching the atomic sub-dust mainnet hardcode (subdustSelfExitDelay).
+    sql: `
+      CREATE TABLE bridge_server (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        ark_url    TEXT    NOT NULL,
+        boltz_url  TEXT    NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

@@ -58,13 +58,21 @@ bun run dev          # development (hot reload)
 ```
 
 On first boot the bridge creates `./data/bridge.sqlite`, applies
-migrations, and waits for an identity. Open
-<http://127.0.0.1:4282/setup> in a browser and either paste your
+migrations, and waits for setup. Open
+<http://127.0.0.1:4282/setup> in a browser: pick the **Ark + Boltz
+servers** (pre-filled with the operator's — leave them to use those,
+or point at your own matched mainnet pair), then either paste your
 existing `nsec1…` or click *Generate* to mint a fresh one. The nsec
 is stored in the local sqlite file and never leaves the machine.
 
-No `.env` file, no env vars to set. Static defaults (network, ASP,
-bind address, port, db path, plus the bootstrap relay list and the
+The server choice is **fresh-start only**: there is no multi-server
+wallet, so it locks once the account exists. To move to a different
+Ark/Boltz you drain the funds and start over from a fresh sqlite.
+
+No `.env` file, no env vars to set. The Ark + Boltz servers are
+picked at `/setup` (pre-filled with the operator's). Other static
+defaults (network, bind address, port, db path, plus the bootstrap
+relay list and the
 pubkey whose [NIP-65 outbox](https://github.com/nostr-protocol/nips/blob/master/65.md)
 supplies the relay list for new NWC connections) live in
 [`src/defaults.ts`](src/defaults.ts) — edit there if you need

@@ -18,6 +18,10 @@ src/
                                the outbox watcher owns that now)
   account.ts                 — accounts table CRUD (loadAccount /
                                createAccount / parseNsecInput / generate)
+  server_config.ts           — bridge_server single-row CRUD +
+                               resolveServerSet (config.json > row >
+                               defaults) + validateServerSet. The fresh-
+                               start ark/boltz choice, then immutable
   db.ts                      — bun:sqlite + WAL + append-only MIGRATIONS
   wallet.ts                  — privateKey → SingleKey → Wallet (in-memory repos)
   boltz.ts                   — ArkadeSwaps + SqliteSwapRepository,
@@ -187,19 +191,29 @@ row exists. Logs go to stdout; when running in background pipe to
 ## Hot footguns
 
 - **No env vars.** Static defaults live in [`src/defaults.ts`](src/defaults.ts);
-  the nsec lives in the `accounts` sqlite table (created via `/setup`).
+  the nsec lives in the `accounts` sqlite table and the chosen ark/boltz
+  pair in the single-row `bridge_server` table — both written at `/setup`.
   Don't reintroduce `.env` parsing — it was deliberately removed so the
   bridge is "clone + `bun run dev`" with no setup ritual. The one
   opt-in override is `./data/config.json` (loaded by
   [`src/config.ts`](src/config.ts)) for the docker deployment case —
   any `Config` field present overrides the matching default, missing
-  fields fall through. The file is intentionally absent from a fresh
-  clone; don't add it to defaults or examples checked into the repo.
+  fields fall through. For **ark/boltz specifically** the runtime value is
+  `resolveServerSet` ([`src/server_config.ts`](src/server_config.ts)):
+  `data/config.json` > `bridge_server` row > defaults, so a docker/regtest
+  config.json still wins over the fresh-start row. The file is intentionally
+  absent from a fresh clone; don't add it to defaults or examples checked
+  into the repo.
 - **Two-phase boot.** [`src/index.ts`](src/index.ts) starts the web
   server first, then either calls `bootReady` immediately (account
   exists) or waits for POST `/setup` to call it. Don't reorder this
-  to "wallet first" — there's no nsec to hand the wallet until setup
-  completes. AppState lives in [`src/web/server.ts`](src/web/server.ts).
+  to "wallet first" — there's no nsec (nor a chosen ark/boltz) to hand
+  the wallet until setup completes. `bootReady` resolves ark/boltz from
+  the `bridge_server` row at entry (not at process start — the row
+  doesn't exist yet on a fresh boot) and stamps them into the ready
+  AppState; POST `/setup` validates then writes the row + account
+  together and rolls BOTH back on bring-up failure. AppState lives in
+  [`src/web/server.ts`](src/web/server.ts).
 - **Reference clones live one level up** in the operator workspace's
   `reference/` (`../nips/`, `../luds/`, `../lightning-address/`,
   `../nostr-tools/`, `../ts-sdk/`, `../wallet/`, `../arkd/`, …) — they

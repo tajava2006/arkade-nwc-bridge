@@ -23,6 +23,7 @@ describe('database migrations', () => {
       'accounts',
       'atomic_swaps',
       'boltz_swaps',
+      'bridge_server',
       'clink_offer',
       'clink_offer_receipts',
       'clink_subdust_receipts',
@@ -48,8 +49,9 @@ describe('database migrations', () => {
     // Bumps here are intentional. If you added a migration without
     // realizing, this test surfaces it. (v1 = 2026-07 epoch reset that
     // collapsed the original 16; v2 = atomic sub-dust swaps; v3 = atomic
-    // swaps in the exit vault — source column + script-rebuild params.)
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3])
+    // swaps in the exit vault — source column + script-rebuild params;
+    // v4 = fresh-start server selection, the bridge_server single row.)
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4])
   })
 
   test('re-opening the same db is idempotent (no double-apply)', () => {
@@ -61,7 +63,7 @@ describe('database migrations', () => {
       const count = db2
         .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM schema_migrations')
         .get()
-      expect(count?.c).toBe(3)
+      expect(count?.c).toBe(4)
     } finally {
       db2.close()
     }
