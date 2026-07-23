@@ -34,8 +34,8 @@ import {
   type ArkInfo,
 } from '@arkade-os/sdk'
 import { SqliteAtomicSwapRepository } from '../../src/atomic'
-import { atomicSubdustSend } from '../../src/atomic_send'
-import { issueAtomicReceive, driveAtomicReceive } from '../../src/atomic_receive'
+import { atomicSubdustSend } from '../../src/atomic/send'
+import { issueAtomicReceive, driveAtomicReceive } from '../../src/atomic/receive'
 import { getVaultVtxo } from '../../src/exit/vault'
 import { openDatabase } from '../../src/db'
 

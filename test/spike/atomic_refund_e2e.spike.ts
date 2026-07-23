@@ -27,7 +27,7 @@ import {
   type ArkInfo,
 } from '@arkade-os/sdk'
 import { AtomicVtxoScript, SqliteAtomicSwapRepository, SwapDirection } from '../../src/atomic'
-import { atomicSubdustSend, refundAtomicSend } from '../../src/atomic_send'
+import { atomicSubdustSend, refundAtomicSend } from '../../src/atomic/send'
 import { captureVtxo, expirySec } from '../../src/exit/proof_sync'
 import { getVaultVtxo, isVtxoExitReady } from '../../src/exit/vault'
 import { openDatabase } from '../../src/db'

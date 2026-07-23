@@ -29,7 +29,7 @@ import {
   SwapDirection,
   type SharedVtxo,
 } from '../../src/atomic'
-import { driveAtomicReceive } from '../../src/atomic_receive'
+import { driveAtomicReceive } from '../../src/atomic/receive'
 
 const ARKD_URL = process.env.ARKD_URL ?? 'http://localhost:7070'
 const BOLTZ_URL = process.env.BOLTZ_URL ?? 'http://localhost:9069'

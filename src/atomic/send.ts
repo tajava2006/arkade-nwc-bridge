@@ -24,9 +24,11 @@ import {
   type AtomicOutput,
   type AtomicSwapRow,
   type SharedVtxo,
-} from './atomic'
-import { captureVtxo, expirySec } from './exit/proof_sync'
-import { gcOrphanProofs, removeVtxo } from './exit/vault'
+} from './index'
+import { boltzFetch } from './boltz_http'
+import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from './ark_util'
+import { captureVtxo, expirySec } from '../exit/proof_sync'
+import { gcOrphanProofs, removeVtxo } from '../exit/vault'
 
 // Bridge side of the atomic sub-dust SEND (ARK -> LN). The bridge is the funder
 // (F): it funds a 4-leaf shared vtxo, pre-signs the claim split, and hands the
@@ -84,34 +86,12 @@ interface InitResponse {
   vtxoMin: number
 }
 
-const toXOnly = (k: Uint8Array): Uint8Array => (k.length === 32 ? k : k.subarray(1))
-const timelockType = (v: bigint): 'seconds' | 'blocks' => (v >= 512n ? 'seconds' : 'blocks')
-
 /** Funding-input batch expiry must clear T by this (mirror of boltz's payMargin). */
 const FUNDING_MARGIN_SECS = 600
 
-/**
- * Verify-before-bookkeep (F4, SUBDUST_ATOMIC_SECURITY_REVIEW.md): boltz replying
- * `status: 'claimed'` is NOT proof it actually spent our funding — a lying/buggy
- * boltz (or a claim that ACKed but never registered) would otherwise get us to
- * terminal-claim + delete the vault row while our whole V is still locked in the
- * shared vtxo. Only the indexer showing the outpoint spent (spentBy set) is
- * proof. Polls to tolerate indexer lag; conservative — an ambiguous/absent read
- * returns false, keeping the swap recoverable (the refund executor reclaims V).
- */
-async function confirmClaimSpent(indexer: RestIndexerProvider, txid: string, vout: number): Promise<boolean> {
-  for (let i = 0; i < 6; i++) {
-    try {
-      const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid, vout }] })
-      const coin = vtxos.find((v) => v.txid === txid && v.vout === vout)
-      if (coin?.spentBy) return true
-    } catch {
-      // transient indexer error — retry
-    }
-    await new Promise((r) => setTimeout(r, 1000))
-  }
-  return false
-}
+// confirmClaimSpent = the shared confirmSpent poll (verify-before-bookkeep, F4):
+// boltz replying `status: 'claimed'` is NOT proof it spent our funding — only the
+// indexer showing the outpoint spent is. Imported (aliased) from ./ark_util.
 
 /**
  * Send a sub-dust amount over LN through the atomic path. The bridge funds a
@@ -173,7 +153,6 @@ export async function atomicSubdustSend(
   // funding change ⇒ the wallet can never be left with a sub-dust remainder
   // here; the claim split returns V′ − a − fee (≥ dust ⇒ regular).
   // V′ ≥ a + fee + dust; net cost stays a + fee.
-  const hrp = info.network === 'bitcoin' ? 'ark' : 'tark'
   const userScript = new DefaultVtxo.Script({
     pubKey: userXOnly,
     serverPubKey: serverXOnly,
@@ -264,7 +243,7 @@ export async function atomicSubdustSend(
     pubKey: boltzXOnly,
     serverPubKey: serverXOnly,
     csvTimelock: { type: timelockType(boltzD), value: boltzD },
-  }).address(hrp, serverXOnly)
+  }).address(hrp(info.network), serverXOnly)
   const split = computeClaimSplit({
     funderAddress: funderAddr,
     claimerAddress: boltzAddr,
@@ -712,16 +691,4 @@ async function locateFunding(
     await new Promise((r) => setTimeout(r, 500))
   }
   throw new Error(`shared vtxo (value=${value}) never appeared after funding ${fundingTxid}`)
-}
-
-async function boltzFetch<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) {
-    throw new Error(`${url} -> ${res.status}: ${await res.text().catch(() => '')}`)
-  }
-  return (await res.json()) as T
 }

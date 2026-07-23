@@ -5,7 +5,7 @@ import {
   RefundNotYetError,
   resumeAtomicSends,
   type AtomicSendDeps,
-} from '../../src/atomic_send'
+} from '../../src/atomic/send'
 import type { Wallet } from '@arkade-os/sdk'
 
 // resumeAtomicSends touches the network in three places: boltz's /send/status

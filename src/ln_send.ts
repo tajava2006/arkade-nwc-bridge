@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { isSubdust, type Wallet } from '@arkade-os/sdk'
-import { atomicSubdustSend } from './atomic_send'
+import { atomicSubdustSend } from './atomic/send'
 
 // Below P2TR dust a Boltz submarine swap can't settle: the vHTLC lockup vtxo is
 // sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the claim, so the swap

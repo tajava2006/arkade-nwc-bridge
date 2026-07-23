@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
-import { issueAtomicReceive, driveAtomicReceives, type AtomicReceiveDeps } from './atomic_receive'
+import { issueAtomicReceive, driveAtomicReceives, type AtomicReceiveDeps } from './atomic/receive'
 import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
 
 // Bitcoin P2TR standard dust. Below this a Boltz reverse swap can't settle: the

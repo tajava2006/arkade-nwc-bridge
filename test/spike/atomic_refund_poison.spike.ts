@@ -44,7 +44,7 @@ import {
   type AtomicOutput,
   type SharedVtxo,
 } from '../../src/atomic'
-import { refundAtomicSend } from '../../src/atomic_send'
+import { refundAtomicSend } from '../../src/atomic/send'
 import { openDatabase } from '../../src/db'
 
 const ARKD_URL = 'http://localhost:7070'

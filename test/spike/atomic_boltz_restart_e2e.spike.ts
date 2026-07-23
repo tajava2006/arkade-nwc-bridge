@@ -22,7 +22,7 @@ import {
   type ArkInfo,
 } from '@arkade-os/sdk'
 import { SqliteAtomicSwapRepository } from '../../src/atomic'
-import { issueAtomicReceive, driveAtomicReceive } from '../../src/atomic_receive'
+import { issueAtomicReceive, driveAtomicReceive } from '../../src/atomic/receive'
 import { openDatabase } from '../../src/db'
 
 const ARKD_URL = 'http://localhost:7070'

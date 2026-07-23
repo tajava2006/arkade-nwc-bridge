@@ -72,7 +72,7 @@ import { setupGeneratedView, setupView, type ServerChoice } from './views/setup'
 import { degradedView } from './views/degraded'
 import { swapsView } from './views/swaps'
 import { SqliteAtomicSwapRepository } from '../atomic'
-import { refundAtomicSend } from '../atomic_send'
+import { refundAtomicSend } from '../atomic/send'
 import { vaultStats } from '../exit/vault'
 
 import {

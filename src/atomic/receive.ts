@@ -21,7 +21,9 @@ import {
   type AtomicSwapState,
   type AtomicPresig,
   type SharedVtxo,
-} from './atomic'
+} from './index'
+import { boltzFetch, boltzGet } from './boltz_http'
+import { confirmSpent, hrp, timelockType, toXOnly } from './ark_util'
 
 // Bridge side of the atomic sub-dust RECEIVE (LN→ARK). The bridge is the CLAIMER
 // (C): it generates the preimage, gets a HOLD invoice from boltz, and once boltz
@@ -52,8 +54,6 @@ export interface AtomicReceiveInvoice {
   preimage: string
 }
 
-const toXOnly = (k: Uint8Array): Uint8Array => (k.length === 32 ? k : k.subarray(1))
-const timelockType = (v: bigint): 'seconds' | 'blocks' => (v >= 512n ? 'seconds' : 'blocks')
 
 /**
  * Walk a receive swap forward through its legal transition chain to a terminal
@@ -198,15 +198,15 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   if (!v) throw new Error(`shared vtxo ${status.fundingOutpoint} not found`)
 
   const shared: SharedVtxo = { txid, vout: Number(voutStr), value: v.value, script }
-  const hrp = info.network === 'bitcoin' ? 'ark' : 'tark'
+  const netHrp = hrp(info.network)
   // boltz's change output rides on boltz's OWN wallet-script delay, not the
   // info delay — a wrong guess shifts the reconstructed claim txid off the
   // presig. Only boltz's money depends on this value; our output stays pinned
   // to our own derivation below.
   const boltzD = status.boltzScriptDelay !== undefined ? BigInt(status.boltzScriptDelay) : d
-  const boltzAddr = new DefaultVtxo.Script({ pubKey: boltzXOnly, serverPubKey: server, csvTimelock: { type: timelockType(boltzD), value: boltzD } }).address(hrp, server)
+  const boltzAddr = new DefaultVtxo.Script({ pubKey: boltzXOnly, serverPubKey: server, csvTimelock: { type: timelockType(boltzD), value: boltzD } }).address(netHrp, server)
   // The claimer receive address is the bridge wallet's default vtxo address.
-  const bridgeAddr = new DefaultVtxo.Script({ pubKey: userXOnly, serverPubKey: server, csvTimelock: { type: timelockType(d), value: d } }).address(hrp, server)
+  const bridgeAddr = new DefaultVtxo.Script({ pubKey: userXOnly, serverPubKey: server, csvTimelock: { type: timelockType(d), value: d } }).address(netHrp, server)
   const split = computeClaimSplit({ funderAddress: boltzAddr, claimerAddress: bridgeAddr, fundingValue: v.value, amount: a, dust })
   const unroll = serverUnrollScript(info.checkpointTapscript)
 
@@ -240,20 +240,6 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   return true
 }
 
-/** Has `txid:vout` been spent per the indexer? Short poll to tolerate lag. */
-async function confirmSpent(indexer: RestIndexerProvider, txid: string, vout: number): Promise<boolean> {
-  for (let i = 0; i < 6; i++) {
-    try {
-      const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid, vout }] })
-      if (vtxos.find((v) => v.txid === txid && v.vout === vout)?.spentBy) return true
-    } catch {
-      // transient indexer error — retry
-    }
-    await new Promise((r) => setTimeout(r, 1000))
-  }
-  return false
-}
-
 /**
  * Boot + periodic pass: drive every non-terminal atomic receive swap. Best-
  * effort — one swap failing (boltz not funded yet, transient) is left for the
@@ -270,15 +256,4 @@ export async function driveAtomicReceives(deps: AtomicReceiveDeps): Promise<stri
     }
   }
   return settled
-}
-
-async function boltzFetch<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-  if (!res.ok) throw new Error(`${url} -> ${res.status}: ${await res.text().catch(() => '')}`)
-  return (await res.json()) as T
-}
-async function boltzGet<T>(url: string): Promise<T> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`${url} -> ${res.status}`)
-  return (await res.json()) as T
 }
