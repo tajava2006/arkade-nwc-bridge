@@ -60,8 +60,10 @@ src/
                                accelerator — the 30s reconciler stays the
                                backstop; dead endpoint degrades to polling.
                                URL: config.boltzWsUrl > derived
-                               ws(s)://host/v2/ws (compose sets
-                               "ws://boltz:9004" in data/config.json)
+                               ws(s)://host/v2/ws — the SDK's own single-host
+                               path-split convention, already served by both
+                               the VPS nginx and the compose boltz-proxy, so
+                               no deployment needs to set anything
   polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
                                (bun async-ESM require trap) + EventSource shim
   index.ts                   — three-mode boot (setup / ready / degraded);
