@@ -227,15 +227,20 @@ money without going onchain.
 
 **Automatic trigger (2026-07-25):** the same consolidate-all is also the
 *automatic* renewal path — `src/auto_refresh.ts` polls every 10 min and runs
-the no-args `wallet.settle()` once any dust+ spendable VTXO nears expiry
-(sub-dust/swept can't trigger on their own: post-anchor-rule arkd defers
-rounds anchored only by them). Rationale = the same win-win as the button:
-one wholesale round instead of several partial renewals. One knob only:
-the window is derived as **2× `VTXO_RENEW_THRESHOLD_SECONDS`** (wallet.ts,
-currently 1h → 2h), so the SDK's `settlementConfig` renewal underneath is
-structurally always the **backstop** — it fires only if the loop failed
-repeatedly (30-min failure backoff), and then partial-renews just the
-expiring VTXO.
+the no-args `wallet.settle()` once any dust+ spendable VTXO is within **3d**
+of expiry (sub-dust/swept can't trigger on their own: post-anchor-rule arkd
+defers rounds anchored only by them). Rationale = the same win-win as the
+button: one wholesale round instead of several partial renewals. The 3d
+window is pinned by its neighbors: = arkd's expiry gap (larger just spams
+deferred intents) and ≥ the atomic sub-dust send gate 72h10m (closes the
+send dead zone to poll granularity, per the operator workspace's coupling
+analysis). The SDK's `settlementConfig` renewal underneath stays a **fixed
+1h backstop**, deliberately NOT scaled with the window — the SDK's renewal
+guard is a 30s cooldown, so a backstop ≥ the tree expiry would loop a round
+per minute (the pre-reset 1d-expiry seed is exactly such a config). Guards
+in the wiring: 30-min failure backoff, and a 12h quiet period after each
+success (rebirth-loop bound if expiry ≤ window; also spaces >50-VTXO
+multi-batch folds).
 
 - **Call: `wallet.settle()` with no params.** Per the ASP operator workspace's
   `SETTLEMENT_TRIGGERS.md` (trigger #1 — not in this repo), the no-param

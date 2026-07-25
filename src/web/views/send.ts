@@ -15,12 +15,14 @@ import {
 } from '../../send'
 import { AUTO_REFRESH_THRESHOLD_SECONDS } from '../../auto_refresh'
 
-// "2 hours" / "90 minutes" — whichever divides cleanly, for the Refresh copy
-// here and the FAQ's refresh answer.
+// "3 days" / "12 hours" / "90 minutes" — the largest unit that divides
+// cleanly, for the Refresh copy here and the FAQ's refresh answer.
 export const RENEW_WINDOW_LABEL =
-  AUTO_REFRESH_THRESHOLD_SECONDS % 3600 === 0
-    ? `${AUTO_REFRESH_THRESHOLD_SECONDS / 3600} hour${AUTO_REFRESH_THRESHOLD_SECONDS / 3600 === 1 ? '' : 's'}`
-    : `${Math.round(AUTO_REFRESH_THRESHOLD_SECONDS / 60)} minutes`
+  AUTO_REFRESH_THRESHOLD_SECONDS % 86_400 === 0
+    ? `${AUTO_REFRESH_THRESHOLD_SECONDS / 86_400} day${AUTO_REFRESH_THRESHOLD_SECONDS / 86_400 === 1 ? '' : 's'}`
+    : AUTO_REFRESH_THRESHOLD_SECONDS % 3600 === 0
+      ? `${AUTO_REFRESH_THRESHOLD_SECONDS / 3600} hour${AUTO_REFRESH_THRESHOLD_SECONDS / 3600 === 1 ? '' : 's'}`
+      : `${Math.round(AUTO_REFRESH_THRESHOLD_SECONDS / 60)} minutes`
 
 function fmtSats(n: number): string {
   return `${n.toLocaleString()} sats`

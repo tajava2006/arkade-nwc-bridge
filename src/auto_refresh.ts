@@ -5,7 +5,6 @@ import {
   isVtxoExpiringSoon,
   type ExtendedVirtualCoin,
 } from '@arkade-os/sdk'
-import { VTXO_RENEW_THRESHOLD_SECONDS } from './wallet'
 
 // Consolidate-all auto-refresh. The SDK's own renewal (settlementConfig in
 // wallet.ts) folds only what is near expiry plus sub-dust/swept riders —
@@ -16,13 +15,18 @@ import { VTXO_RENEW_THRESHOLD_SECONDS } from './wallet'
 // EVERYTHING into one fresh VTXO — fewer rounds for the server, one
 // defragmented VTXO and a full expiry reset for the wallet.
 //
-// The SDK renewal stays enabled underneath as the backstop, and there is
-// deliberately only ONE knob: this window is derived as twice the backstop's
-// (wallet.ts VTXO_RENEW_THRESHOLD_SECONDS — currently 1h → 2h here), so the
-// consolidate-all loop always gets first shot and the backstop only ever
-// fires if this loop failed repeatedly — a partial renew then still saves
-// the expiring VTXO.
-export const AUTO_REFRESH_THRESHOLD_SECONDS = VTXO_RENEW_THRESHOLD_SECONDS * 2
+// THE renewal knob. 3 days is not arbitrary — it matches two neighbors:
+//  - arkd's SETTLEMENT_MIN_EXPIRY_GAP (3d): a settle attempted earlier than
+//    this is deferred, so a larger window would just spam rejected intents;
+//  - the atomic sub-dust send gate (funding VTXO must have > 72h10m left):
+//    refreshing at 3d-before-expiry means no VTXO ever lingers below that
+//    bar, closing the send dead zone to the ~10-min poll granularity.
+// Must stay well below the tree expiry (30d+ post-reset) — a window ≥ the
+// VTXO lifetime means every fresh VTXO is instantly "expiring" and rounds
+// loop forever; the wiring's post-success cooldown bounds that failure mode
+// but does not make it sane. The SDK renewal (wallet.ts, fixed 1h) stays on
+// as the backstop and is deliberately NOT scaled with this knob — see there.
+export const AUTO_REFRESH_THRESHOLD_SECONDS = 259_200
 
 /**
  * True when some VTXO that can anchor a settlement round — spendable, dust+,

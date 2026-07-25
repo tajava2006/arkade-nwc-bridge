@@ -489,17 +489,24 @@ async function main(): Promise<void> {
       // so the first dashboard visit doesn't pay the round-trip again.
       caches.balance.seed(balance)
 
-      // Consolidate-all auto-refresh: once any dust+ VTXO is within 2h of
-      // expiry, run the manual button's wallet.settle() — everything folds
-      // into one fresh VTXO (auto_refresh.ts has the policy rationale). The
-      // SDK's 1h partial renew stays on as the backstop if this keeps
-      // failing. A settle rides a settlement round (minutes) — the running
-      // flag stops overlapping passes, and a failure backs off 30 min so a
-      // deferred/rejected intent isn't hammered every tick.
+      // Consolidate-all auto-refresh: once any dust+ VTXO is within the
+      // 3d window of expiry, run the manual button's wallet.settle() —
+      // everything folds into one fresh VTXO (auto_refresh.ts has the
+      // policy rationale). The SDK's 1h partial renew stays on as the
+      // backstop if this keeps failing. A settle rides a settlement round
+      // (minutes) — the running flag stops overlapping passes; a failure
+      // backs off 30 min so a deferred/rejected intent isn't hammered
+      // every tick; a SUCCESS goes quiet for 12h as the rebirth-loop
+      // guard: in a sane config the next legit trigger is weeks away, but
+      // if the tree expiry is ever ≤ the window (e.g. a short-expiry test
+      // seed), every fresh VTXO is born "expiring" and without this the
+      // loop would fold a round per pass. 12h bounds that to 2/day and
+      // still re-catches a >50-VTXO multi-batch leftover with days of
+      // margin to spare.
       let autoRefreshRunning = false
-      let autoRefreshBackoffUntil = 0
+      let autoRefreshQuietUntil = 0
       const runAutoRefreshPass = (): void => {
-        if (autoRefreshRunning || Date.now() < autoRefreshBackoffUntil) return
+        if (autoRefreshRunning || Date.now() < autoRefreshQuietUntil) return
         autoRefreshRunning = true
         void autoRefreshPass({
           getVtxos: () => wallet.getVtxos({ withRecoverable: true }),
@@ -512,7 +519,8 @@ async function main(): Promise<void> {
           log: (msg) => console.log(msg),
         })
           .then((outcome) => {
-            if (outcome === 'failed') autoRefreshBackoffUntil = Date.now() + 30 * 60_000
+            if (outcome === 'failed') autoRefreshQuietUntil = Date.now() + 30 * 60_000
+            if (outcome === 'refreshed') autoRefreshQuietUntil = Date.now() + 12 * 3_600_000
           })
           .finally(() => {
             autoRefreshRunning = false
