@@ -24,6 +24,7 @@ import { startOfferService, sendOfferReceipt, sendSubdustAck, reconcileClinkAcks
 import { reconcileAtomicReceives } from './ln_receive'
 import { sweepInterruptedWebSends } from './history'
 import { makeBoardingEsplora, reconcileBoardingHistory } from './boarding_history'
+import { autoRefreshPass } from './auto_refresh'
 import { resumeAtomicSends } from './atomic/send'
 import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from './atomic/boltz_ws'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
@@ -173,6 +174,8 @@ async function main(): Promise<void> {
   // Onchain-deposit history watcher (src/boarding_history.ts) — recording
   // only; the SDK's own VtxoManager does the actual boarding auto-settle.
   let boardingHistoryInterval: ReturnType<typeof setInterval> | undefined
+  // Consolidate-all auto-refresh (src/auto_refresh.ts) — assigned in bootReady.
+  let autoRefreshInterval: ReturnType<typeof setInterval> | undefined
   let boltzWs: BoltzWs | undefined
 
   // Exit-proof mirroring — assigned in bootReady, torn down on shutdown.
@@ -486,6 +489,38 @@ async function main(): Promise<void> {
       // so the first dashboard visit doesn't pay the round-trip again.
       caches.balance.seed(balance)
 
+      // Consolidate-all auto-refresh: once any dust+ VTXO is within 2h of
+      // expiry, run the manual button's wallet.settle() — everything folds
+      // into one fresh VTXO (auto_refresh.ts has the policy rationale). The
+      // SDK's 1h partial renew stays on as the backstop if this keeps
+      // failing. A settle rides a settlement round (minutes) — the running
+      // flag stops overlapping passes, and a failure backs off 30 min so a
+      // deferred/rejected intent isn't hammered every tick.
+      let autoRefreshRunning = false
+      let autoRefreshBackoffUntil = 0
+      const runAutoRefreshPass = (): void => {
+        if (autoRefreshRunning || Date.now() < autoRefreshBackoffUntil) return
+        autoRefreshRunning = true
+        void autoRefreshPass({
+          getVtxos: () => wallet.getVtxos({ withRecoverable: true }),
+          getDust: () => arkProvider.getInfo().then((info) => info.dust),
+          settle: () => wallet.settle(),
+          onSettled: () => {
+            void caches.balance.refresh()
+            void caches.sendData.refresh()
+          },
+          log: (msg) => console.log(msg),
+        })
+          .then((outcome) => {
+            if (outcome === 'failed') autoRefreshBackoffUntil = Date.now() + 30 * 60_000
+          })
+          .finally(() => {
+            autoRefreshRunning = false
+          })
+      }
+      runAutoRefreshPass()
+      autoRefreshInterval = setInterval(runAutoRefreshPass, 10 * 60_000)
+
       // Exit-proof mirroring (EXIT_PLAN #04/#05): keep the vault able to
       // unilaterally exit every live vtxo after the ASP dies. Triggers: a
       // boot reconcile now, the wallet's funds subscription (fires for
@@ -571,6 +606,10 @@ async function main(): Promise<void> {
       if (boardingHistoryInterval) {
         clearInterval(boardingHistoryInterval)
         boardingHistoryInterval = undefined
+      }
+      if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval)
+        autoRefreshInterval = undefined
       }
       boltzWs?.stop()
       boltzWs = undefined
@@ -668,6 +707,7 @@ async function main(): Promise<void> {
     clearInterval(eventPrune)
     if (receiveReconcilerInterval) clearInterval(receiveReconcilerInterval)
     if (boardingHistoryInterval) clearInterval(boardingHistoryInterval)
+    if (autoRefreshInterval) clearInterval(autoRefreshInterval)
     boltzWs?.stop()
     proofSync?.stop()
     stopIncomingFunds?.()

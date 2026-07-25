@@ -225,6 +225,18 @@ A manual **Refresh** button that folds **everything** into one fresh VTXO. This
 is the only path that turns sub-dust / swept funds back into offchain-spendable
 money without going onchain.
 
+**Automatic trigger (2026-07-25):** the same consolidate-all is also the
+*automatic* renewal path — `src/auto_refresh.ts` polls every 10 min and runs
+the no-args `wallet.settle()` once any dust+ spendable VTXO nears expiry
+(sub-dust/swept can't trigger on their own: post-anchor-rule arkd defers
+rounds anchored only by them). Rationale = the same win-win as the button:
+one wholesale round instead of several partial renewals. One knob only:
+the window is derived as **2× `VTXO_RENEW_THRESHOLD_SECONDS`** (wallet.ts,
+currently 1h → 2h), so the SDK's `settlementConfig` renewal underneath is
+structurally always the **backstop** — it fires only if the loop failed
+repeatedly (30-min failure backoff), and then partial-renews just the
+expiring VTXO.
+
 - **Call: `wallet.settle()` with no params.** Per the ASP operator workspace's
   `SETTLEMENT_TRIGGERS.md` (trigger #1 — not in this repo), the no-param
   path sweeps **all** non-expired boarding inputs + **all** VTXOs
