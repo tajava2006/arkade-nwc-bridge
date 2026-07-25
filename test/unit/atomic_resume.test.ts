@@ -190,4 +190,43 @@ describe('resumeAtomicSends', () => {
     expect(r.failed.map((f) => f.id)).toEqual(['s-bad'])
     expect(r.refunded).toEqual(['s-good'])
   })
+
+  test('operator DM: claimed reconcile says "after restart", once — terminal row goes silent', async () => {
+    plantSend('s-dm-claim', 'ln_inflight', NOW + 3600)
+    stubStatus({ 's-dm-claim': { state: 'claimed', preimage: 'ee'.repeat(32) } })
+    const calls: Array<{ kind: string; text: string }> = []
+    const deps = {
+      ...makeDeps(),
+      notify: ((kind: string, build: () => string) =>
+        calls.push({ kind, text: build() })) as never,
+    }
+    await resumeAtomicSends(deps, noRefund, spent)
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.kind).toBe('send-subdust')
+    expect(calls[0]!.text).toContain('after restart')
+    expect(calls[0]!.text).toContain('21 sats')
+
+    // Terminal now — listResumable excludes it, so the next pass can't re-DM.
+    await resumeAtomicSends(deps, noRefund, spent)
+    expect(calls.length).toBe(1)
+  })
+
+  test('operator DM: failed→refund_wait notifies on the transition edge only', async () => {
+    plantSend('s-dm-rw', 'funded', NOW + 3600)
+    stubStatus({ 's-dm-rw': { state: 'failed' } })
+    const calls: Array<{ kind: string; text: string }> = []
+    const deps = {
+      ...makeDeps(),
+      notify: ((kind: string, build: () => string) =>
+        calls.push({ kind, text: build() })) as never,
+    }
+    await resumeAtomicSends(deps, noRefund)
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.kind).toBe('send-fail')
+    expect(calls[0]!.text).toContain('refundable after T')
+
+    // Still refund_wait pre-T on the next poll — the state gate keeps quiet.
+    await resumeAtomicSends(deps, noRefund)
+    expect(calls.length).toBe(1)
+  })
 })

@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
 import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { isSubdust, type Wallet } from '@arkade-os/sdk'
 import { atomicSubdustSend } from './atomic/send'
+import type { NotifyFn } from './nostr/notifier'
 
 // Below P2TR dust a Boltz submarine swap can't settle: the vHTLC lockup vtxo is
 // sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the claim, so the swap
@@ -29,6 +30,8 @@ export interface LnSendDeps {
   arkServerUrl: string
   /** sqlite handle — the atomic sub-dust send persists swaps for refund recovery. */
   db: Database
+  /** Operator DM sink — passed through to the atomic send path. */
+  notify?: NotifyFn
 }
 
 export interface LnSendResult {
@@ -103,7 +106,7 @@ export async function sendLightning(deps: LnSendDeps, invoice: string): Promise<
 
   if (invoiceSats > 0 && invoiceSats < DUST_SATS) {
     return atomicSubdustSend(
-      { wallet: deps.wallet, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl },
+      { wallet: deps.wallet, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl, notify: deps.notify },
       invoice,
       invoiceSats,
     )

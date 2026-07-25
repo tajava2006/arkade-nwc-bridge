@@ -86,6 +86,12 @@ export const OUTBOX_BOOTSTRAP_RELAYS: readonly string[] = [
 ]
 export const OUTBOX_INITIAL_TIMEOUT_MS = 10_000
 
+// Consecutive failed proof-sync passes before the operator gets a
+// health-asp DM (nostr/notifier.ts). With the capped 60s retry backoff,
+// 5 ≈ a few minutes of continuous ASP/indexer unreachability — long enough
+// to skip transient blips, short enough to matter.
+export const EXIT_SYNC_ALERT_THRESHOLD = 5
+
 // CLINK Offers (noffer) — the static, Nostr-native receive code shown on
 // the dashboard. Served under the *account* key (same key the Ark wallet
 // uses; its pubkey is already inside the displayed Ark address, so exposing

@@ -123,6 +123,35 @@ describe('boltz boot reconcile', () => {
     expect(() => reconcilePendingIncoming(temp.db)).not.toThrow()
     expect(txRow(temp).state).toBe('pending')
   })
+
+  test('operator DM: settled fires exactly once across passes, failed stays silent', () => {
+    const calls: Array<{ kind: string; text: string }> = []
+    const notify = (kind: string, build: () => string): void => {
+      calls.push({ kind, text: build() })
+    }
+
+    insertPendingTx(temp)
+    insertSwapRow(temp, 'swap-1', 'invoice.settled', {
+      type: 'reverse',
+      id: 'swap-1',
+      preimage: PREIMAGE,
+      request: { invoiceAmount: 21 },
+    })
+    reconcilePendingIncoming(temp.db, notify as never)
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.kind).toBe('recv-ln')
+    expect(calls[0]!.text).toContain('21 sats')
+
+    // Second boot: the row is settled now — rows-changed gate keeps quiet.
+    reconcilePendingIncoming(temp.db, notify as never)
+    expect(calls.length).toBe(1)
+
+    // A failure flip is unpaid-expiry noise — never DMed.
+    insertPendingTx(temp, { swapId: 'swap-2' })
+    insertSwapRow(temp, 'swap-2', 'swap.expired', { type: 'reverse', id: 'swap-2' })
+    reconcilePendingIncoming(temp.db, notify as never)
+    expect(calls.length).toBe(1)
+  })
 })
 
 describe('syncSwapToDb (swap event → table sync)', () => {

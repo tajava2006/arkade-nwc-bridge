@@ -56,6 +56,7 @@ import { buildExitStepper, probeExitStep } from '../exit/stepper'
 import { nofferDecode, OfferPriceType } from '../clink/nip19_offer'
 import { requestNofferInvoice, clinkErrorMessage } from '../clink/send'
 import type { OutboxWatcher } from '../nostr/outbox'
+import type { NotifyFn } from '../nostr/notifier'
 import type { SseHub } from '../lib/sse'
 import type { AsyncCache } from '../lib/cache'
 import {
@@ -171,6 +172,12 @@ export interface WebServerDeps {
   sseHub: SseHub
   outbox: OutboxWatcher
   /**
+   * Operator DM sink for web-initiated money events (offboards; forwarded
+   * into the shared LN-send/refund cores). A stable forwarder from index.ts
+   * that no-ops until the notifier exists — safe to hold from setup mode.
+   */
+  notify?: NotifyFn
+  /**
    * Brings up wallet → boltz → nostr inside the same process. Called from
    * POST /setup after the account row is written. Throws if wiring up the
    * Ark/Boltz/relay clients fails — caller is responsible for cleaning up
@@ -191,7 +198,7 @@ export interface WebServer {
 }
 
 export function startWebServer(deps: WebServerDeps): WebServer {
-  const { cfg, db, state, sseHub, outbox, bootReady, validateServer = validateServerSet } = deps
+  const { cfg, db, state, sseHub, outbox, bootReady, notify, validateServer = validateServerSet } = deps
 
   const redirectToSetup = (): Response => Response.redirect('/setup', 303)
 
@@ -916,7 +923,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           if (!swapId) return back(false, 'swapId is required')
           try {
             const res = await refundAtomicSend(
-              { wallet: r.ready.wallet, arkServerUrl: r.ready.arkServerUrl, db, esploraUrl: cfg.esploraUrls[0] },
+              { wallet: r.ready.wallet, arkServerUrl: r.ready.arkServerUrl, db, esploraUrl: cfg.esploraUrls[0], notify },
               swapId,
             )
             return back(true, `refunded ${res.amount.toLocaleString()} sats (arkTx ${res.txid.slice(0, 12)}…)`)
@@ -1123,6 +1130,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                   boltzApiUrl: ready.boltzApiUrl,
                   arkServerUrl: ready.arkServerUrl,
                   db,
+                  notify,
                 },
                 destination,
               )
@@ -1211,8 +1219,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 amountArg,
               )
               markOffboardSettled(db, row.id, txid)
+              notify?.(
+                'offboard',
+                () =>
+                  `offboard: ${recipientSat.toLocaleString()} sats -> ${destination.slice(0, 12)}…${destination.slice(-4)} settled (ark tx ${txid.slice(0, 12)}…)`,
+              )
             } catch (err) {
               markOffboardFailed(db, row.id, errMsg(err))
+              notify?.(
+                'offboard',
+                () =>
+                  `offboard: ${recipientSat.toLocaleString()} sats -> ${destination.slice(0, 12)}…${destination.slice(-4)} FAILED: ${errMsg(err)}`,
+              )
             }
             broadcastOffboards()
             void ready.caches.balance.refresh()

@@ -1,6 +1,7 @@
 import {
   ArkadeSwaps,
   BoltzSwapProvider,
+  decodeInvoice,
   isPendingReverseSwap,
   isPendingSubmarineSwap,
   isReverseFinalStatus,
@@ -13,6 +14,7 @@ import type { Wallet } from '@arkade-os/sdk'
 import type { Database } from 'bun:sqlite'
 import { SqliteSwapRepository } from './boltz_repository'
 import type { Config } from './config'
+import type { NotifyFn } from './nostr/notifier'
 
 export interface BoltzContext {
   swaps: ArkadeSwaps
@@ -28,6 +30,14 @@ export async function initBoltz(deps: {
    * without coupling this module to the nostr stack.
    */
   onReverseSettled?: (swap: BoltzReverseSwap) => void
+  /**
+   * Operator DM sink (same nostr-neutral philosophy as onReverseSettled —
+   * this module only sees a string sink). Submarine terminals are notified
+   * from HERE, not the pay_invoice handler: the SDK fires once per swap
+   * whether it settled live (NWC or web) or was resumed across a restart,
+   * so a single source can't double-fire against the handler's own path.
+   */
+  notify?: NotifyFn
 }): Promise<BoltzContext> {
   const swaps = await ArkadeSwaps.create({
     wallet: deps.wallet,
@@ -42,8 +52,36 @@ export async function initBoltz(deps: {
         onSwapCompleted: (swap) => {
           syncSwapToDb(deps.db, swap, 'settled')
           if (deps.onReverseSettled && isPendingReverseSwap(swap)) deps.onReverseSettled(swap)
+          if (isPendingSubmarineSwap(swap)) {
+            deps.notify?.('send-ln', () => {
+              const nominal = decodeInvoice(swap.request.invoice).amountSats
+              const fee = swap.response.expectedAmount - nominal
+              return `send: LN paid — ${nominal} sats (+${fee} fee) [swap ${swap.id.slice(0, 8)}]`
+            })
+          }
         },
-        onSwapFailed: (swap, error) => syncSwapToDb(deps.db, swap, 'failed', error.message),
+        onSwapFailed: (swap, error) => {
+          syncSwapToDb(deps.db, swap, 'failed', error.message)
+          // Submarine only: a failed reverse swap is an unpaid invoice
+          // expiring — routine noise, deliberately not notified.
+          if (isPendingSubmarineSwap(swap)) {
+            deps.notify?.('send-fail', () => {
+              const nominal = decodeInvoice(swap.request.invoice).amountSats
+              return `send: LN payment FAILED — ${nominal} sats: ${error.message} [swap ${swap.id.slice(0, 8)}]`
+            })
+          }
+        },
+        // Observer-only: the SDK executes the refund either way; this just
+        // makes it distinguishable from a plain failure for the operator.
+        // claim* actions are ignored — settles are onSwapCompleted's story.
+        onActionExecuted: (swap, action) => {
+          if (action === 'refund' || action === 'refundArk') {
+            deps.notify?.(
+              'refund',
+              () => `send: submarine swap refunded to wallet [swap ${swap.id.slice(0, 8)}]`,
+            )
+          }
+        },
       },
     },
   })
@@ -54,12 +92,12 @@ export async function initBoltz(deps: {
   // offline) will already be terminal in boltz_swaps but still 'pending'
   // in our invoices table — reconcile those once here so the SDK update
   // path and the bridge's table stay in lockstep.
-  reconcilePendingIncoming(deps.db)
+  reconcilePendingIncoming(deps.db, deps.notify)
 
   return { swaps }
 }
 
-export function reconcilePendingIncoming(db: Database): void {
+export function reconcilePendingIncoming(db: Database, notify?: NotifyFn): void {
   // Reverse swaps that completed before the listener existed (or while the
   // bridge was offline) are already terminal in boltz_swaps but still
   // 'pending' in our transactions table — the SwapManager's resume loop
@@ -93,7 +131,7 @@ export function reconcilePendingIncoming(db: Database): void {
 
     const newState = isReverseSuccessStatus(status) ? 'settled' : 'failed'
     const swap = JSON.parse(swapRow.data) as BoltzReverseSwap
-    db.query(
+    const res = db.query(
       `UPDATE transactions
          SET state = ?,
              preimage = COALESCE(preimage, ?),
@@ -101,6 +139,14 @@ export function reconcilePendingIncoming(db: Database): void {
        WHERE type = 'incoming' AND swap_id = ? AND state = 'pending'`,
     ).run(newState, swap.preimage, now, row.swap_id)
     reconciled++
+    // Notify only when THIS pass flipped the row (rows-changed gate keeps
+    // it exactly-once across restarts); failed = unpaid-expiry noise, skip.
+    if (res.changes > 0 && newState === 'settled') {
+      notify?.(
+        'recv-ln',
+        () => `recv: LN invoice settled — ${swap.request.invoiceAmount} sats [swap ${swap.id.slice(0, 8)}]`,
+      )
+    }
   }
 
   if (reconciled > 0) {

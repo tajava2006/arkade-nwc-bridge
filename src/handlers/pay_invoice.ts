@@ -7,6 +7,7 @@ import { NwcError } from '../lib/errors'
 import { sendLightning } from '../ln_send'
 import { satsToMsats } from '../lib/msat'
 import type { Connection } from '../nostr/connections'
+import type { NotifyFn } from '../nostr/notifier'
 
 export interface PayInvoiceDeps {
   swaps: ArkadeSwaps
@@ -19,6 +20,12 @@ export interface PayInvoiceDeps {
   boltzApiUrl: string
   /** ASP (arkd) REST base — the atomic sub-dust send needs server params. */
   arkServerUrl: string
+  /**
+   * Operator DM sink, forwarded into sendLightning. Submarine terminals are
+   * notified from boltz.ts's SDK listener (single source), so this handler
+   * itself never calls it — only the atomic sub-dust path underneath does.
+   */
+  notify?: NotifyFn
 }
 
 export async function handlePayInvoice(

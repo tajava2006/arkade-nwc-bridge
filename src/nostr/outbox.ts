@@ -12,6 +12,14 @@ import { openPersistentSub, type PersistentSub } from './persistent_sub'
 // directions on the same set so the read/write asymmetry doesn't apply.
 const OUTBOX_KIND = 10002
 
+// NIP-17 "DM relay list" — replaceable, one per author, `relay` tags (not
+// 'r'). Where the account's own client reads gift-wrapped DMs. Tracked for
+// the primary (account) key only: its presence is the signal that a NIP-17
+// capable client is set up, and its relays are where the notifier's
+// self-DMs must land to be seen. Deliberately decoupled from the 10002
+// precedence chain — DM relays never feed NWC connection URIs.
+const DM_RELAY_KIND = 10050
+
 /**
  * Where the active relay set came from, in precedence order:
  *   - 'user'     — the account key's own 10002 (standalone user manages
@@ -72,6 +80,14 @@ export interface OutboxWatcher {
    * `authors:[a,b]` + `limit` is inconsistent for replaceable events.
    */
   setPrimaryPubkey(pubkey: string): void
+  /**
+   * The primary key's own NIP-17 DM relay list (kind 10050 `relay` tags),
+   * or [] while none is known. Empty means "no NIP-17 client set up" —
+   * the notifier reads that as its gate.
+   */
+  getDmRelays(): string[]
+  /** True once a non-empty 10050 for the primary key has been processed. */
+  hasDmRelayList(): boolean
   /** Live connection state of the bootstrap relays this watcher uses. */
   getBootstrapRelayStatus(): RelayStatus[]
   /** Live connection state of the active relay set. */
@@ -101,8 +117,12 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
   // in by setPrimaryPubkey once the account key exists.
   const operator: AuthorState = { relays: [], lastCreatedAt: 0 }
   const user: AuthorState = { relays: [], lastCreatedAt: 0 }
+  // Primary key's 10050. Same latest-replaceable bookkeeping as the 10002
+  // authors, but it never participates in recompute() — see DM_RELAY_KIND.
+  const dm: AuthorState = { relays: [], lastCreatedAt: 0 }
   let userPubkey: string | null = null
   let userSub: PersistentSub | null = null
+  let dmSub: PersistentSub | null = null
 
   let effective: string[] = [...staticFallback]
   let source: OutboxSource = 'fallback'
@@ -172,6 +192,14 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
     }
   }
 
+  const handleDmEvent = (event: NostrEvent): void => {
+    if (event.kind !== DM_RELAY_KIND) return
+    if (!userPubkey || event.pubkey !== userPubkey) return
+    if (event.created_at <= dm.lastCreatedAt) return
+    dm.lastCreatedAt = event.created_at
+    dm.relays = extractDmRelays(event).map(normalizeRelayUrl)
+  }
+
   // Pre-warm bootstrap and the static fallback. subscribeMany on
   // bootstrap will also ensureRelay, but doing it explicitly keeps the
   // intent clear (and seeds status before subscribeMany's handshake).
@@ -214,9 +242,15 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
         userSub.close()
         userSub = null
       }
+      if (dmSub) {
+        dmSub.close()
+        dmSub = null
+      }
       userPubkey = pubkey
       user.relays = []
       user.lastCreatedAt = 0
+      dm.relays = []
+      dm.lastCreatedAt = 0
       userSub = openPersistentSub({
         pool,
         relays: bootstrap,
@@ -224,9 +258,22 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
         filter: { kinds: [OUTBOX_KIND], authors: [pubkey], limit: 1 },
         onevent: handleEvent,
       })
+      // Separate sub rather than widening the user filter: relays apply
+      // `limit` across a whole filter, so kinds:[10002,10050]+limit could
+      // starve whichever replaceable is older (same reasoning as the
+      // user/operator split above).
+      dmSub = openPersistentSub({
+        pool,
+        relays: bootstrap,
+        label: 'outbox-dm',
+        filter: { kinds: [DM_RELAY_KIND], authors: [pubkey], limit: 1 },
+        onevent: handleDmEvent,
+      })
       // Clearing prior user state may revert the active set to operator.
       recompute()
     },
+    getDmRelays: () => [...dm.relays],
+    hasDmRelayList: () => dm.relays.length > 0,
     getBootstrapRelayStatus: () => snapshot(pool, bootstrap),
     getOutboxRelayStatus: () => snapshot(pool, effective),
     onOutboxChange(fn) {
@@ -238,6 +285,7 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
     async stop() {
       operatorSub.close()
       userSub?.close()
+      dmSub?.close()
       // Pool is owned by the caller (index.ts) — they close it after
       // every subsystem has stopped.
     },
@@ -265,10 +313,19 @@ export function normalizeRelayUrl(url: string): string {
 }
 
 function extractRelays(event: NostrEvent): string[] {
+  return extractTagUrls(event, 'r')
+}
+
+// Kind 10050 carries `relay` tags, not NIP-65's 'r' (nips/17.md).
+function extractDmRelays(event: NostrEvent): string[] {
+  return extractTagUrls(event, 'relay')
+}
+
+function extractTagUrls(event: NostrEvent, tagName: string): string[] {
   const out: string[] = []
   const seen = new Set<string>()
   for (const tag of event.tags) {
-    if (tag[0] !== 'r') continue
+    if (tag[0] !== tagName) continue
     const url = tag[1]
     if (typeof url !== 'string' || url === '') continue
     if (seen.has(url)) continue

@@ -71,7 +71,23 @@ src/
                                exists) and OUTBOX_FALLBACK_PUBKEY (operator).
                                Active set = user > operator > NWC_RELAYS_FALLBACK
                                (getOutboxSource reports which); exposes that +
-                               bootstrap / outbox relay status snapshots
+                               bootstrap / outbox relay status snapshots.
+                               Also watches the primary key's kind-10050 DM
+                               relay list (getDmRelays/hasDmRelayList) — the
+                               notifier's gate + publish targets; never feeds
+                               the NWC relay set
+    notifier.ts              — NIP-17 self-DM operational notifications:
+                               notify(kind, buildThunk) enqueues, a single
+                               drain loop gift-wraps (nip17.wrapEvent, to our
+                               own npub) and publishes to the 10050 relays.
+                               Never throws, never awaited by callers; no
+                               10050 ⇒ items gate-dropped after a 30s grace.
+                               NOTIFY_KINDS is the per-category toggle seam
+                               (all on today; `enabled` dep for a future
+                               settings surface). Hook sites thread the
+                               stable `notify` forwarder from index.ts
+    publish.ts               — shared best-effort publishToRelays (allSettled,
+                               per-relay warn, never throws)
     persistent_sub.ts        — self-healing subscription wrapper: one
                                sub per relay, re-issues the REQ when
                                nostr-tools permanently kills a socket's
@@ -160,9 +176,16 @@ row exists. Logs go to stdout; when running in background pipe to
   service maps it to NIP-47's error envelope. Unwrapped errors
   become `INTERNAL` — fine as a fallback but prefer specificity.
 - **Publishing is best-effort.** Use `publishToRelays` in
-  [`src/nostr/service.ts`](src/nostr/service.ts), never raw
+  [`src/nostr/publish.ts`](src/nostr/publish.ts), never raw
   `Promise.all(pool.publish(...))` — a single timing-out relay
   must not crash the bridge.
+- **Notifier hooks must stay fire-and-forget.** Every operator-DM call
+  is `notify?.(kind, () => \`...\`)` placed AFTER an existing state
+  transition succeeds; the thunk runs inside the notifier's try/catch,
+  so hook sites never add throw/await risk to a money path. Any db
+  read that decides WHETHER to notify gets its own try/catch (see the
+  recv gates). Don't notify from two places for one event — each event
+  has one owning site (see the kind comments in notifier.ts).
 - **Web → Nostr direction only.** Web calls
   `NostrService.registerConnection` / `unregisterConnection` via
   its narrow interface. Don't reach into pool/handler internals

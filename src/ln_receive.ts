@@ -3,6 +3,7 @@ import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
 import { issueAtomicReceive, driveAtomicReceives, type AtomicReceiveDeps } from './atomic/receive'
 import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
+import type { NotifyFn } from './nostr/notifier'
 
 // Bitcoin P2TR standard dust. Below this a Boltz reverse swap can't settle: the
 // vHTLC lockup vtxo is sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the
@@ -23,10 +24,12 @@ export interface LnReceiveDeps {
   arkServerUrl: string
   /** sqlite handle — the atomic sub-dust receive persists swaps for restart-safe claiming. */
   db: Database
+  /** Operator DM sink — passed through to the atomic receive driver. */
+  notify?: NotifyFn
 }
 
 function atomicDeps(deps: LnReceiveDeps): AtomicReceiveDeps {
-  return { identity: deps.wallet.identity, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl }
+  return { identity: deps.wallet.identity, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl, notify: deps.notify }
 }
 
 export interface IssueInvoiceParams {

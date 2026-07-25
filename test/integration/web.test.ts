@@ -109,6 +109,8 @@ const STUB_OUTBOX: OutboxWatcher = {
   getOutboxSource: () => 'operator',
   isResolved: () => true,
   setPrimaryPubkey: () => {},
+  getDmRelays: () => [],
+  hasDmRelayList: () => false,
   getBootstrapRelayStatus: () => [],
   getOutboxRelayStatus: () => [{ url: 'wss://r', connected: false }],
   onOutboxChange: () => () => {},

@@ -14,6 +14,9 @@ import {
   validateZapRequest,
   zapDescriptionHash,
 } from '../../src/clink/zap'
+import { sendOfferReceipt } from '../../src/clink/offers'
+import type { BoltzReverseSwap } from '@arkade-os/boltz-swap'
+import { openTempDb } from '../helpers/db'
 
 // The noffer codec is vendored TLV/bech32 framing (the error-prone part) and
 // the 9735 receipt is what makes zaps VISIBLE on Nostr clients — a silently
@@ -170,5 +173,92 @@ describe('publishZapReceipt (NIP-57 Appendix E)', () => {
     const { pool, published } = capturePool()
     await publishZapReceipt({ pool, secretKey: SERVICE_SK }, zapRequest, 'lnbc21fake')
     expect(published).toHaveLength(0)
+  })
+})
+
+describe('sendOfferReceipt operator DM', () => {
+  const stubPool = (): SimplePool =>
+    ({
+      publish: (relays: string[]) => relays.map(() => Promise.resolve('ok')),
+    }) as unknown as SimplePool
+
+  const SWAP = {
+    id: 'swap-dm-1',
+    preimage: 'aa'.repeat(32),
+    request: { invoiceAmount: 500 },
+  } as unknown as BoltzReverseSwap
+
+  function insertReceiptRow(
+    db: import('bun:sqlite').Database,
+    over: { zapRequest?: string | null; zapInvoice?: string | null } = {},
+  ): void {
+    db.query(
+      `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      SWAP.id,
+      PAYER_PUB,
+      'req-1',
+      'wss://r',
+      over.zapRequest ?? null,
+      over.zapInvoice ?? null,
+      Math.floor(Date.now() / 1000),
+    )
+  }
+
+  test('zap: payer npub + 9734 amount (msat→sat) + comment, exactly once', async () => {
+    const temp = openTempDb()
+    try {
+      insertReceiptRow(temp.db, {
+        zapRequest: JSON.stringify({
+          pubkey: PAYER_PUB,
+          content: 'gm',
+          tags: [['amount', '21000']],
+        }),
+        zapInvoice: 'lnbc21fake',
+      })
+      const calls: Array<{ kind: string; text: string }> = []
+      const deps = {
+        pool: stubPool(),
+        db: temp.db,
+        secretKey: SERVICE_SK,
+        notify: (kind: string, build: () => string) => calls.push({ kind, text: build() }),
+      }
+      await sendOfferReceipt(deps as never, SWAP)
+      expect(calls.length).toBe(1)
+      expect(calls[0]!.kind).toBe('recv-noffer')
+      expect(calls[0]!.text).toContain('zap 21 sats')
+      expect(calls[0]!.text).toContain('"gm"')
+      expect(calls[0]!.text).toContain('npub1')
+
+      // The row DELETE is the dedup — a reconcile pass re-running the same
+      // swap finds nothing and stays silent.
+      await sendOfferReceipt(deps as never, SWAP)
+      expect(calls.length).toBe(1)
+    } finally {
+      temp.cleanup()
+    }
+  })
+
+  test('plain noffer payment falls back to the swap invoice amount', async () => {
+    const temp = openTempDb()
+    try {
+      insertReceiptRow(temp.db)
+      const calls: Array<{ kind: string; text: string }> = []
+      await sendOfferReceipt(
+        {
+          pool: stubPool(),
+          db: temp.db,
+          secretKey: SERVICE_SK,
+          notify: ((kind: string, build: () => string) =>
+            calls.push({ kind, text: build() })) as never,
+        },
+        SWAP,
+      )
+      expect(calls.length).toBe(1)
+      expect(calls[0]!.text).toContain('noffer payment 500 sats')
+    } finally {
+      temp.cleanup()
+    }
   })
 })

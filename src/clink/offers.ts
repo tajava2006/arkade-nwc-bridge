@@ -11,8 +11,11 @@ import {
 } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
 
+import { npubEncode } from 'nostr-tools/nip19'
+
 import { CLINK_OFFER_ID } from '../defaults'
 import { issueInvoice, type IssuedInvoice } from '../ln_receive'
+import type { NotifyFn } from '../nostr/notifier'
 import { SqliteAtomicSwapRepository, SwapDirection } from '../atomic'
 import { decryptContent, encryptContent } from '../nostr/crypto'
 import { openPersistentSub, type PersistentSub } from '../nostr/persistent_sub'
@@ -367,8 +370,32 @@ async function publishReceipt(
   }
 }
 
+// Operator-DM line for a CLINK receive. Runs inside the notify thunk, so
+// JSON.parse/npubEncode throwing is the notifier's problem, never the ack
+// path's. Zaps override payer/amount from the 9734 (its `amount` is msat)
+// and carry the comment; plain offer payments fall back to the row + swap.
+function describeClinkReceive(
+  row: { payer_pubkey: string; zap_request: string | null },
+  amountSats: number | undefined,
+): string {
+  let amount = amountSats
+  let comment = ''
+  let payer = row.payer_pubkey
+  if (row.zap_request) {
+    const zap = JSON.parse(row.zap_request) as { pubkey: string; content: string; tags: string[][] }
+    payer = zap.pubkey
+    const amountTag = zap.tags.find((t) => t[0] === 'amount')?.[1]
+    if (amountTag) amount = Math.floor(Number(amountTag) / 1000)
+    comment = zap.content
+  }
+  const who = `${npubEncode(payer).slice(0, 13)}…`
+  const what = row.zap_request ? 'zap' : 'noffer payment'
+  const note = comment ? ` — "${comment.length > 80 ? `${comment.slice(0, 80)}…` : comment}"` : ''
+  return `recv: ${what} ${amount ?? '?'} sats from ${who}${note}`
+}
+
 export async function sendOfferReceipt(
-  deps: { pool: SimplePool; db: Database; secretKey: Uint8Array },
+  deps: { pool: SimplePool; db: Database; secretKey: Uint8Array; notify?: NotifyFn },
   swap: BoltzReverseSwap,
 ): Promise<void> {
   const row = deps.db
@@ -377,6 +404,13 @@ export async function sendOfferReceipt(
     )
     .get(swap.id)
   if (!row) return // not an offer swap (or already acked)
+
+  // Single funnel for live (onReverseSettled) and boot/periodic reconcile —
+  // the row DELETE below is the existing dedup, so this fires once per swap.
+  deps.notify?.(
+    'recv-noffer',
+    () => `${describeClinkReceive(row, swap.request.invoiceAmount)} [swap ${swap.id.slice(0, 8)}]`,
+  )
 
   await publishReceipt(deps, row, swap.preimage)
   if (row.zap_request && row.zap_invoice) {
@@ -422,6 +456,7 @@ export async function reconcileClinkAcks(deps: {
   db: Database
   secretKey: Uint8Array
   boltzApiUrl: string
+  notify?: NotifyFn
 }): Promise<void> {
   // ≥dust: drive off the small receipts table, PK-lookup boltz_swaps per row.
   const offerRows = deps.db
@@ -460,6 +495,12 @@ export async function reconcileClinkAcks(deps: {
     try {
       const swap = repo.getByPaymentHash(row.payment_hash)
       if (swap?.direction === SwapDirection.Receive && swap.state === 'settled') {
+        // Row DELETE below is the dedup, same as the ≥dust funnel above.
+        deps.notify?.(
+          'recv-noffer',
+          () =>
+            `${describeClinkReceive(row, swap.amount)} (sub-dust) [hash ${row.payment_hash.slice(0, 8)}]`,
+        )
         await publishReceipt(deps, row, swap.preimage ?? undefined)
         if (row.zap_request && row.zap_invoice) {
           await publishZapReceipt(deps, row.zap_request, row.zap_invoice, swap.preimage ?? undefined)

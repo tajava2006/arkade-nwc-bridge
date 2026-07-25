@@ -24,6 +24,7 @@ import {
 } from './index'
 import { boltzFetch, boltzGet } from './boltz_http'
 import { confirmSpent, hrp, timelockType, toXOnly } from './ark_util'
+import type { NotifyFn } from '../nostr/notifier'
 
 // Bridge side of the atomic sub-dust RECEIVE (LN→ARK). The bridge is the CLAIMER
 // (C): it generates the preimage, gets a HOLD invoice from boltz, and once boltz
@@ -43,6 +44,30 @@ export interface AtomicReceiveDeps {
   db: Database
   /** Boltz REST base (no /v2 suffix). */
   boltzApiUrl: string
+  /** Operator DM sink — fire-and-forget, never awaited on the swap path. */
+  notify?: NotifyFn
+}
+
+// CLINK-originated sub-dust receives are notified by reconcileClinkAcks with
+// payer/zap detail — only NWC make_invoice ones are announced here. The gate
+// read is fenced so a db hiccup can't leak into the claim/settle path.
+function notifyReceiveSettled(
+  deps: AtomicReceiveDeps,
+  swap: { amount: number; paymentHash: string },
+): void {
+  try {
+    const clinkOwned = deps.db
+      .query('SELECT 1 FROM clink_subdust_receipts WHERE payment_hash = ?')
+      .get(swap.paymentHash)
+    if (clinkOwned) return
+    deps.notify?.(
+      'recv-subdust',
+      () =>
+        `recv: LN invoice settled — ${swap.amount} sats (sub-dust) [hash ${swap.paymentHash.slice(0, 8)}]`,
+    )
+  } catch (err) {
+    console.warn('notifier: recv-subdust gate check failed:', err)
+  }
 }
 
 export interface AtomicReceiveInvoice {
@@ -159,6 +184,9 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   // gave the payer back (unclaimed past T); nothing to claim, terminalize quietly.
   if (status.state === 'settled') {
     advanceReceive(repo, swapId, 'settled')
+    // Exactly-once: the isTerminal early-return above means this converge
+    // path runs only the pass that first flips the row.
+    notifyReceiveSettled(deps, swap)
     return true
   }
   if (status.state === 'refunded' || status.state === 'refund_wait') {
@@ -237,6 +265,7 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   // Reveal the preimage to boltz so it settles the hold invoice.
   await boltzFetch(`${deps.boltzApiUrl}/v2/subdust/atomic/receive/settle`, { swapId, preimage: swap.preimage })
   repo.transition(swapId, 'settled')
+  notifyReceiveSettled(deps, swap)
   return true
 }
 

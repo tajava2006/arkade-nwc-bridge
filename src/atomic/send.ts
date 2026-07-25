@@ -29,6 +29,7 @@ import { boltzFetch } from './boltz_http'
 import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from './ark_util'
 import { captureVtxo, expirySec } from '../exit/proof_sync'
 import { gcOrphanProofs, removeVtxo } from '../exit/vault'
+import type { NotifyFn } from '../nostr/notifier'
 
 // Bridge side of the atomic sub-dust SEND (ARK -> LN). The bridge is the funder
 // (F): it funds a 4-leaf shared vtxo, pre-signs the claim split, and hands the
@@ -53,6 +54,8 @@ export interface AtomicSendDeps {
    * collaborativeSpend), so not asking is better than asking early.
    */
   esploraUrl?: string
+  /** Operator DM sink — fire-and-forget, never awaited on the swap path. */
+  notify?: NotifyFn
 }
 
 export interface AtomicSendResult {
@@ -268,6 +271,11 @@ export async function atomicSubdustSend(
   )
   if (fund.status !== 'claimed' || fund.preimage === undefined) {
     repo.transition(init.swapId, fund.status === 'failed' ? 'refund_wait' : 'failed')
+    deps.notify?.(
+      'send-fail',
+      () =>
+        `send: sub-dust LN pay failed (${fund.error || fund.status}) — funding refundable after T [hash ${paymentHash.slice(0, 8)}]`,
+    )
     throw new Error(`atomic send did not complete (${fund.status}): ${fund.error ?? ''} — funds refundable after T`)
   }
   // Verify-before-bookkeep (F4): confirm boltz actually spent our funding before
@@ -288,6 +296,12 @@ export async function atomicSubdustSend(
       `atomic send ${init.swapId}: boltz reported claimed but the shared vtxo isn't spent per the indexer — keeping recoverable (F4); refund executor reclaims V after T`,
     )
   }
+  // After the F4 if/else on purpose: the LN payment succeeded either way
+  // (we hold the preimage) — only the claim bookkeeping differs.
+  deps.notify?.(
+    'send-subdust',
+    () => `send: LN paid — ${a} sats (+${fee} fee, sub-dust) [hash ${paymentHash.slice(0, 8)}]`,
+  )
   return { amount: a + fee, preimage: fund.preimage, txid }
 }
 
@@ -469,6 +483,13 @@ export async function refundAtomicSend(
 
   if (swap.state !== 'refund_wait') repo.transition(swapId, 'refund_wait')
   repo.transition(swapId, 'refunded')
+  // Single funnel for the T-refund executor AND the web /swaps/refund button;
+  // 'refunded' is terminal (transition throws on re-entry), so once per swap.
+  deps.notify?.(
+    'refund',
+    () =>
+      `send: sub-dust refund complete — ${coin.value} sats returned (arkTx ${refundTxid.slice(0, 12)}…) [hash ${swap.paymentHash.slice(0, 8)}]`,
+  )
   releaseVaultRow(deps.db, txid, vout)
   return { txid: refundTxid, amount: coin.value }
 }
@@ -589,6 +610,14 @@ export async function resumeAtomicSends(
     const cur = repo.get(swapId)!
     if (cur.state === 'funded') repo.transition(swapId, 'ln_inflight')
     repo.transition(swapId, 'claimed')
+    // "after restart" wording on purpose: the rare crash-in-the-F4-window
+    // overlap with the live paid DM should read as a reconcile, not a
+    // second payment.
+    deps.notify?.(
+      'send-subdust',
+      () =>
+        `send: sub-dust claim confirmed after restart — ${cur.amount} sats [hash ${cur.paymentHash.slice(0, 8)}]`,
+    )
     if (preimage) repo.setPreimage(swapId, preimage)
     if (fundingOutpoint) {
       const [txid, vout] = fundingOutpoint.split(':')
@@ -643,7 +672,15 @@ export async function resumeAtomicSends(
           // count it as still waiting (the next tick re-checks / T-refund covers).
           if (!(await markClaimed(swap.id, st.preimage, swap.fundingOutpoint))) result.waiting++
         } else if (st?.state === 'failed' || st?.state === 'refund_wait') {
-          if (swap.state !== 'refund_wait') repo.transition(swap.id, 'refund_wait')
+          if (swap.state !== 'refund_wait') {
+            repo.transition(swap.id, 'refund_wait')
+            // Gated on the actual transition so repeat polls stay silent.
+            deps.notify?.(
+              'send-fail',
+              () =>
+                `send: sub-dust LN pay failed — funding refundable after T [hash ${swap.paymentHash.slice(0, 8)}]`,
+            )
+          }
           result.refundWait.push(swap.id)
         } else {
           result.waiting++

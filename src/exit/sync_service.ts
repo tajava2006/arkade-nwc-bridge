@@ -2,6 +2,8 @@ import type { Database } from 'bun:sqlite'
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { syncProofs, type ProofSyncIndexer, type ProofSyncResult } from './proof_sync'
 import { vaultStats, type VaultStats } from './vault'
+import { EXIT_SYNC_ALERT_THRESHOLD } from '../defaults'
+import type { NotifyFn } from '../nostr/notifier'
 
 // Scheduling shell around syncProofs — #04 keeps the pass pure, this owns
 // WHEN it runs:
@@ -41,12 +43,26 @@ export interface ProofSyncTiming {
   debounceMs: number
   retryDelaysMs: readonly number[]
   pollIntervalMs: number
+  /**
+   * Consecutive failed passes before the operator is alerted. With the
+   * capped retry backoff this is roughly minutes of continuous ASP/indexer
+   * unreachability — the bridge's de-facto ASP health probe.
+   */
+  alertThreshold: number
 }
 
 const DEFAULT_TIMING: ProofSyncTiming = {
   debounceMs: 1_500,
   retryDelaysMs: [5_000, 15_000, 60_000],
   pollIntervalMs: 10 * 60 * 1_000,
+  alertThreshold: EXIT_SYNC_ALERT_THRESHOLD,
+}
+
+// DM-sized outpoint list: a mass-sweep pass can quarantine dozens at once.
+function listSome(items: readonly string[], max = 5): string {
+  return items.length <= max
+    ? items.join(', ')
+    : `${items.slice(0, max).join(', ')} (+${items.length - max} more)`
 }
 
 export function startProofSync(deps: {
@@ -57,10 +73,16 @@ export function startProofSync(deps: {
   xOnlyPubkey: Uint8Array
   timing?: Partial<ProofSyncTiming>
   log?: (msg: string) => void
+  /** Operator DM sink (named apart from the local snapshot notify()). */
+  alert?: NotifyFn
 }): ProofSyncService {
   const timing = { ...DEFAULT_TIMING, ...deps.timing }
   const log = deps.log ?? (() => {})
   const listeners = new Set<(snap: ProofSyncSnapshot) => void>()
+  // Edge latch: one DM when consecutive failures cross the threshold, one
+  // when the next pass succeeds. Process-local on purpose — a restart
+  // re-arming the alert is the right behavior, not a bug to persist away.
+  let aspAlerted = false
 
   let running = false
   let stopped = false
@@ -100,10 +122,23 @@ export function startProofSync(deps: {
         log(
           `exit-sync: ⚠ ${result.gc.quarantined.length} vtxo(s) QUARANTINED — dropped by the ASP without evidence: ${result.gc.quarantined.join(', ')}`,
         )
+        // Batched per pass, and quarantineVtxo flags each row only once —
+        // the list here contains just the newly-flagged, so no re-DM on
+        // later passes.
+        deps.alert?.(
+          'health-vault',
+          () =>
+            `health: ${result.gc.quarantined.length} vtxo(s) QUARANTINED (dropped by ASP without evidence): ${listSome(result.gc.quarantined)}`,
+        )
       }
       if (result.gc.expired.length > 0) {
         log(
           `exit-sync: ${result.gc.expired.length} vtxo(s) expired unrefreshed and dropped by the ASP — kept for review (forget them on /exit): ${result.gc.expired.join(', ')}`,
+        )
+        deps.alert?.(
+          'health-vault',
+          () =>
+            `health: ${result.gc.expired.length} vtxo(s) expired unrefreshed and dropped — review /exit: ${listSome(result.gc.expired)}`,
         )
       }
       if (result.gc.released.length > 0) {
@@ -115,10 +150,22 @@ export function startProofSync(deps: {
         log(
           `exit-sync: ${result.failed.length} gap(s) (${reason}) — retrying in ${Math.round(delay / 1000)}s`,
         )
+        if (!aspAlerted && retryCount >= timing.alertThreshold) {
+          aspAlerted = true
+          const failures = retryCount
+          deps.alert?.(
+            'health-asp',
+            () => `health: proof sync degraded — ${result.failed.length} gap(s) for ${failures} passes`,
+          )
+        }
         clearTimeout(retryTimer)
         retryTimer = setTimeout(() => void run('retry'), delay)
       } else {
         retryCount = 0
+        if (aspAlerted) {
+          aspAlerted = false
+          deps.alert?.('health-asp', () => 'health: proof sync recovered')
+        }
         if (result.synced.length > 0) {
           log(`exit-sync: ${result.synced.length} vtxo(s) mirrored (${reason})`)
         }
@@ -138,6 +185,15 @@ export function startProofSync(deps: {
       const delay = timing.retryDelaysMs[Math.min(retryCount, timing.retryDelaysMs.length - 1)]!
       retryCount++
       log(`exit-sync: pass failed (${reason}): ${lastRun.failed[0]!.error} — retrying in ${Math.round(delay / 1000)}s`)
+      if (!aspAlerted && retryCount >= timing.alertThreshold) {
+        aspAlerted = true
+        const failures = retryCount
+        const lastError = lastRun.failed[0]!.error
+        deps.alert?.(
+          'health-asp',
+          () => `health: proof sync failing — ${failures} consecutive failures (${lastError})`,
+        )
+      }
       clearTimeout(retryTimer)
       retryTimer = setTimeout(() => void run('retry'), delay)
     } finally {

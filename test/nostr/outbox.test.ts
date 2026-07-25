@@ -93,6 +93,19 @@ function relayList(sk: Uint8Array, relays: string[]) {
   )
 }
 
+function dmRelayList(sk: Uint8Array, relays: string[], createdAt?: number) {
+  // Kind 10050 carries `relay` tags (NIP-17), not NIP-65's 'r'.
+  return finalizeEvent(
+    {
+      kind: 10050,
+      created_at: createdAt ?? ++clock,
+      tags: relays.map((r) => ['relay', r]),
+      content: '',
+    },
+    sk,
+  )
+}
+
 const norm = (urls: string[]) => urls.map(normalizeRelayUrl).sort()
 
 describe('startOutboxWatcher precedence', () => {
@@ -153,6 +166,71 @@ describe('startOutboxWatcher precedence', () => {
       expect(norm(outbox.getOutboxRelays())).toEqual(
         norm(['wss://op-a.example', 'wss://op-b.example']),
       )
+    } finally {
+      await outbox.stop()
+      pool.close([URL])
+      relay.stop()
+    }
+  })
+})
+
+describe('startOutboxWatcher DM relay list (10050)', () => {
+  test('tracks the primary key 10050 without touching the active outbox set', async () => {
+    const PORT = 48924
+    const URL = `ws://127.0.0.1:${PORT}`
+    const relay = startMockRelay(PORT)
+    const pool = new SimplePool({ enableReconnect: true, enablePing: true })
+
+    const operatorSk = generateSecretKey()
+    const userSk = generateSecretKey()
+    const userPub = getPublicKey(userSk)
+
+    const outbox = await startOutboxWatcher({
+      pool,
+      fallbackPubkey: getPublicKey(operatorSk),
+      bootstrapRelays: [URL],
+      fallback: ['wss://static.example/'],
+      initialTimeoutMs: 300,
+    })
+
+    try {
+      // No primary key yet → no DM list, and a 10050 for an unknown key
+      // must not register (there is no sub for it anyway).
+      expect(outbox.hasDmRelayList()).toBe(false)
+      expect(outbox.getDmRelays()).toEqual([])
+
+      outbox.setPrimaryPubkey(userPub)
+      const before = outbox.getOutboxRelays()
+      await broadcastUntil(
+        relay,
+        dmRelayList(userSk, ['wss://dm-a.example', 'wss://dm-b.example']),
+        () => outbox.hasDmRelayList(),
+      )
+      expect(norm(outbox.getDmRelays())).toEqual(norm(['wss://dm-a.example', 'wss://dm-b.example']))
+      // Decoupling: the DM list never feeds the NWC relay set.
+      expect(outbox.getOutboxRelays()).toEqual(before)
+      expect(outbox.getOutboxSource()).toBe('fallback')
+
+      // Replaceable dedupe: an older 10050 must not roll the list back.
+      relay.broadcast(dmRelayList(userSk, ['wss://stale.example'], 1))
+      await sleep(150)
+      expect(norm(outbox.getDmRelays())).toEqual(norm(['wss://dm-a.example', 'wss://dm-b.example']))
+
+      // Newer 10050 replaces.
+      await broadcastUntil(
+        relay,
+        dmRelayList(userSk, ['wss://dm-c.example']),
+        () => norm(outbox.getDmRelays()).join() === norm(['wss://dm-c.example']).join(),
+      )
+
+      // Re-registering a different primary key resets DM state — a stale
+      // list must not outlive the key it belonged to.
+      outbox.setPrimaryPubkey(getPublicKey(generateSecretKey()))
+      expect(outbox.hasDmRelayList()).toBe(false)
+      expect(outbox.getDmRelays()).toEqual([])
+      // Let the fresh subs' REQs land before teardown closes the socket —
+      // otherwise their async sends surface as unhandled rejections.
+      await sleep(250)
     } finally {
       await outbox.stop()
       pool.close([URL])

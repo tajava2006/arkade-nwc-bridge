@@ -24,6 +24,7 @@ import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink
 import { reconcileAtomicReceives } from './ln_receive'
 import { resumeAtomicSends } from './atomic/send'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
+import { startNotifier, type Notifier, type NotifyFn } from './nostr/notifier'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
 import { SseHub } from './lib/sse'
@@ -201,6 +202,24 @@ async function main(): Promise<void> {
     return exitEngine
   }
 
+  // Operational self-DM notifier (nostr/notifier.ts). Like the exit engine,
+  // created on the first boot attempt (ready OR degraded — pool + nsec are
+  // enough) and reused across mode flips: the thing that reports a failed
+  // bring-up must not be torn down by that failure. Subsystems get the
+  // stable `notify` forwarder, never the instance — so consumers built in
+  // setup mode (before any account exists) hold a valid no-op.
+  let notifier: Notifier | undefined
+  const notify: NotifyFn = (kind, build) => notifier?.notify(kind, build)
+  const ensureNotifier = (privateKey: Uint8Array): void => {
+    if (!notifier) {
+      notifier = startNotifier({
+        pool,
+        secretKey: privateKey,
+        dmRelays: () => outbox.getDmRelays(),
+      })
+    }
+  }
+
   // Bound the processed_events replay-backstop table: rows past the redelivery
   // window can't be replayed, so drop anything older than the TTL. Runs at boot
   // (clears pre-existing bloat) + periodically. Only needs `db`, so it lives out
@@ -235,6 +254,7 @@ async function main(): Promise<void> {
     outbox.setPrimaryPubkey(getPublicKey(privateKey))
 
     ensureExitEngine(privateKey)
+    ensureNotifier(privateKey)
 
     // Unwind stack for a partially-built bring-up. bootReady used to be
     // crash-on-failure (process exit), so a half-created wallet could never
@@ -257,10 +277,29 @@ async function main(): Promise<void> {
         db,
         wallet,
         cfg: bootCfg,
+        notify,
         // When an offer-originated reverse swap settles, ack the payer with a
         // CLINK Payment Receipt. No-op for NWC make_invoice swaps.
         onReverseSettled: (swap) => {
-          sendOfferReceipt({ pool, db, secretKey: privateKey }, swap).catch((err) =>
+          try {
+            // Offer-originated settles are notified by sendOfferReceipt with
+            // payer/zap detail; only the non-CLINK ones (NWC make_invoice)
+            // are ours. The receipt row still exists here — it's deleted
+            // after the receipt publishes.
+            const offerOwned = db
+              .query('SELECT 1 FROM clink_offer_receipts WHERE swap_id = ?')
+              .get(swap.id)
+            if (!offerOwned) {
+              notify(
+                'recv-ln',
+                () =>
+                  `recv: LN invoice settled — ${swap.request.invoiceAmount} sats [swap ${swap.id.slice(0, 8)}]`,
+              )
+            }
+          } catch (err) {
+            console.warn('notifier: recv-ln gate check failed:', err)
+          }
+          sendOfferReceipt({ pool, db, secretKey: privateKey, notify }, swap).catch((err) =>
             console.error('clink: receipt send failed:', err),
           )
         },
@@ -277,6 +316,7 @@ async function main(): Promise<void> {
         wallet,
         swaps,
         pool,
+        notify,
         onClientRequest: (conn) =>
           sseHub.broadcast('connection-seen', { connectionId: conn.id }),
       })
@@ -295,11 +335,11 @@ async function main(): Promise<void> {
       // were down) + sub-dust acks, and NWC make_invoice sub-dust rows — those
       // have no settlement event at all (no swap object), so this poll is the
       // only thing that ever flips them (see ln_receive.ts).
-      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl }
-      const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0] }
+      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, notify }
+      const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
       const reconcileReceives = (): void => {
         void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
-        void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db }).catch((err) =>
+        void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify }).catch((err) =>
           console.error('nwc: atomic sub-dust receive reconcile failed:', err),
         )
         // Send-side resume (§3.4 classifyResume): post-T rows are refunded (the
@@ -376,6 +416,7 @@ async function main(): Promise<void> {
         // believing a disappearance (src/exit/evidence.ts)
         xOnlyPubkey: await identity.xOnlyPublicKey(),
         log: (msg) => console.log(msg),
+        alert: notify,
       })
       proofSync = proofSyncSvc
       proofSyncSvc.onUpdate((snap) => {
@@ -470,8 +511,10 @@ async function main(): Promise<void> {
     try {
       await bootReady(privateKey)
       if (bootAttempts > 0) {
-        console.log(`boot: recovered after ${bootAttempts} failed attempt(s) — ready`)
+        const attempts = bootAttempts
+        console.log(`boot: recovered after ${attempts} failed attempt(s) — ready`)
         sseHub.broadcast('mode-change', { mode: 'ready' })
+        notify('health-boot', () => `health: recovered to ready after ${attempts} failed attempt(s)`)
       }
       bootAttempts = 0
     } catch (err) {
@@ -498,6 +541,9 @@ async function main(): Promise<void> {
           exitEngine: ensureExitEngine(privateKey),
         }
         sseHub.broadcast('mode-change', { mode: 'degraded' })
+        // Once per transition — the retry loop's else branch below only
+        // updates error/attempts, so a long outage doesn't re-DM every 60s.
+        notify('health-boot', () => `health: boot degraded — ${msg} (retrying every 60s)`)
       } else {
         appState.current = { ...appState.current, error: msg, attempts: bootAttempts }
       }
@@ -516,12 +562,15 @@ async function main(): Promise<void> {
       setServerRow(db, { arkServerUrl: ARK_SERVER_URL, boltzApiUrl: BOLTZ_API_URL })
       console.log('  server         backfilled fresh-start row from defaults (grandfathered DB)')
     }
+    // Before the boot attempt, not inside it — the first degraded
+    // down-edge must already have a notifier to report through.
+    ensureNotifier(account.privateKey)
     await bootReadyOrDegrade(account.privateKey)
   } else {
     console.log('  account        none — open /setup to create or import one')
   }
 
-  const web = startWebServer({ cfg, db, state: appState, sseHub, outbox, bootReady })
+  const web = startWebServer({ cfg, db, state: appState, sseHub, outbox, bootReady, notify })
   console.log(`  web ui         ${web.url}`)
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -534,6 +583,9 @@ async function main(): Promise<void> {
     if (bootRetryTimer) clearTimeout(bootRetryTimer)
     exitEngine?.stop()
     sseHub.closeAll()
+    // Clears the queue without awaiting in-flight publishes — teardown
+    // must not wait on relays; the pool below closes them anyway.
+    notifier?.stop()
     await web.stop()
     if (appState.current.mode === 'ready') {
       appState.current.offers.stop()

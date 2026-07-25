@@ -17,6 +17,8 @@ import {
 } from './connections'
 import { decryptContent, encryptContent, pickRequestScheme, type EncryptionScheme } from './crypto'
 import { openPersistentSub, type PersistentSub } from './persistent_sub'
+import type { NotifyFn } from './notifier'
+import { publishToRelays } from './publish'
 import { handleGetInfo } from '../handlers/get_info'
 import { handleGetBalance } from '../handlers/get_balance'
 import { handleMakeInvoice } from '../handlers/make_invoice'
@@ -50,6 +52,8 @@ export interface NostrServiceDeps {
    * "waiting" to "connected".
    */
   onClientRequest?: (conn: Connection) => void
+  /** Operator DM sink — forwarded to pay_invoice for the atomic send path. */
+  notify?: NotifyFn
 }
 
 export interface NostrService {
@@ -183,38 +187,6 @@ async function publishInfoEvent(
   await publishToRelays(pool, relays, signed, `info event (conn #${conn.id})`)
 }
 
-/**
- * Publish to every relay, but never let a single relay's timeout/rejection
- * tank the caller. nostr-tools' SimplePool returns one promise per relay
- * and pool.publish() resolves them independently — Promise.all would
- * reject as soon as any relay fails, which on boot crashes the bridge
- * before it ever finishes subscribing.
- *
- * Treat publishing as best-effort: log per-relay failures, succeed as
- * long as we tried. NIP-47 info events are replaceable, so even if every
- * relay rejects we'll retry on next boot anyway.
- */
-async function publishToRelays(
-  pool: SimplePool,
-  relays: string[],
-  signed: NostrEvent,
-  context: string,
-): Promise<void> {
-  const results = await Promise.allSettled(pool.publish(relays, signed))
-  const failures = results.flatMap((r, i) =>
-    r.status === 'rejected' ? [{ relay: relays[i] ?? '?', reason: r.reason }] : [],
-  )
-  if (failures.length > 0) {
-    for (const f of failures) {
-      console.warn(
-        `nostr: publish failed for ${context} on ${f.relay}: ${
-          f.reason instanceof Error ? f.reason.message : String(f.reason)
-        }`,
-      )
-    }
-  }
-}
-
 async function handleEvent(
   deps: NostrServiceDeps,
   pool: SimplePool,
@@ -328,6 +300,7 @@ async function dispatch(
           wallet: deps.wallet,
           boltzApiUrl: deps.cfg.boltzApiUrl,
           arkServerUrl: deps.cfg.arkServerUrl,
+          notify: deps.notify,
         },
         params,
       )

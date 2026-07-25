@@ -160,4 +160,35 @@ describe('proof sync service (scheduler)', () => {
     expect(snap.lastRun?.failed[0]?.outpoint).toBe('*')
     expect(snap.claim?.total).toBe(1)
   })
+
+  test('operator DM: ASP-down edge fires once at the threshold, recovery once', async () => {
+    const d = deps(new Map([[ark.txid, ark.psbtB64]]))
+    let aspDown = true
+    const calls: Array<{ kind: string; text: string }> = []
+    svc = startProofSync({
+      db: temp.db,
+      indexer: d.indexer,
+      listVtxos: async () => {
+        if (aspDown) throw new Error('asp unreachable')
+        return d.listVtxos()
+      },
+      xOnlyPubkey: new Uint8Array(32).fill(1),
+      timing: { ...TIMING, alertThreshold: 2 },
+      alert: ((kind: string, build: () => string) =>
+        calls.push({ kind, text: build() })) as never,
+    })
+
+    svc.trigger('boot')
+    // Several 30ms retry cycles push retryCount well past the threshold —
+    // the latch must hold it to ONE down-edge DM, not one per retry tick.
+    await sleep(150)
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.kind).toBe('health-asp')
+    expect(calls[0]!.text).toContain('consecutive failures')
+
+    aspDown = false
+    await sleep(80)
+    expect(calls.length).toBe(2)
+    expect(calls[1]!.text).toContain('recovered')
+  })
 })
