@@ -1303,38 +1303,78 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           )
         },
       },
-      /* TEMP-DISABLED (arkade-os/arkd#1119): consolidate-all trips arkd's
-         SETTLEMENT_MIN_EXPIRY_GAP — see the matching commented-out Refresh
-         block in views/send.ts. Restore both together.
       '/refresh': {
         // Consolidate-all: wallet.settle() with no params folds every VTXO
         // (incl. sub-dust + swept) + confirmed boarding into one fresh VTXO.
-        // Also a settlement round, so fire-and-forget like offboard. Not a
-        // money-out action, so no durable row — balance reflects the
-        // result over SSE and failures are logged.
-        POST: () => {
+        // arkd's expiry-gap gate rejects the intent at RegisterIntent time
+        // ("intent deferred") unless something warrants a round now — a
+        // near-expiry dust+ vtxo, boarding, or unrolled input. That rejection
+        // is fast; a round that IS admitted takes minutes. So race a short
+        // window: a fast deferral/error becomes a clear result page, while a
+        // real round falls through to fire-and-forget (background completes,
+        // balance reflects it over SSE). Not a money-out action → no durable row.
+        POST: async () => {
           const r = requireReady()
           if (!r.ok) return r.response
           const ready = r.ready
-          void (async () => {
-            try {
-              const txid = await ready.wallet.settle()
-              console.log(`refresh: consolidated — arkTxid ${txid}`)
-            } catch (err) {
-              console.error(`refresh failed: ${errMsg(err)}`)
-            }
+          const refreshCaches = (): void => {
             void ready.caches.balance.refresh()
             void ready.caches.sendData.refresh()
-          })()
-          return htmlResponse(
-            submittedView({
-              title: 'Refresh submitted',
-              lines: html`<p>Consolidating all VTXOs into one fresh VTXO.</p>`,
-            }),
+          }
+          const settled = ready.wallet.settle().then(
+            (txid) => ({ ok: true as const, txid }),
+            (err) => ({ ok: false as const, err }),
           )
+          const raced = await Promise.race([
+            settled,
+            new Promise<'pending'>((res) => setTimeout(res, 4000, 'pending')),
+          ])
+
+          if (raced === 'pending') {
+            // Round in progress — let it complete in the background.
+            void settled.then((res) => {
+              if (res.ok) console.log(`refresh: consolidated — arkTxid ${res.txid}`)
+              else console.error(`refresh failed: ${errMsg(res.err)}`)
+              refreshCaches()
+            })
+            return htmlResponse(
+              submittedView({
+                title: 'Refresh submitted',
+                lines: html`<p>Consolidating all VTXOs into one fresh VTXO.</p>`,
+              }),
+            )
+          }
+
+          if (raced.ok) {
+            console.log(`refresh: consolidated — arkTxid ${raced.txid}`)
+            refreshCaches()
+            return htmlResponse(
+              sendResultView({ label: 'Refresh', ok: true, detail: `Consolidated — arkTxid ${raced.txid}` }),
+            )
+          }
+
+          // Fast rejection. "intent deferred" isn't a failure — it means no
+          // VTXO is near enough to expiry to warrant a round yet; sub-dust and
+          // swept funds fold in automatically once one is. Surface that instead
+          // of a misleading "submitted" that silently does nothing.
+          const msg = errMsg(raced.err)
+          if (/intent deferred/i.test(msg)) {
+            return htmlResponse(
+              sendResultView({
+                label: 'Refresh — nothing to consolidate',
+                ok: true,
+                detail:
+                  'No VTXO is close enough to expiry to warrant a settlement round right now, ' +
+                  'so nothing was consolidated. Sub-dust and swept funds fold in automatically ' +
+                  'once any VTXO nears expiry — or use an onchain offboard, which always ' +
+                  'consolidates them immediately.',
+              }),
+            )
+          }
+          console.error(`refresh failed: ${msg}`)
+          return sendError('Refresh', msg)
         },
       },
-      */
       '/events': {
         GET: (req) => {
           // Server-Sent Events feed for live UI updates. Open one per
