@@ -13,6 +13,14 @@ import {
   type SendData,
   type VtxoBuckets,
 } from '../../send'
+import { AUTO_REFRESH_THRESHOLD_SECONDS } from '../../auto_refresh'
+
+// "2 hours" / "90 minutes" — whichever divides cleanly, for the Refresh copy
+// here and the FAQ's refresh answer.
+export const RENEW_WINDOW_LABEL =
+  AUTO_REFRESH_THRESHOLD_SECONDS % 3600 === 0
+    ? `${AUTO_REFRESH_THRESHOLD_SECONDS / 3600} hour${AUTO_REFRESH_THRESHOLD_SECONDS / 3600 === 1 ? '' : 's'}`
+    : `${Math.round(AUTO_REFRESH_THRESHOLD_SECONDS / 60)} minutes`
 
 function fmtSats(n: number): string {
   return `${n.toLocaleString()} sats`
@@ -125,7 +133,7 @@ function drainHint(arkInfo: ArkInfo, fees: FeesResponse, buckets: VtxoBuckets): 
       ? html`
           <p class="muted">
             <strong>Emptying the wallet — onchain:</strong> not possible right now — total
-            ${fmtSats(buckets.roundTotalSat)} minus the intent fee (${fmtSats(fee)}) is below
+            ${fmtSats(buckets.roundTotalSat)} minus the withdraw fee (${fmtSats(fee)}) is below
             dust (${fmtSats(dust)}), so no valid onchain output can be made. Top the wallet up
             first, then sweep.
           </p>`
@@ -134,7 +142,7 @@ function drainHint(arkInfo: ArkInfo, fees: FeesResponse, buckets: VtxoBuckets): 
             <strong>Emptying the wallet — onchain:</strong> an offboard (Max) always works — it
             sweeps every VTXO including sub-dust and swept/expired, no Refresh needed, and the
             destination receives <strong>${fmtSats(max)}</strong> (total
-            ${fmtSats(buckets.roundTotalSat)} − intent fee ${fmtSats(fee)}). A <em>partial</em>
+            ${fmtSats(buckets.roundTotalSat)} − withdraw fee ${fmtSats(fee)}). A <em>partial</em>
             onchain send must leave either nothing or at least ${fmtSats(dust)} behind — change
             of 1–${(dust - 1).toLocaleString()} sats is rejected before anything moves.
           </p>`
@@ -224,7 +232,17 @@ export function sendView(args: {
       <p class="muted">
         Consolidate <strong>every</strong> VTXO (incl. sub-dust + swept) into one fresh VTXO,
         resetting the expiry clock. This is the only way to make sub-dust/swept funds
-        offchain-spendable again without going onchain. No options — it always folds everything.
+        offchain-spendable again without going onchain, and it costs you nothing — the
+        server pays the round's onchain fee.
+      </p>
+      <p class="muted">
+        You rarely need this button: while the bridge is running, the moment any VTXO
+        comes within <strong>${RENEW_WINDOW_LABEL}</strong> of expiry this same
+        consolidate-all refresh runs automatically — everything folds into one fresh
+        VTXO, not just the expiring one. And because every round costs the server an
+        onchain transaction, a refresh is only admitted once some VTXO is actually
+        approaching expiry — pressing this while everything still has days of margin
+        left is politely declined with a "nothing to consolidate" note.
       </p>
       <form method="post" action="/refresh" onsubmit="return confirm('Consolidate all VTXOs into one fresh VTXO?')">
         <button type="submit">Refresh all</button>
@@ -388,7 +406,7 @@ const SEND_SCRIPT = `<script>
       maxBtn.style.display = offboardMax > 0 ? '' : 'none';
       maxBtn.dataset.fill = String(offboardMax);
       railHint.textContent = 'Onchain — collaborative offboard (one settlement round, ~minutes). Includes sub-dust/swept.';
-      feeHint.textContent = offboardMax > 0 ? 'Max sweeps everything minus the intent fee.' : 'Total minus fee is below dust — cannot offboard.';
+      feeHint.textContent = offboardMax > 0 ? 'Max sweeps everything minus the withdraw fee.' : 'Total minus fee is below dust — cannot offboard.';
     } else {
       maxBtn.style.display = 'none';
       railHint.textContent = 'Paste an invoice, noffer, Ark address, or onchain address.';

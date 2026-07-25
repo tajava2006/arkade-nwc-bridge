@@ -40,9 +40,17 @@ function actionPanel(
 
   const canStart = !op || op.state === 'failed'
   const startBtn = canStart
-    ? html`<form method="post" action="/exit/${s.txid}/${s.vout}/start"
-            onsubmit="return confirm('Start unilateral exit? This broadcasts the pre-signed chain and cannot be undone once the first transaction confirms.');">
-          <button type="submit"${s.proofComplete ? raw('') : raw(' disabled')}>
+    ? html`<div class="danger-box">
+          ⚠ IRREVERSIBLE — once the first transaction confirms there is no way back:
+          this vtxo leaves Ark for good and the full fee cost above is really spent.
+          This is the emergency path, priced accordingly. If the ASP still responds,
+          an onchain send from the <a href="/send">Send tab</a> moves the same funds
+          for a fraction of the cost — always try that first, and use this only when
+          the ASP is unresponsive or cheating.
+        </div>
+        <form method="post" action="/exit/${s.txid}/${s.vout}/start"
+            onsubmit="return confirm('Start unilateral exit? This broadcasts the pre-signed chain and CANNOT be undone once the first transaction confirms. If the ASP still responds, an onchain send from the Send tab is far cheaper.');">
+          <button type="submit" class="danger"${s.proofComplete ? raw('') : raw(' disabled')}>
             ${op?.state === 'failed' ? 'Retry exit' : 'Start exit'}
           </button>
           ${s.proofComplete
@@ -83,13 +91,18 @@ function actionPanel(
   return html`${costLine}${uneconomical}${startBtn}${runningNote}${sweepBtn}`
 }
 
-function fundingPanel(funding: FundingStatus, est: ExitEstimate | null): RawHtml {
+// Shared with the /exit list page (which passes the aggregate need across all
+// still-exitable rows) — one panel, one wording, wherever fuel is shown.
+export function fundingPanel(
+  funding: FundingStatus,
+  neededSat: number | null,
+  neededNote = 'for CPFP fees',
+): RawHtml {
   const bal = funding.balanceSat
-  const needed = est ? est.totalFeeSat : null
   const low =
-    bal !== null && needed !== null && bal < needed
+    bal !== null && neededSat !== null && bal < neededSat
       ? html`<p class="bad">Exit fuel is low: ${bal.toLocaleString()} sats on hand, about
-          ${needed.toLocaleString()} needed for CPFP fees. Top it up before starting,
+          ${neededSat.toLocaleString()} needed ${neededNote}. Top it up before starting,
           or the unroll stalls unconfirmed.</p>`
       : html``
   return html`
@@ -470,6 +483,13 @@ export function exitDetailView(args: {
             </form>`
         : html``}
       <p><strong>${s.valueSat.toLocaleString()} sats</strong> · <code>${s.txid}:${s.vout}</code></p>
+      ${s.op
+        ? html``
+        : html`<p class="muted">
+            This page is a read-only preview — nothing has been broadcast. The chain
+            below is what a unilateral exit of this vtxo <em>would</em> do; it only
+            starts if you press <em>Start exit</em> under Action and confirm.
+          </p>`}
       <div data-exit-stepper="${s.txid}:${s.vout}">${renderStepperFragment(s)}</div>
       ${dagScript(s)}
       ${statusFillIn(s)}
@@ -478,7 +498,7 @@ export function exitDetailView(args: {
       <h2>Action</h2>
       ${actionPanel(s, args.estimate, args.verifiedDest ?? null)}
 
-      ${fundingPanel(args.funding, args.estimate)}
+      ${fundingPanel(args.funding, args.estimate?.totalFeeSat ?? null)}
 
       <p class="muted">
         Each broadcast is a zero-fee transaction paired with a CPFP child from

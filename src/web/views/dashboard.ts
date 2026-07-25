@@ -99,18 +99,39 @@ export function renderExitReadinessFragment(snap: ProofSyncSnapshot | null): Raw
 }
 
 /**
- * Render the ASP onboarding fee from its onchain-input intent-fee CEL program.
- * Flat configs (e.g. "1000.0") show the sat amount; anything amount-dependent
- * can't be a single number, and a missing program means getInfo failed at boot.
+ * The boarding card's fee sentence, from the ASP's onchain-input intent-fee
+ * CEL program. Our policy is to charge nothing on the way in, so the
+ * empty/zero program renders as "no ASP fee" — but the sentence stays wired
+ * to the live config rather than hardcoding that promise: if the program is
+ * ever set, the card tells the truth without a copy change.
  */
-function renderOnboardingFee(program: string | undefined): string {
-  if (!program) return 'an onboarding fee set by the ASP'
-  const t = program.trim()
-  // Flat constant config → exact, fixed amount: show "=" not "≈".
-  if (/^\d+(\.\d+)?$/.test(t)) {
-    return `= ${Math.round(Number.parseFloat(t)).toLocaleString()} sats (fixed)`
+function onboardingFeeNote(program: string | undefined): string {
+  const t = (program ?? '').trim()
+  const flat = /^\d+(\.\d+)?$/.test(t) ? Math.round(Number.parseFloat(t)) : null
+  if (t === '' || flat === 0) {
+    return 'Fee: just the onchain mining fee you pay to send it — nothing else. The ASP deducts nothing on conversion.'
   }
-  return 'an onboarding fee set by the ASP (varies by amount)'
+  const asp =
+    flat !== null
+      ? `${flat.toLocaleString()} sats (fixed)`
+      : 'an onboarding fee set by the ASP (varies by amount)'
+  return `Fee: the onchain mining fee you pay to send (variable), plus ${asp} the ASP deducts on conversion.`
+}
+
+/**
+ * The Lightning card's fee sentence, from the live Boltz fee table (reverse =
+ * receive direction). Same idea as the boarding note: policy is 0% on receive,
+ * but the sentence follows the config. `null` = fee table not fetched yet —
+ * claim nothing rather than promising free.
+ */
+function lnReceiveFeeNote(reverseFeePct: number | null): string {
+  if (reverseFeePct === 0) {
+    return 'Fee: none — the invoiced amount lands on Ark in full. The sender covers their own Lightning routing fee (variable), as with any LN payment.'
+  }
+  if (reverseFeePct === null) {
+    return 'The sender covers their own Lightning routing fee (variable), as with any LN payment.'
+  }
+  return `Fee: a ${reverseFeePct}% swap fee comes out of what lands on Ark, plus Lightning routing the sender pays (variable).`
 }
 
 export function dashboardView(args: {
@@ -119,6 +140,8 @@ export function dashboardView(args: {
   arkAddress: string
   boardingAddress: string
   onboardingFeeProgram?: string
+  /** Boltz reverse-swap (receive) fee %, from the send-data cache; null until fetched. */
+  reverseFeePct: number | null
   noffer: string
   offerRelay: RelayStatus
   activeConnections: number
@@ -127,7 +150,6 @@ export function dashboardView(args: {
   const relayBadge = relay.connected
     ? html`<span class="ok">● up</span>`
     : html`<span class="bad">○ down</span>`
-  const onboardingFee = renderOnboardingFee(args.onboardingFeeProgram)
   return layout({
     title: 'Dashboard',
     current: 'dashboard',
@@ -158,7 +180,7 @@ export function dashboardView(args: {
           <h3>Lightning (CLINK noffer)</h3>
           <div class="qr-box">${raw(qrSvg(args.noffer))}</div>
           <pre>${args.noffer}</pre>
-          <p class="muted">Static, Nostr-native — no web server, no Lightning Address domain. A CLINK payer scans it, names an amount, and the invoice settles onto Ark. Fee: a fixed Boltz swap fee (ours), plus Lightning routing the sender pays (variable).</p>
+          <p class="muted">Static, Nostr-native — no web server, no Lightning Address domain. A CLINK payer scans it, names an amount, and the invoice settles onto Ark. ${lnReceiveFeeNote(args.reverseFeePct)}</p>
           <p class="muted">Relay <code>${relay.url}</code> ${relayBadge} — the code embeds this one relay. If it keeps dropping, regenerate to mint a fresh one from your current outbox relay (this invalidates the code above, so update wherever you shared it).</p>
           <form method="post" action="/noffer/regenerate" onsubmit="return confirm('Regenerate the noffer? The current code will stop working.');">
             <button type="submit">Regenerate noffer</button>
@@ -169,7 +191,7 @@ export function dashboardView(args: {
           <h3>Onchain (boarding)</h3>
           <div class="qr-box">${raw(qrSvg(args.boardingAddress))}</div>
           <pre>${args.boardingAddress}</pre>
-          <p class="muted">Onchain BTC that converts to a VTXO. It won't show in your balance until the deposit confirms — only then does a settlement round convert it. Fee: the onchain mining fee you pay to send (variable), plus ${onboardingFee} the ASP deducts on conversion.</p>
+          <p class="muted">Onchain BTC that converts to a VTXO. It won't show in your balance until the deposit confirms — only then does a settlement round convert it. ${onboardingFeeNote(args.onboardingFeeProgram)}</p>
         </div>
       </div>
     `,

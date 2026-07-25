@@ -6,6 +6,7 @@ import type { ExitDest } from '../../exit/dest'
 import type { FinalSendInfo } from '../../exit/final_send'
 import { layout } from './layout'
 import { copyIcon } from './ui'
+import { fundingPanel } from './exit_detail'
 
 // The /exit tab (EXIT_PLAN #12): one row per mirrored vtxo, execution
 // strictly per-vtxo (§1 — no bulk button, ever). Every number a user needs
@@ -236,6 +237,17 @@ function short6(addr: string): string {
   return `${addr.slice(0, 10)}…${addr.slice(-6)}`
 }
 
+// Fuel needed to pull every still-exitable row, for the list page's low-fuel
+// check. Swept rows are done and sweep-impossible rows never draw fuel; rows
+// without an estimate can't be priced, so the sum is a floor, not a promise.
+function aggregateNeededSat(rows: ExitRow[]): number | null {
+  const priced = rows.filter(
+    (r) => r.vtxo.status !== 'swept' && r.op?.state !== 'swept' && r.estimate !== null,
+  )
+  if (priced.length === 0) return null
+  return priced.reduce((sum, r) => sum + (r.estimate?.totalFeeSat ?? 0), 0)
+}
+
 /** shown when a final-send action (challenge, verify, send, boost) is rejected */
 export function exitFinalError(action: string, reason: string): RawHtml {
   return layout({
@@ -289,6 +301,9 @@ export function exitView(args: {
         ${(stats.proofBytes / 1024).toFixed(0)} KB · fee rate ${args.feeRate} sat/vB ·
         costs are measured from the pre-signed txs, not guessed. Exits run
         <strong>one vtxo at a time</strong> — judge each row before pulling it.
+        Clicking a row is always safe: it opens a <strong>read-only view</strong> of
+        that vtxo's pre-signed exit chain and cost. Nothing is broadcast until you
+        press <em>Start exit</em> on that page and confirm.
       </p>
       <table>
         <tr>
@@ -306,13 +321,11 @@ export function exitView(args: {
         pre-signed proofs are unusable. Deep payment chains cost more to exit —
         settling (refresh) resets the chain and with it the exit price.
       </p>
-      <p class="muted">
-        Exit fuel (CPFP + sweep destination): <code>${args.fundingAddress}</code> —
-        ${args.fundingBalanceSat === null
-          ? 'balance unknown'
-          : `${args.fundingBalanceSat.toLocaleString()} sats`}.
-        Open a vtxo for its funding QR and the guided flow.
-      </p>
+      ${fundingPanel(
+        { address: args.fundingAddress, balanceSat: args.fundingBalanceSat },
+        aggregateNeededSat(rows),
+        'to exit everything still exitable above',
+      )}
       ${finalSendSection({
         dest: args.dest,
         summary: args.summary,

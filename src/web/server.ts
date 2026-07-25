@@ -83,6 +83,7 @@ import { connectionDetailView } from './views/connection_detail'
 import { setupGeneratedView, setupView, type ServerChoice } from './views/setup'
 import { degradedView } from './views/degraded'
 import { swapsView } from './views/swaps'
+import { faqView } from './views/faq'
 import { SqliteAtomicSwapRepository } from '../atomic'
 import { refundAtomicSend } from '../atomic/send'
 import { vaultStats } from '../exit/vault'
@@ -412,6 +413,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               arkAddress: r.ready.arkAddress,
               boardingAddress: r.ready.boardingAddress,
               onboardingFeeProgram: r.ready.onboardingFeeProgram,
+              reverseFeePct: r.ready.caches.sendData.snapshot().value?.fees.reverse.percentage ?? null,
               noffer: r.ready.offers.snapshot().noffer,
               offerRelay: r.ready.offers.getRelayStatus(),
               activeConnections: active.length,
@@ -961,6 +963,14 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const before = parseHistoryCursor(new URL(req.url).searchParams.get('before'))
           const page = listHistoryPage(db, { before: before ?? undefined, limit: 50 })
           return htmlResponse(historyView({ page, isFirstPage: before === null }))
+        },
+      },
+      '/faq': {
+        // Static content, no wallet reads — serve it in degraded mode too (it
+        // explains exactly the situation a degraded operator is in).
+        GET: () => {
+          if (state.current.mode === 'setup') return redirectToSetup()
+          return htmlResponse(faqView())
         },
       },
       '/send': {

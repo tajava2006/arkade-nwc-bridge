@@ -21,6 +21,10 @@ const STYLES = `
   .muted { color: #888; font-size: 0.9em; }
   .ok { color: #155724; font-weight: 600; }
   .bad { color: #c00; font-weight: 600; }
+  /* Loud, bordered warning for point-of-no-return actions — the inline .bad
+     text is easy to skim past; this one is not. */
+  .danger-box { border: 2px solid #c00; background: #fff5f5; color: #a00; padding: 0.8em 1em; border-radius: 6px; font-weight: 600; margin: 1em 0; max-width: 640px; }
+  .danger-box a { color: #a00; }
   .stat { display: inline-block; margin-right: 2.5em; vertical-align: top; }
   .stat-value { font-size: 1.6em; font-weight: 600; }
   .stat-label { color: #888; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -78,7 +82,7 @@ const STYLES = `
   #copy-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 `
 
-type Nav = 'dashboard' | 'send' | 'history' | 'swaps' | 'exit' | 'connections' | 'setup'
+type Nav = 'dashboard' | 'send' | 'history' | 'swaps' | 'exit' | 'connections' | 'faq' | 'setup'
 
 export function layout(args: {
   title: string
@@ -99,6 +103,7 @@ export function layout(args: {
           ${tab('swaps', '/swaps', 'Swaps')}
           ${tab('exit', '/exit', 'Exit')}
           ${tab('connections', '/connections', 'Connections')}
+          ${tab('faq', '/faq', 'FAQ')}
         </nav>`
   return html`
 <html lang="en">
