@@ -57,6 +57,22 @@ describe('swapsView', () => {
     expect(html).toContain('in 1h') // counts toward T + 1h lag
   })
 
+  test('terminal send rows show "—" for refund T, not a stale "ago" countdown', () => {
+    // claimed/refunded long past T used to keep rendering "Nd ago" — the
+    // refund clock is moot once the swap resolved.
+    const nowSec = 1752603600 + 3 * 86400 // 3 days past T
+    const html = swapsView({
+      swaps: [
+        swap({ id: 'claimed-1', state: 'claimed', fundingOutpoint: 'f'.repeat(64) + ':0' }),
+        swap({ id: 'refunded-1', state: 'refunded', fundingOutpoint: 'f'.repeat(64) + ':0' }),
+      ],
+      dustSwaps: [],
+      nowSec,
+    }).value
+    expect(html).not.toContain('ago')
+    expect(html).not.toContain('/swaps/refund')
+  })
+
   test('receive rows show "— (boltz)" for refund T, never a garbage countdown', () => {
     // receive swaps store refundLocktime=0 (T is boltz's); it must not render
     // as a "…h ago" countdown.

@@ -47,11 +47,16 @@ function refundReadyAt(s: AtomicSwapRow): number {
 /**
  * The refund-T cell = countdown to when the refund can actually land (T + the
  * blocktime lag). RECEIVE rows store 0 (T is boltz's) → "— (boltz)", never a
- * garbage countdown.
+ * garbage countdown. Terminal rows (claimed/refunded/failed) → "—": the
+ * refund clock is moot once the swap resolved, and a stale "Nd ago" on a
+ * claimed row reads like something still needs doing.
  */
 function refundTCell(s: AtomicSwapRow, nowSec: number): RawHtml {
   if (s.direction !== 'send' || s.refundLocktime <= 0) {
     return html`<span class="muted" title="receive 환불은 boltz 관리 — bridge측 T 없음">— (boltz)</span>`
+  }
+  if (isTerminal(s.direction, s.state)) {
+    return html`<span class="muted" title="종결된 스왑 — 환불 시계 해당 없음">—</span>`
   }
   const delta = refundReadyAt(s) - nowSec
   const abs = Math.abs(delta)
