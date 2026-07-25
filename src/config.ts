@@ -8,6 +8,15 @@ export interface Config {
   network: defaults.Network
   arkServerUrl: string
   boltzApiUrl: string
+  /**
+   * boltz `swap.update` WebSocket endpoint (the Rust sidecar). Unset =
+   * derived from the resolved boltzApiUrl as ws(s)://host/v2/ws — the
+   * upstream public convention. The docker compose case sets it directly
+   * to the sidecar port (e.g. "ws://boltz:9004") via data/config.json,
+   * since nothing proxies /v2/ws inside the compose network. Wrong/absent
+   * endpoint just means no push — the 30s reconciler still covers.
+   */
+  boltzWsUrl?: string
   esploraUrls: readonly string[]
   httpBind: string
   httpPort: number
@@ -37,6 +46,7 @@ export function loadConfig(): Config {
     network: overrides.network ?? defaults.NETWORK,
     arkServerUrl: overrides.arkServerUrl ?? defaults.ARK_SERVER_URL,
     boltzApiUrl: overrides.boltzApiUrl ?? defaults.BOLTZ_API_URL,
+    boltzWsUrl: overrides.boltzWsUrl,
     esploraUrls:
       overrides.esploraUrls && overrides.esploraUrls.length > 0
         ? overrides.esploraUrls

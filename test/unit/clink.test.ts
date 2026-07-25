@@ -14,7 +14,8 @@ import {
   validateZapRequest,
   zapDescriptionHash,
 } from '../../src/clink/zap'
-import { sendOfferReceipt } from '../../src/clink/offers'
+import { sendOfferReceipt, sendSubdustAck } from '../../src/clink/offers'
+import { SqliteAtomicSwapRepository, SwapDirection } from '../../src/atomic'
 import type { BoltzReverseSwap } from '@arkade-os/boltz-swap'
 import { openTempDb } from '../helpers/db'
 
@@ -257,6 +258,94 @@ describe('sendOfferReceipt operator DM', () => {
       )
       expect(calls.length).toBe(1)
       expect(calls[0]!.text).toContain('noffer payment 500 sats')
+    } finally {
+      temp.cleanup()
+    }
+  })
+})
+
+describe('sendSubdustAck (targeted, same-pass ack)', () => {
+  const HASH = 'cd'.repeat(32)
+
+  const stubPool = (published: unknown[] = []): SimplePool =>
+    ({
+      publish: (relays: string[], ev: unknown) => {
+        published.push(ev)
+        return relays.map(() => Promise.resolve('ok'))
+      },
+    }) as unknown as SimplePool
+
+  function plantReceive(db: import('bun:sqlite').Database, state: 'funded' | 'settled'): void {
+    const repo = new SqliteAtomicSwapRepository(db)
+    repo.create({
+      id: 'rcv-ack-1',
+      direction: SwapDirection.Receive,
+      paymentHash: HASH,
+      state: 'invoice_issued',
+      amount: 21,
+      refundLocktime: 0,
+    })
+    repo.transition('rcv-ack-1', 'funded')
+    if (state === 'settled') {
+      repo.transition('rcv-ack-1', 'claimed')
+      repo.transition('rcv-ack-1', 'settled')
+      repo.setPreimage('rcv-ack-1', 'ee'.repeat(32))
+    }
+  }
+
+  function plantReceiptRow(db: import('bun:sqlite').Database): void {
+    db.query(
+      `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+       VALUES (?, ?, 'req-1', 'wss://r', NULL, NULL, ?)`,
+    ).run(HASH, PAYER_PUB, Math.floor(Date.now() / 1000))
+  }
+
+  test('settled swap + pending row → publishes, deletes the row, acks once', async () => {
+    const temp = openTempDb()
+    try {
+      plantReceive(temp.db, 'settled')
+      plantReceiptRow(temp.db)
+      const published: unknown[] = []
+      const deps = { pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }
+
+      expect(await sendSubdustAck(deps, HASH)).toBe(true)
+      expect(published.length).toBe(1) // CLINK receipt (no zap on this row)
+      const left = temp.db.query('SELECT 1 FROM clink_subdust_receipts').get()
+      expect(left).toBeNull()
+
+      // Row gone → second call is a no-op (the reconcile loop can't double-ack).
+      expect(await sendSubdustAck(deps, HASH)).toBe(false)
+      expect(published.length).toBe(1)
+    } finally {
+      temp.cleanup()
+    }
+  })
+
+  test('not-settled swap → false, row kept for the reconcile backstop', async () => {
+    const temp = openTempDb()
+    try {
+      plantReceive(temp.db, 'funded')
+      plantReceiptRow(temp.db)
+      const published: unknown[] = []
+      expect(
+        await sendSubdustAck({ pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }, HASH),
+      ).toBe(false)
+      expect(published.length).toBe(0)
+      expect(temp.db.query('SELECT 1 FROM clink_subdust_receipts').get()).not.toBeNull()
+    } finally {
+      temp.cleanup()
+    }
+  })
+
+  test('no pending row (NWC-originated) → false, nothing published', async () => {
+    const temp = openTempDb()
+    try {
+      plantReceive(temp.db, 'settled')
+      const published: unknown[] = []
+      expect(
+        await sendSubdustAck({ pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }, HASH),
+      ).toBe(false)
+      expect(published.length).toBe(0)
     } finally {
       temp.cleanup()
     }

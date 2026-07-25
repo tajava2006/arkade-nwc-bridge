@@ -480,34 +480,17 @@ export async function reconcileClinkAcks(deps: {
     }
   }
 
-  // sub-dust: ask boltz whether the invoice settled.
+  // sub-dust: publish acks for anything already settled; TTL-drop the rest.
   const now = Math.floor(Date.now() / 1000)
   const subRows = deps.db
-    .query<SubdustReceiptRow, []>(
-      'SELECT payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at FROM clink_subdust_receipts',
+    .query<{ payment_hash: string; created_at: number }, []>(
+      'SELECT payment_hash, created_at FROM clink_subdust_receipts',
     )
     .all()
-  // The atomic receive swaps are driven to settle by reconcileAtomicReceives
-  // (ln_receive.ts); here we just publish the 9735 receipt once settled, using
-  // OUR OWN preimage (stored on the swap) — no polling boltz for it.
-  const repo = new SqliteAtomicSwapRepository(deps.db)
   for (const row of subRows) {
     try {
-      const swap = repo.getByPaymentHash(row.payment_hash)
-      if (swap?.direction === SwapDirection.Receive && swap.state === 'settled') {
-        // Row DELETE below is the dedup, same as the ≥dust funnel above.
-        deps.notify?.(
-          'recv-noffer',
-          () =>
-            `${describeClinkReceive(row, swap.amount)} (sub-dust) [hash ${row.payment_hash.slice(0, 8)}]`,
-        )
-        await publishReceipt(deps, row, swap.preimage ?? undefined)
-        if (row.zap_request && row.zap_invoice) {
-          await publishZapReceipt(deps, row.zap_request, row.zap_invoice, swap.preimage ?? undefined)
-        }
-        deps.db.query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?').run(row.payment_hash)
-        console.log(`clink: sent sub-dust payment receipt to ${row.payer_pubkey.slice(0, 8)}…`)
-      } else if (now - row.created_at > SUBDUST_ACK_TTL_SECONDS) {
+      const acked = await sendSubdustAck(deps, row.payment_hash)
+      if (!acked && now - row.created_at > SUBDUST_ACK_TTL_SECONDS) {
         deps.db.query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?').run(row.payment_hash)
       }
     } catch (err) {
@@ -515,6 +498,43 @@ export async function reconcileClinkAcks(deps: {
       console.warn(`clink: sub-dust ack reconcile failed for ${row.payment_hash.slice(0, 8)}…:`, err)
     }
   }
+}
+
+/**
+ * Publish the CLINK receipt (+9735 for zaps) for ONE settled sub-dust receive,
+ * keyed by payment hash. The targeted twin of the reconcile loop above, so a
+ * settle detected live (reconcileAtomicReceives' return, or a boltz ws poke)
+ * acks immediately instead of waiting a tick — the swap must already be
+ * `settled` locally (we publish with OUR stored preimage, boltz is never
+ * asked). No-op when there's no pending row (NWC-originated, or already
+ * acked) or the swap isn't settled yet. Returns true once the ack went out;
+ * the row DELETE is the dedup, same as the ≥dust funnel.
+ */
+export async function sendSubdustAck(
+  deps: { pool: SimplePool; db: Database; secretKey: Uint8Array; notify?: NotifyFn },
+  paymentHash: string,
+): Promise<boolean> {
+  const row = deps.db
+    .query<SubdustReceiptRow, [string]>(
+      'SELECT payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at FROM clink_subdust_receipts WHERE payment_hash = ?',
+    )
+    .get(paymentHash)
+  if (!row) return false
+
+  const swap = new SqliteAtomicSwapRepository(deps.db).getByPaymentHash(paymentHash)
+  if (swap?.direction !== SwapDirection.Receive || swap.state !== 'settled') return false
+
+  deps.notify?.(
+    'recv-noffer',
+    () => `${describeClinkReceive(row, swap.amount)} (sub-dust) [hash ${row.payment_hash.slice(0, 8)}]`,
+  )
+  await publishReceipt(deps, row, swap.preimage ?? undefined)
+  if (row.zap_request && row.zap_invoice) {
+    await publishZapReceipt(deps, row.zap_request, row.zap_invoice, swap.preimage ?? undefined)
+  }
+  deps.db.query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?').run(row.payment_hash)
+  console.log(`clink: sent sub-dust payment receipt to ${row.payer_pubkey.slice(0, 8)}…`)
+  return true
 }
 
 type OfferResponseBody = { bolt11: string } | { error: string; code: number; range?: { min: number; max: number } }

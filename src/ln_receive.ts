@@ -181,8 +181,14 @@ export function sweepExpiredAtomicReceives(
   return swept
 }
 
-export async function reconcileAtomicReceives(deps: LnReceiveDeps): Promise<void> {
-  await driveAtomicReceives(atomicDeps(deps))
+/**
+ * Returns the payment hashes of receives that settled THIS pass, so the
+ * caller can ack them immediately (clink sendSubdustAck) instead of waiting
+ * for the next reconcile tick — pre-settled swaps are the reconcile loop's
+ * catch-up job, not ours.
+ */
+export async function reconcileAtomicReceives(deps: LnReceiveDeps): Promise<string[]> {
+  const settledIds = await driveAtomicReceives(atomicDeps(deps))
 
   const repo = new SqliteAtomicSwapRepository(deps.db)
   const now = Math.floor(Date.now() / 1000)
@@ -211,4 +217,9 @@ export async function reconcileAtomicReceives(deps: LnReceiveDeps): Promise<void
       deps.db.query(`UPDATE transactions SET state = 'expired' WHERE id = ? AND state = 'pending'`).run(row.id)
     }
   }
+
+  return settledIds.flatMap((id) => {
+    const hash = repo.get(id)?.paymentHash
+    return hash ? [hash] : []
+  })
 }

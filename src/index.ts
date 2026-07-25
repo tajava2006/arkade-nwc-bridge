@@ -20,9 +20,10 @@ import { initBoltz } from './boltz'
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
-import { startOfferService, sendOfferReceipt, reconcileClinkAcks } from './clink/offers'
+import { startOfferService, sendOfferReceipt, sendSubdustAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
 import { resumeAtomicSends } from './atomic/send'
+import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from './atomic/boltz_ws'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { startNotifier, type Notifier, type NotifyFn } from './nostr/notifier'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
@@ -167,6 +168,7 @@ async function main(): Promise<void> {
   // — assigned once bootReady runs (needs the account key + swaps). Cleared on
   // shutdown.
   let receiveReconcilerInterval: ReturnType<typeof setInterval> | undefined
+  let boltzWs: BoltzWs | undefined
 
   // Exit-proof mirroring — assigned in bootReady, torn down on shutdown.
   let proofSync: ProofSyncService | undefined
@@ -337,15 +339,26 @@ async function main(): Promise<void> {
       // only thing that ever flips them (see ln_receive.ts).
       const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, notify }
       const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
-      const reconcileReceives = (): void => {
-        void reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
-        void reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify }).catch((err) =>
-          console.error('nwc: atomic sub-dust receive reconcile failed:', err),
-        )
+      const runReconcilePasses = async (): Promise<void> => {
+        const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
+        const receives = reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
+          .then((settledHashes) => {
+            // Ack same-pass settles immediately — otherwise the CLINK receipt
+            // (+9735) waits for the NEXT reconcile tick, because the ack pass
+            // above was dispatched before this one settled the swap.
+            for (const hash of settledHashes) {
+              void sendSubdustAck(ackDeps, hash).catch((err) =>
+                console.error('clink: inline sub-dust ack failed:', err),
+              )
+            }
+          })
+          .catch((err) =>
+            console.error('nwc: atomic sub-dust receive reconcile failed:', err),
+          )
         // Send-side resume (§3.4 classifyResume): post-T rows are refunded (the
         // T-refund executor), crash-orphaned rows reconcile against boltz
         // status. Blocktime lag counts as waiting — the next tick retries.
-        void resumeAtomicSends(atomicDeps)
+        const sends = resumeAtomicSends(atomicDeps)
           .then((r) => {
             if (r.refunded.length || r.claimed.length || r.refundWait.length || r.failed.length) {
               console.log(
@@ -356,9 +369,42 @@ async function main(): Promise<void> {
             }
           })
           .catch((err) => console.error('atomic send resume failed:', err))
+        await Promise.allSettled([acks, receives, sends])
+      }
+      // Single-flight with a trailing rerun: ws pokes can land mid-pass (or in
+      // bursts — funded then settled seconds apart), and two concurrent
+      // driveAtomicReceive calls on one swap would race the claim spend. The
+      // three passes still run concurrently WITHIN an invocation, same as
+      // before; only invocations serialize.
+      let reconcileRunning = false
+      let reconcileQueued = false
+      const reconcileReceives = (): void => {
+        if (reconcileRunning) {
+          reconcileQueued = true
+          return
+        }
+        reconcileRunning = true
+        void runReconcilePasses().finally(() => {
+          reconcileRunning = false
+          if (reconcileQueued) {
+            reconcileQueued = false
+            reconcileReceives()
+          }
+        })
       }
       reconcileReceives()
       receiveReconcilerInterval = setInterval(reconcileReceives, 30_000)
+
+      // Push channel: the boltz fork emits subdust transitions on its public
+      // swap.update ws — a poke re-runs the same reconcile passes immediately,
+      // collapsing the 30s poll latency. Pure accelerator; a dead endpoint
+      // degrades to the interval above.
+      boltzWs = startBoltzWs({
+        url: bootCfg.boltzWsUrl ?? deriveBoltzWsUrl(bootCfg.boltzApiUrl),
+        db,
+        onPoke: reconcileReceives,
+        log: (msg) => console.log(msg),
+      })
 
       // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
       // Stateless REST; the wallet keeps its own internal one for signing.
@@ -485,6 +531,8 @@ async function main(): Promise<void> {
         clearInterval(receiveReconcilerInterval)
         receiveReconcilerInterval = undefined
       }
+      boltzWs?.stop()
+      boltzWs = undefined
       for (const step of undo.reverse()) {
         try {
           await step()
@@ -578,6 +626,7 @@ async function main(): Promise<void> {
     clearInterval(watchdog)
     clearInterval(eventPrune)
     if (receiveReconcilerInterval) clearInterval(receiveReconcilerInterval)
+    boltzWs?.stop()
     proofSync?.stop()
     stopIncomingFunds?.()
     if (bootRetryTimer) clearTimeout(bootRetryTimer)

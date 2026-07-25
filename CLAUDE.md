@@ -54,6 +54,14 @@ src/
                                BIP-322/legacy signature proof of control,
                                exit_dest table — then an exact-fee no-change
                                send-all of the fuel P2TR, RBF-boostable)
+  atomic/boltz_ws.ts         — push channel for sub-dust swaps: subscribes
+                               the fork's swap.update ws (sidecar) by swap id
+                               and pokes the reconciler on transitions. Pure
+                               accelerator — the 30s reconciler stays the
+                               backstop; dead endpoint degrades to polling.
+                               URL: config.boltzWsUrl > derived
+                               ws(s)://host/v2/ws (compose sets
+                               "ws://boltz:9004" in data/config.json)
   polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
                                (bun async-ESM require trap) + EventSource shim
   index.ts                   — three-mode boot (setup / ready / degraded);
