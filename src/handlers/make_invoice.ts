@@ -3,6 +3,7 @@ import { NetworkError, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
 
 import { NwcError } from '../lib/errors'
+import { recordNwcLn } from '../history'
 import { issueInvoice, type IssuedInvoice } from '../ln_receive'
 import { msatsToSats, satsToMsats } from '../lib/msat'
 import type { Connection } from '../nostr/connections'
@@ -88,6 +89,16 @@ export async function handleMakeInvoice(
       createdAt,
       issued.expiresAt,
     )
+  // Wallet-level ledger twin — state transitions (settle / expire) are
+  // mirrored from `transactions` by syncHistoryFromSources, never here.
+  recordNwcLn(deps.db, {
+    direction: 'in',
+    requestEventId: deps.eventId,
+    amountMsat,
+    feesMsat: feesPaidMsat,
+    description: description ?? null,
+    createdAt,
+  })
 
   return {
     type: 'incoming',

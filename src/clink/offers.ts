@@ -14,6 +14,7 @@ import type { Wallet } from '@arkade-os/sdk'
 import { npubEncode } from 'nostr-tools/nip19'
 
 import { CLINK_OFFER_ID } from '../defaults'
+import { recordNofferReceive } from '../history'
 import { issueInvoice, type IssuedInvoice } from '../ln_receive'
 import type { NotifyFn } from '../nostr/notifier'
 import { SqliteAtomicSwapRepository, SwapDirection } from '../atomic'
@@ -394,6 +395,26 @@ function describeClinkReceive(
   return `recv: ${what} ${amount ?? '?'} sats from ${who}${note}`
 }
 
+// History-row description for a noffer receive: payer + zap comment when the
+// 9734 parses, generic labels otherwise. Never throws — history is display
+// bookkeeping and must not endanger the ack path.
+function nofferHistoryDescription(row: { payer_pubkey: string; zap_request: string | null }): string {
+  try {
+    let payer = row.payer_pubkey
+    let comment = ''
+    if (row.zap_request) {
+      const zap = JSON.parse(row.zap_request) as { pubkey: string; content: string }
+      payer = zap.pubkey
+      comment = zap.content
+    }
+    const who = `${npubEncode(payer).slice(0, 13)}…`
+    const what = row.zap_request ? 'zap' : 'noffer payment'
+    return comment ? `${what} from ${who} — "${comment.slice(0, 120)}"` : `${what} from ${who}`
+  } catch {
+    return row.zap_request ? 'zap' : 'noffer payment'
+  }
+}
+
 export async function sendOfferReceipt(
   deps: { pool: SimplePool; db: Database; secretKey: Uint8Array; notify?: NotifyFn },
   swap: BoltzReverseSwap,
@@ -404,6 +425,23 @@ export async function sendOfferReceipt(
     )
     .get(swap.id)
   if (!row) return // not an offer swap (or already acked)
+
+  // Ledger row before the publish: a failed publish keeps the receipt row and
+  // reruns this funnel, so the (kind, ref) conflict clause absorbs retries —
+  // recording after would instead lose the row if the publish throws.
+  // fee = nominal − what lands on Ark (the reverse-swap cut), when known.
+  try {
+    const nominal = swap.request.invoiceAmount
+    const onArk = swap.response.onchainAmount
+    recordNofferReceive(deps.db, {
+      ref: swap.id,
+      amountSats: nominal,
+      feesMsat: typeof onArk === 'number' ? Math.max(0, nominal - onArk) * 1000 : null,
+      description: nofferHistoryDescription(row),
+    })
+  } catch (err) {
+    console.warn('clink: history record failed (non-fatal):', err)
+  }
 
   // Single funnel for live (onReverseSettled) and boot/periodic reconcile —
   // the row DELETE below is the existing dedup, so this fires once per swap.
@@ -523,6 +561,19 @@ export async function sendSubdustAck(
 
   const swap = new SqliteAtomicSwapRepository(deps.db).getByPaymentHash(paymentHash)
   if (swap?.direction !== SwapDirection.Receive || swap.state !== 'settled') return false
+
+  // Same before-publish placement + conflict-dedup rationale as the ≥dust
+  // funnel above. Sub-dust is 1:1 (no swap fee on the atomic path).
+  try {
+    recordNofferReceive(deps.db, {
+      ref: row.payment_hash,
+      amountSats: swap.amount,
+      feesMsat: 0,
+      description: `${nofferHistoryDescription(row)} (sub-dust)`,
+    })
+  } catch (err) {
+    console.warn('clink: history record failed (non-fatal):', err)
+  }
 
   deps.notify?.(
     'recv-noffer',

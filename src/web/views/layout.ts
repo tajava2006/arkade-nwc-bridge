@@ -40,6 +40,7 @@ const STYLES = `
   .pill.pending { background: #fff3cd; color: #856404; }
   .pill.preconfirmed { background: #e2e3e5; color: #495057; }
   .pill.failed { background: #f8d7da; color: #721c24; }
+  tr.dim { opacity: 0.55; }
   /* Relay status — colors picked from a blue/gray/amber set to avoid red/green
      so the badges stay distinguishable for red-green color blindness. Icon
      and text label are redundant channels: any one of them disambiguates. */
@@ -77,7 +78,7 @@ const STYLES = `
   #copy-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 `
 
-type Nav = 'dashboard' | 'send' | 'swaps' | 'exit' | 'connections' | 'setup'
+type Nav = 'dashboard' | 'send' | 'history' | 'swaps' | 'exit' | 'connections' | 'setup'
 
 export function layout(args: {
   title: string
@@ -94,6 +95,7 @@ export function layout(args: {
       : html`<nav>
           ${tab('dashboard', '/', 'Dashboard')}
           ${tab('send', '/send', 'Send')}
+          ${tab('history', '/history', 'History')}
           ${tab('swaps', '/swaps', 'Swaps')}
           ${tab('exit', '/exit', 'Exit')}
           ${tab('connections', '/connections', 'Connections')}

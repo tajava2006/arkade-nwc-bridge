@@ -23,6 +23,18 @@ src/
                                defaults) + validateServerSet. The fresh-
                                start ark/boltz choice, then immutable
   db.ts                      — bun:sqlite + WAL + append-only MIGRATIONS
+  history.ts                 — unified wallet-history ledger (HISTORY_DESIGN.md):
+                               one row per money event on every rail; mirrored
+                               kinds (nwc_ln ← transactions, offboard ←
+                               offboards) re-synced wholesale by
+                               syncHistoryFromSources, keyset pagination on
+                               (created_at, id) for /history
+  boarding_history.ts        — onchain-deposit watcher, RECORDING only (the
+                               SDK's VtxoManager does the actual boarding
+                               auto-settle): getBoardingUtxos delta on a 60s
+                               interval, boarding_seen watermark (first pass
+                               baselines — no backfill), own-boarding-input
+                               sweep suppression, esplora-confirmed settles
   wallet.ts                  — privateKey → SingleKey → Wallet (in-memory repos)
   boltz.ts                   — ArkadeSwaps + SqliteSwapRepository,
                                SwapManager auto-claim/refund + listener +
@@ -208,10 +220,12 @@ row exists. Logs go to stdout; when running in background pipe to
   per-connection rows can disagree on whether a relay is up.
 - **Connection isolation.** `lookup_invoice` / `list_transactions`
   MUST filter on `connection_id` — a client can only see its own
-  activity. This is the only transaction-history surface; there is no
-  ark-side web history view (`wallet.getTransactionHistory()` is a full
-  recompute per call with no pagination, so it was removed rather than
-  shipped as an unbounded page).
+  activity. The operator-facing /history page reads the separate
+  `history` ledger instead (HISTORY_DESIGN.md); never widen
+  `transactions` with non-NWC rows — its NOT-NULL connection FK and
+  `incoming|outgoing` type vocabulary are what keep NIP-47 responses
+  clean. (`wallet.getTransactionHistory()` stays banned: full recompute
+  per call, no pagination — the old ark-side tab was removed for that.)
 - **Live UI = SSE fragments.** Pool callbacks fire in `index.ts` and
   dispatch named events through `SseHub` (`outbox-update`,
   `connection-update`, `balance-status`). Layout
@@ -336,6 +350,11 @@ row exists. Logs go to stdout; when running in background pipe to
 - *bridge-native send (operator sends own funds: Ark / LN / onchain
   offboard), consolidate-all refresh, fee/sweep & sub-dust semantics,
   rail-aware VTXO breakdown* → [SEND_DESIGN.md](SEND_DESIGN.md).
+- *unified wallet history (/history): why a separate `history` table,
+  mirrored vs self-owned kinds, keyset cursor, the boarding-deposit
+  watcher + watermark, accepted gaps (PWA sends, plain ark receives)* →
+  [HISTORY_DESIGN.md](HISTORY_DESIGN.md); code in `src/history.ts` +
+  `src/boarding_history.ts`, view in `src/web/views/history.ts`.
 - *bridge-native receive (dashboard handles: Ark address / CLINK noffer /
   onchain boarding), CLINK offers + NIP-57 zap plan, native onboarding vs
   Boltz chain swap, why a fixed boarding address is safe (relative CSV

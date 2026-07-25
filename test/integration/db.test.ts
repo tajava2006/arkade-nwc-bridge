@@ -22,6 +22,7 @@ describe('database migrations', () => {
     expect(tables).toEqual([
       'accounts',
       'atomic_swaps',
+      'boarding_seen',
       'boltz_swaps',
       'bridge_server',
       'clink_offer',
@@ -33,6 +34,7 @@ describe('database migrations', () => {
       'exit_ops',
       'exit_proof_txs',
       'exit_vtxos',
+      'history',
       'offboards',
       'processed_events',
       'schema_migrations',
@@ -50,8 +52,9 @@ describe('database migrations', () => {
     // realizing, this test surfaces it. (v1 = 2026-07 epoch reset that
     // collapsed the original 16; v2 = atomic sub-dust swaps; v3 = atomic
     // swaps in the exit vault — source column + script-rebuild params;
-    // v4 = fresh-start server selection, the bridge_server single row.)
-    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4])
+    // v4 = fresh-start server selection, the bridge_server single row;
+    // v5 = unified wallet history + boarding watermark.)
+    expect(rows.map((r) => r.version)).toEqual([1, 2, 3, 4, 5])
   })
 
   test('re-opening the same db is idempotent (no double-apply)', () => {
@@ -63,7 +66,7 @@ describe('database migrations', () => {
       const count = db2
         .query<{ c: number }, []>('SELECT COUNT(*) AS c FROM schema_migrations')
         .get()
-      expect(count?.c).toBe(4)
+      expect(count?.c).toBe(5)
     } finally {
       db2.close()
     }

@@ -20,6 +20,17 @@ import {
   type ValidateResult,
 } from '../server_config'
 import { sendLightning } from '../ln_send'
+import {
+  failWebLn,
+  listHistoryPage,
+  parseHistoryCursor,
+  recordArkSend,
+  recordOffboard,
+  recordWebLnPending,
+  settleWebLn,
+  syncHistoryFromSources,
+} from '../history'
+import { historyView } from './views/history'
 import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
 import { nip19 } from 'nostr-tools'
 import type { SimplePool } from 'nostr-tools/pool'
@@ -933,6 +944,25 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
 
+      '/history': {
+        // Unified wallet history, keyset-paginated (created_at, id) strictly
+        // backwards — no offsets, no totals, so the query cost is one indexed
+        // range read regardless of table size. The mirrored kinds (nwc_ln,
+        // offboard) are re-synced from their source tables right before the
+        // read; everything else was written final by its own flow.
+        GET: (req) => {
+          const r = requireReady()
+          if (!r.ok) return r.response
+          try {
+            syncHistoryFromSources(db)
+          } catch (err) {
+            console.warn('history: source sync failed (rendering stale states):', err)
+          }
+          const before = parseHistoryCursor(new URL(req.url).searchParams.get('before'))
+          const page = listHistoryPage(db, { before: before ?? undefined, limit: 50 })
+          return htmlResponse(historyView({ page, isFirstPage: before === null }))
+        },
+      },
       '/send': {
         GET: async () => {
           const r = requireReady()
@@ -1122,6 +1152,20 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           if (!rail) return sendError('send', 'destination is required')
 
           if (rail === 'lightning') {
+            let decoded
+            try {
+              decoded = decodeInvoice(destination)
+            } catch (err) {
+              return sendError('lightning', `invalid invoice: ${errMsg(err)}`)
+            }
+            // Ledger row before the await (can take minutes) so an in-flight
+            // send is visible on /history; a restart mid-send terminalizes it
+            // via sweepInterruptedWebSends (the swap itself resumes safely).
+            recordWebLnPending(db, {
+              paymentHash: decoded.paymentHash,
+              amountMsat: (decoded.amountSats ?? 0) * 1000,
+              description: decoded.description || null,
+            })
             try {
               const res = await sendLightning(
                 {
@@ -1139,8 +1183,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               // Same amount/fee split as everywhere else: the invoice nominal
               // is what the payee got, the gap (swap fee + any drain residue)
               // is our cost — res.amount alone is the fee-inclusive total.
-              const nominalSats = decodeInvoice(destination).amountSats ?? 0
+              const nominalSats = decoded.amountSats ?? 0
               const feeSats = Math.max(0, res.amount - nominalSats)
+              settleWebLn(db, decoded.paymentHash, { feesMsat: feeSats * 1000, txid: res.txid })
               return htmlResponse(
                 sendResultView({
                   label: 'lightning',
@@ -1149,6 +1194,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 }),
               )
             } catch (err) {
+              failWebLn(db, decoded.paymentHash, errMsg(err))
               return htmlResponse(
                 sendResultView({ label: 'lightning', ok: false, detail: errMsg(err) }),
                 { status: 500 },
@@ -1161,12 +1207,14 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             if (amount === null) return sendError('ark', 'amount must be a positive integer (sats)')
             try {
               const txid = await ready.wallet.send({ address: destination, amount })
+              recordArkSend(db, { amountSats: amount, destination, txid })
               void ready.caches.balance.refresh()
               void ready.caches.sendData.refresh()
               return htmlResponse(
                 sendResultView({ label: 'ark', ok: true, detail: `arkTxid ${txid}` }),
               )
             } catch (err) {
+              recordArkSend(db, { amountSats: amount, destination, error: errMsg(err) })
               return htmlResponse(
                 sendResultView({ label: 'ark', ok: false, detail: errMsg(err) }),
                 { status: 500 },
@@ -1209,6 +1257,16 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             amountSat: recipientSat,
             feeSat,
             isMax,
+          })
+          // Ledger twin — `offboards` stays the source of truth; the
+          // background settle/fail below reaches history via
+          // syncHistoryFromSources, so this is the only offboard hook.
+          recordOffboard(db, {
+            offboardId: row.id,
+            amountSat: recipientSat,
+            feeSat,
+            address: destination,
+            createdAt: row.created_at,
           })
           broadcastOffboards()
           void (async () => {

@@ -361,6 +361,67 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 5,
+    description: 'unified wallet history + boarding watermark (HISTORY_DESIGN.md)',
+    // One row per wallet-level money event, every rail: NWC LN (mirrored from
+    // `transactions` — that table stays NWC/NIP-47-shaped and connection-
+    // scoped), web sends (LN / Ark offchain), CLINK noffer receives, onchain
+    // boarding deposits, offboards. Deliberately a SEPARATE table from
+    // `transactions`: its connection_id NOT NULL FK and 'incoming'/'outgoing'
+    // type vocabulary are load-bearing for connection isolation and NIP-47
+    // clients, so widening it would leak non-LN rows into NWC responses.
+    //
+    // Kinds with an authoritative source table (nwc_ln ← transactions,
+    // offboard ← offboards) are inserted once and re-synced by
+    // syncHistoryFromSources (src/history.ts) — a display cache, never a
+    // second source of truth. (kind, ref) dedupes retry-prone inserts (the
+    // noffer ack funnel re-runs until its receipt publishes); ref is NULL
+    // where no natural key exists (failed ark sends) — SQLite UNIQUE treats
+    // NULLs as distinct, i.e. deliberately no dedup there.
+    //
+    // Reads are ORDER BY created_at DESC, id DESC with a (created_at, id)
+    // cursor. A single created_at index suffices: id aliases the rowid and
+    // every SQLite index entry is (key, rowid), so idx_history_created_at
+    // already is that composite.
+    sql: `
+      CREATE TABLE history (
+        id          INTEGER PRIMARY KEY,
+        kind        TEXT    NOT NULL,   -- 'nwc_ln' | 'web_ln' | 'noffer' | 'ark_send' | 'onboard' | 'offboard'
+        direction   TEXT    NOT NULL,   -- 'in' | 'out'
+        state       TEXT    NOT NULL,   -- 'pending' | 'settled' | 'failed' | 'expired'
+        amount_msat INTEGER NOT NULL,   -- nominal (BOLT11 nominal for LN; onchain/ark sats * 1000)
+        fees_msat   INTEGER,            -- our cost on top, NULL = unknown (same split as transactions)
+        description TEXT,               -- human context: invoice desc, zap comment, destination address
+        ref         TEXT,               -- dedup / sync key, unique per kind (src/history.ts)
+        txid        TEXT,               -- ark txid, or the onchain funding txid for onboards
+        txid2       TEXT,               -- onboard only: the spending (settlement round) txid
+        error       TEXT,
+        created_at  INTEGER NOT NULL,
+        settled_at  INTEGER,
+        UNIQUE (kind, ref)
+      );
+      CREATE INDEX idx_history_created_at ON history(created_at);
+
+      -- Boarding-deposit watermark for the onboard watcher
+      -- (src/boarding_history.ts). Every boarding outpoint ever observed, so
+      -- restarts never re-announce a deposit and the first pass ever can
+      -- baseline pre-existing UTXOs without minting history rows (no
+      -- backfill by design — a re-imported seed must not resurrect years of
+      -- old deposits). kind: 'init' single sentinel row (txid='', vout=-1)
+      -- marking that the first pass ran | 'baseline' pre-existing at first
+      -- pass, no history row | 'deposit' announced in history | 'sweep'
+      -- funded by our own boarding UTXOs being rotated, not a deposit |
+      -- 'spent' left the boarding set (terminal).
+      CREATE TABLE boarding_seen (
+        txid       TEXT    NOT NULL,
+        vout       INTEGER NOT NULL,
+        kind       TEXT    NOT NULL,
+        first_seen INTEGER NOT NULL,
+        PRIMARY KEY (txid, vout)
+      );
+    `,
+  },
 ]
 
 export function openDatabase(path: string): Database {

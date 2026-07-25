@@ -22,6 +22,8 @@ import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, sendSubdustAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
+import { sweepInterruptedWebSends } from './history'
+import { makeBoardingEsplora, reconcileBoardingHistory } from './boarding_history'
 import { resumeAtomicSends } from './atomic/send'
 import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from './atomic/boltz_ws'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
@@ -168,6 +170,9 @@ async function main(): Promise<void> {
   // — assigned once bootReady runs (needs the account key + swaps). Cleared on
   // shutdown.
   let receiveReconcilerInterval: ReturnType<typeof setInterval> | undefined
+  // Onchain-deposit history watcher (src/boarding_history.ts) — recording
+  // only; the SDK's own VtxoManager does the actual boarding auto-settle.
+  let boardingHistoryInterval: ReturnType<typeof setInterval> | undefined
   let boltzWs: BoltzWs | undefined
 
   // Exit-proof mirroring — assigned in bootReady, torn down on shutdown.
@@ -395,6 +400,38 @@ async function main(): Promise<void> {
       reconcileReceives()
       receiveReconcilerInterval = setInterval(reconcileReceives, 30_000)
 
+      // Onchain-deposit watcher: record boarding deposits into the unified
+      // history (pending on arrival, settled once the outpoint leaves the
+      // boarding set). Own interval, NOT a reconcileReceives pass — that one
+      // is poked by the boltz ws for sub-dust settle latency, and a slow
+      // esplora read in its single-flight would delay those pokes. 60s
+      // matches the VtxoManager poll that does the actual auto-settle.
+      // History rows already terminal: web LN sends interrupted by the last
+      // shutdown get closed out first (their swap outcome lives on /swaps).
+      const sweptWebSends = sweepInterruptedWebSends(db)
+      if (sweptWebSends > 0) {
+        console.log(`history: closed ${sweptWebSends} web LN send(s) interrupted by restart`)
+      }
+      const boardingEsplora = makeBoardingEsplora(bootCfg.esploraUrls[0]!)
+      let boardingPassRunning = false
+      const runBoardingPass = (): void => {
+        if (boardingPassRunning) return
+        boardingPassRunning = true
+        void reconcileBoardingHistory({
+          db,
+          getBoardingUtxos: () => wallet.getBoardingUtxos(),
+          esplora: boardingEsplora,
+          notify,
+          log: (msg) => console.log(msg),
+        })
+          .catch((err) => console.warn('boarding history pass failed:', err))
+          .finally(() => {
+            boardingPassRunning = false
+          })
+      }
+      runBoardingPass()
+      boardingHistoryInterval = setInterval(runBoardingPass, 60_000)
+
       // Push channel: the boltz fork emits subdust transitions on its public
       // swap.update ws — a poke re-runs the same reconcile passes immediately,
       // collapsing the 30s poll latency. Pure accelerator; a dead endpoint
@@ -531,6 +568,10 @@ async function main(): Promise<void> {
         clearInterval(receiveReconcilerInterval)
         receiveReconcilerInterval = undefined
       }
+      if (boardingHistoryInterval) {
+        clearInterval(boardingHistoryInterval)
+        boardingHistoryInterval = undefined
+      }
       boltzWs?.stop()
       boltzWs = undefined
       for (const step of undo.reverse()) {
@@ -626,6 +667,7 @@ async function main(): Promise<void> {
     clearInterval(watchdog)
     clearInterval(eventPrune)
     if (receiveReconcilerInterval) clearInterval(receiveReconcilerInterval)
+    if (boardingHistoryInterval) clearInterval(boardingHistoryInterval)
     boltzWs?.stop()
     proofSync?.stop()
     stopIncomingFunds?.()

@@ -4,6 +4,7 @@ import type { Wallet } from '@arkade-os/sdk'
 
 import { cycleSpentMsat } from '../lib/budget'
 import { NwcError } from '../lib/errors'
+import { recordNwcLn } from '../history'
 import { sendLightning } from '../ln_send'
 import { satsToMsats } from '../lib/msat'
 import type { Connection } from '../nostr/connections'
@@ -68,6 +69,16 @@ export async function handlePayInvoice(
        ) VALUES (?, 'outgoing', ?, ?, ?, ?, 'pending', ?)`,
     )
     .run(deps.conn.id, deps.eventId, invoice, decoded.paymentHash, invoiceMsat, createdAt)
+  // Wallet-level ledger twin of the row above. `transactions` stays the
+  // source of truth; syncHistoryFromSources mirrors every later transition,
+  // so none of the settle/fail sites below touch history directly.
+  recordNwcLn(deps.db, {
+    direction: 'out',
+    requestEventId: deps.eventId,
+    amountMsat: invoiceMsat,
+    description: decoded.description || null,
+    createdAt,
+  })
 
   // sendLightning is the shared LN-send path (src/ln_send.ts): a Boltz
   // submarine swap for amounts >= dust, the atomic sub-dust send below it

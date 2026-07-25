@@ -24,6 +24,7 @@ export const NOTIFY_KINDS = [
   'recv-ln', //       dust+ invoice settled (reverse swap)
   'recv-noffer', //   CLINK noffer/zap settled
   'recv-subdust', //  atomic sub-dust receive settled
+  'onboard', //       onchain boarding deposit detected / settled (boarding_history.ts)
   'send-ln', //       dust+ invoice paid (submarine swap)
   'send-subdust', //  atomic sub-dust paid / claim recovered
   'send-fail', //     a send failed after its swap existed
