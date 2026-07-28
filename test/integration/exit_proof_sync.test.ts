@@ -62,17 +62,23 @@ function chainOf(vtxoTx: { txid: string }, shared = true): ChainTx[] {
 
 function vtxoOf(
   tx: { txid: string },
-  over: Partial<{ status: string; batchExpiry: number }> = {},
+  over: Partial<{
+    status: string
+    batchExpiry: number
+    value: number
+    commitmentTxIds: string[]
+  }> = {},
 ): ExtendedVirtualCoin {
   return {
     txid: tx.txid,
     vout: 0,
-    value: 1000,
+    value: over.value ?? 1000,
     script: '5120' + 'ab'.repeat(32),
     tapTree: hex.decode('c0de'),
     virtualStatus: {
       state: over.status ?? 'preconfirmed',
       batchExpiry: over.batchExpiry ?? 1783431985000, // ms, as the SDK reports it
+      ...(over.commitmentTxIds ? { commitmentTxIds: over.commitmentTxIds } : {}),
     },
   } as unknown as ExtendedVirtualCoin
 }
@@ -84,7 +90,7 @@ interface FakeOpts {
   txPageSize?: number
   failVirtualTxs?: boolean
   /** outpoint-keyed rows the fake serves to evidence checks (getVtxos) */
-  spentRows?: Record<string, { spentBy?: string; state?: string }>
+  spentRows?: Record<string, { spentBy?: string; settledBy?: string; state?: string }>
   failGetVtxos?: boolean
 }
 
@@ -111,6 +117,7 @@ function makeFake(opts: FakeOpts) {
             txid: o.txid,
             vout: o.vout,
             spentBy: row.spentBy,
+            settledBy: row.settledBy,
             virtualStatus: { state: row.state ?? 'spent' },
           },
         ]
@@ -389,6 +396,88 @@ describe('proof sync', () => {
     expect(res.gc.removedVtxos).toBe(0)
     expect(res.gc.quarantined).toEqual([`${ark.txid}:0`])
     expect(getVaultVtxo(temp.db, ark.txid, 0)!.quarantineReason).toContain('our signature')
+  })
+
+  test('settlement absorption: value conservation deletes without alarm, even past old expiry', async () => {
+    // The mainnet 2026-07-27 shape: a refresh consumed a forfeited dust+ vtxo
+    // (1000) and a no-forfeit sub-dust vtxo (99) into one fresh 1099 lump.
+    // Neither disappeared row carries a signature the per-row machinery could
+    // find — the sub-dust one CANNOT (no forfeit exists) — but the round's
+    // output exactly accounts for them.
+    const round = 'd'.repeat(64)
+    const lump = makeProof(5)
+    const txs = allTxs()
+    txs.set(lump.txid, lump.psbtB64)
+    const fake = makeFake({
+      chains: {
+        [`${ark.txid}:0`]: chainOf(ark),
+        [`${ark2.txid}:0`]: chainOf(ark2),
+        [`${lump.txid}:0`]: chainOf(lump),
+      },
+      txs,
+      spentRows: {
+        [`${ark.txid}:0`]: { settledBy: round, state: 'swept' },
+        [`${ark2.txid}:0`]: { settledBy: round, state: 'swept' },
+      },
+    })
+    await syncProofs(
+      temp.db,
+      fake.indexer,
+      [vtxoOf(ark, { value: 1000 }), vtxoOf(ark2, { value: 99 })],
+      PUBKEY,
+    )
+    expect(listVaultVtxos(temp.db)).toHaveLength(2)
+
+    // past the OLD batch expiry on purpose: absorption must win over the
+    // expired shortcut, or every late pass re-tells the false lapse story
+    const res = await syncProofs(
+      temp.db,
+      fake.indexer,
+      [vtxoOf(lump, { value: 1099, status: 'settled', commitmentTxIds: [round] })],
+      PUBKEY,
+      PAST_EXPIRY_NOW,
+    )
+    expect(res.gc.absorbed.sort()).toEqual([`${ark.txid}:0`, `${ark2.txid}:0`].sort())
+    expect(res.gc.removedVtxos).toBe(2)
+    expect(res.gc.quarantined).toEqual([])
+    expect(res.gc.expired).toEqual([])
+    expect(getVaultVtxo(temp.db, ark.txid, 0)).toBeNull()
+    expect(getVaultVtxo(temp.db, ark2.txid, 0)).toBeNull()
+    // the lump itself is mirrored like any live vtxo
+    expect(getVaultVtxo(temp.db, lump.txid, 0)).not.toBeNull()
+  })
+
+  test('imbalanced conservation (value not accounted for) stays quarantined', async () => {
+    // Server claims the sub-dust was settled by a round whose outputs to us
+    // do NOT cover it — exactly what a theft dressed up as absorption looks
+    // like. The equality fails and the row keeps its proofs.
+    const round = 'd'.repeat(64)
+    const lump = makeProof(5)
+    const txs = allTxs()
+    txs.set(lump.txid, lump.psbtB64)
+    const fake = makeFake({
+      chains: {
+        [`${ark2.txid}:0`]: chainOf(ark2),
+        [`${lump.txid}:0`]: chainOf(lump),
+      },
+      txs,
+      spentRows: {
+        [`${ark2.txid}:0`]: { settledBy: round, state: 'swept' },
+      },
+    })
+    await syncProofs(temp.db, fake.indexer, [vtxoOf(ark2, { value: 99 })], PUBKEY)
+
+    const res = await syncProofs(
+      temp.db,
+      fake.indexer,
+      [vtxoOf(lump, { value: 1000, status: 'settled', commitmentTxIds: [round] })],
+      PUBKEY,
+      BEFORE_EXPIRY_NOW,
+    )
+    expect(res.gc.absorbed).toEqual([])
+    expect(res.gc.quarantined).toEqual([`${ark2.txid}:0`])
+    expect(getVaultVtxo(temp.db, ark2.txid, 0)!.quarantinedAt).not.toBeNull()
+    expect(isVtxoExitReady(temp.db, ark2.txid, 0)).toBe(true)
   })
 
   test('our own completed exit (op swept) is its own evidence — removed, no alarm', async () => {

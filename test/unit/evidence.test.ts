@@ -2,7 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import { base64 } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { Transaction } from '@scure/btc-signer'
-import { verifyOurSpend, classifyDisappearance, type EvidenceIndexer } from '../../src/exit/evidence'
+import {
+  verifyOurSpend,
+  classifyDisappearance,
+  resolveAbsorbedByConservation,
+  type EvidenceIndexer,
+} from '../../src/exit/evidence'
 import { makeSpendEvidence, fakeTxid } from '../helpers/evidence'
 import type { VirtualCoin } from '@arkade-os/sdk'
 
@@ -164,5 +169,77 @@ describe('classifyDisappearance', () => {
     await expect(
       classifyDisappearance(indexerOf({ failVtxos: true }), row, new Uint8Array(32), 1_000),
     ).rejects.toThrow('indexer down')
+  })
+})
+
+describe('resolveAbsorbedByConservation', () => {
+  const R1 = 'a'.repeat(64)
+  const R2 = 'b'.repeat(64)
+
+  const liveOf = (value: number, commitmentTxIds?: string[]) =>
+    ({ value, virtualStatus: { state: 'settled', commitmentTxIds } }) as Pick<
+      VirtualCoin,
+      'value' | 'virtualStatus'
+    >
+
+  test('balanced group: forfeited dust+ and no-forfeit sub-dust both absorbed', () => {
+    const out = resolveAbsorbedByConservation(
+      [
+        { outpoint: 'aa:0', valueSat: 1000, settledBy: R1 },
+        { outpoint: 'bb:0', valueSat: 99, settledBy: R1 },
+      ],
+      [liveOf(1099, [R1])],
+    )
+    expect([...out].sort()).toEqual(['aa:0', 'bb:0'])
+  })
+
+  test('theft shape (round output short by the sub-dust) absorbs nothing', () => {
+    const out = resolveAbsorbedByConservation(
+      [
+        { outpoint: 'aa:0', valueSat: 1000, settledBy: R1 },
+        { outpoint: 'bb:0', valueSat: 99, settledBy: R1 },
+      ],
+      [liveOf(1000, [R1])],
+    )
+    expect(out.size).toBe(0)
+  })
+
+  test('overshoot (extra value credited from the round) absorbs nothing', () => {
+    // e.g. a boarding UTXO rode the same round — its sats inflate the output
+    // side. Conservative: manual review instead of a lucky-looking equality.
+    const out = resolveAbsorbedByConservation(
+      [{ outpoint: 'bb:0', valueSat: 99, settledBy: R1 }],
+      [liveOf(20099, [R1])],
+    )
+    expect(out.size).toBe(0)
+  })
+
+  test('rows without a settledBy hint are never grouped', () => {
+    const out = resolveAbsorbedByConservation(
+      [{ outpoint: 'bb:0', valueSat: 99, settledBy: undefined }],
+      [liveOf(99, [R1])],
+    )
+    expect(out.size).toBe(0)
+  })
+
+  test('groups are independent: one balances, the other does not', () => {
+    const out = resolveAbsorbedByConservation(
+      [
+        { outpoint: 'aa:0', valueSat: 500, settledBy: R1 },
+        { outpoint: 'bb:0', valueSat: 77, settledBy: R2 },
+      ],
+      [liveOf(500, [R1]), liveOf(76, [R2])],
+    )
+    expect([...out]).toEqual(['aa:0'])
+  })
+
+  test('live vtxos with mixed/absent commitment ids never count toward a round', () => {
+    const out = resolveAbsorbedByConservation(
+      [{ outpoint: 'bb:0', valueSat: 99, settledBy: R1 }],
+      // a child spanning two rounds, and a plain vtxo with no ids — neither
+      // is "this round's output", so the equality must fail
+      [liveOf(99, [R1, R2]), liveOf(99, undefined)],
+    )
+    expect(out.size).toBe(0)
   })
 })

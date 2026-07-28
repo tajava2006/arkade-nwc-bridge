@@ -7,7 +7,7 @@ import {
   type Outpoint,
   type VirtualCoin,
 } from '@arkade-os/sdk'
-import { classifyDisappearance } from './evidence'
+import { classifyDisappearance, resolveAbsorbedByConservation } from './evidence'
 import { getExitOp } from './ops'
 import {
   clearQuarantine,
@@ -19,6 +19,7 @@ import {
   removeVtxo,
   storeVtxoWithProofs,
   type VaultProofTx,
+  type VaultVtxo,
   type VaultVtxoSnapshot,
 } from './vault'
 
@@ -67,9 +68,15 @@ export interface ProofSyncResult {
   /** per-vtxo isolation: one bad fetch never blocks the rest */
   failed: { outpoint: string; error: string }[]
   gc: {
-    /** rows deleted WITH evidence (verified spend / our own completed exit) */
+    /** rows deleted WITH evidence (verified spend / our own completed exit / absorption) */
     removedVtxos: number
     removedProofTxs: number
+    /**
+     * rows deleted via value conservation: consumed without a forfeit by a
+     * settlement whose outputs to us exactly account for them (the sub-dust
+     * refresh case — no per-row signature can exist)
+     */
+    absorbed: string[]
     /** outpoints NEWLY flagged as unexplained — quarantined, proofs kept */
     quarantined: string[]
     /**
@@ -194,7 +201,7 @@ export async function syncProofs(
     synced: [],
     skipped: 0,
     failed: [],
-    gc: { removedVtxos: 0, removedProofTxs: 0, quarantined: [], expired: [], released: [] },
+    gc: { removedVtxos: 0, removedProofTxs: 0, absorbed: [], quarantined: [], expired: [], released: [] },
   }
 
   for (const v of vtxos) {
@@ -254,6 +261,9 @@ export async function syncProofs(
 
   // ── evidence-gated GC ──
   const live = new Set(vtxos.map(outpointKey))
+  // Pass 1: exonerate re-listed rows, honor our own exit ops, and collect
+  // the disappearances that need third-party evidence.
+  const needEvidence: VaultVtxo[] = []
   for (const row of listVaultVtxos(db)) {
     const key = outpointKey(row)
     if (live.has(key)) {
@@ -280,10 +290,49 @@ export async function syncProofs(
     }
     // Atomic-swap rows are lifecycle-owned: never in the wallet's live set
     // (script address), and their eventual spend is by the CLAIMER's key,
-    // which classifyDisappearance could never verify as ours — the machinery
-    // below would false-flag them every pass. The swap code deletes them on
-    // terminal states; a completed exit op is still honored above.
+    // which the evidence machinery could never verify as ours — it would
+    // false-flag them every pass. The swap code deletes them on terminal
+    // states; a completed exit op is still honored above.
     if (row.source === 'atomic') continue
+    needEvidence.push(row)
+  }
+
+  // Settlement absorption first (pass-level evidence): recoverable-class
+  // round inputs are consumed WITHOUT a forfeit, so no signature exists for
+  // classifyDisappearance to find — value conservation over the whole pass
+  // is the only proof there can be. Runs before the per-row machinery so
+  // the expired shortcut can't mislabel an absorbed row whose old batch
+  // expiry has since lapsed. One batched read; on failure the rows simply
+  // fall through to per-row classification and its retry semantics.
+  let absorbed = new Set<string>()
+  if (needEvidence.length > 0) {
+    try {
+      const res = await indexer.getVtxos({
+        outpoints: needEvidence.map((r) => ({ txid: r.txid, vout: r.vout })),
+      })
+      const settledByOf = new Map(res.vtxos.map((v) => [outpointKey(v), v.settledBy]))
+      absorbed = resolveAbsorbedByConservation(
+        needEvidence.map((r) => ({
+          outpoint: outpointKey(r),
+          valueSat: r.valueSat,
+          settledBy: settledByOf.get(outpointKey(r)),
+        })),
+        vtxos,
+      )
+    } catch {
+      // indeterminate — same treatment classifyDisappearance failures get
+    }
+  }
+
+  for (const row of needEvidence) {
+    const key = outpointKey(row)
+    if (absorbed.has(key)) {
+      if (removeVtxo(db, row.txid, row.vout)) {
+        result.gc.removedVtxos++
+        result.gc.absorbed.push(key)
+      }
+      continue
+    }
     try {
       const verdict = await classifyDisappearance(indexer, row, xOnlyPubkey, nowSec)
       if (verdict.kind === 'spent-verified') {

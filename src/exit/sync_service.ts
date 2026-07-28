@@ -118,6 +118,12 @@ export function startProofSync(deps: {
       claim = { total: vtxos.length, at: Math.floor(Date.now() / 1000) }
       const result = await syncProofs(deps.db, deps.indexer, vtxos, deps.xOnlyPubkey)
       lastRun = { ...result, at: Math.floor(Date.now() / 1000), reason }
+      if (result.gc.absorbed.length > 0) {
+        // routine on every refresh that folds sub-dust — log only, no DM
+        log(
+          `exit-sync: ${result.gc.absorbed.length} vtxo(s) absorbed by our own settlement (value conserved): ${result.gc.absorbed.join(', ')}`,
+        )
+      }
       if (result.gc.quarantined.length > 0) {
         log(
           `exit-sync: ⚠ ${result.gc.quarantined.length} vtxo(s) QUARANTINED — dropped by the ASP without evidence: ${result.gc.quarantined.join(', ')}`,
@@ -178,7 +184,7 @@ export function startProofSync(deps: {
         synced: [],
         skipped: 0,
         failed: [{ outpoint: '*', error: err instanceof Error ? err.message : String(err) }],
-        gc: { removedVtxos: 0, removedProofTxs: 0, quarantined: [], expired: [], released: [] },
+        gc: { removedVtxos: 0, removedProofTxs: 0, absorbed: [], quarantined: [], expired: [], released: [] },
         at: Math.floor(Date.now() / 1000),
         reason,
       }

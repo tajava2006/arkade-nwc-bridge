@@ -151,6 +151,24 @@ ever deleted silently**:
   signature rather than a local spend journal means a spend made from
   *another wallet holding the same nsec* verifies identically — no false
   alarms from the multi-client case.
+- **absorbed** — settlement absorption, proven by **value conservation**
+  (pass-level, resolved before the per-row verdicts): recoverable-class round
+  inputs (sub-dust/swept) are consumed **without a forfeit** — arkd skips
+  forfeits for them — so no tx signed by our key can ever exist and the
+  per-row machinery would false-alarm on every refresh that folds sub-dust
+  (observed mainnet 2026-07-27). Instead, the pass groups this pass's
+  disappearances by the indexer's `settledBy` commitment and deletes a group
+  only when the sats it took from us (amounts from OUR vault rows) exactly
+  equal the sats that commitment created for us in the live set (the same
+  `settledBy` ↔ `commitmentTxIds` correlation the SDK's history builder
+  uses). Initiator-agnostic — bridge loop, SDK renew, manual button, or
+  another wallet on the same nsec all land the round output in our live set.
+  `settledBy` only *groups*: a lying server shifts rows between groups and
+  breaks the equality, so failure always degrades to quarantine/expired,
+  never to a wrong delete. Known conservative corners (row stays flagged for
+  manual Forget): a boarding UTXO riding the same round, offboard rounds
+  (output went onchain), the lump spent before the pass ran, or a mid-pass
+  crash that already deleted forfeited siblings.
 - **expired** — batch expiry passed by the local clock against the locally
   stored `expires_at`. Post-expiry the server sweeps without our signature
   legitimately, and the pre-signed chain is dead paper anyway. NOT deleted

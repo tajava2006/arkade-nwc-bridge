@@ -31,6 +31,14 @@ import type { VaultVtxo } from './vault'
 // not unproven: the caller keeps the row un-flagged and retries next pass
 // (same per-vtxo isolation the rest of ProofSync uses).
 
+// A fourth evidence class lives OUTSIDE classifyDisappearance because it is
+// pass-level, not per-row: settlement absorption. Sub-dust/swept round inputs
+// are absorbed WITHOUT a forfeit (arkd skips forfeits for recoverable-class
+// inputs), so no tx signed by our key ever exists for them — the per-row
+// machinery above can only land on 'unproven'/'expired', turning every
+// refresh that folds sub-dust into a false alarm (observed mainnet
+// 2026-07-27). See resolveAbsorbedByConservation.
+
 export type Disappearance =
   | { kind: 'spent-verified'; spentBy: string }
   | { kind: 'expired' }
@@ -137,6 +145,65 @@ export function verifyOurSpend(
     }
   }
   return false
+}
+
+/** One vault row missing from the live set, prepared for the conservation check. */
+export interface AbsorptionCandidate {
+  /** `txid:vout`, the key ProofSync reports in results */
+  outpoint: string
+  /** amount from OUR vault row — never the server's word */
+  valueSat: number
+  /** the indexer's `settledBy` for this outpoint — a grouping HINT, not evidence */
+  settledBy: string | undefined
+}
+
+/**
+ * Value-conservation evidence for settlement absorption: vault rows the
+ * server claims were consumed by commitment C are proven legitimately
+ * absorbed when the sats C took from us exactly equal the sats C created
+ * for us. The invariant holds for ANY initiator — this bridge's
+ * consolidate-all loop, the SDK's backstop renew, a manual refresh, even
+ * another wallet holding the same nsec — because the round's outputs land
+ * in our live set either way. Amounts on the left come from our own vault;
+ * the right side uses the same settledBy↔commitmentTxIds correlation the
+ * SDK's history builder uses, and `settledBy` only GROUPS: a lie shifts
+ * rows between groups and breaks the equality, so the failure mode is
+ * always "stay quarantined", never "wrongly delete".
+ *
+ * Deliberately exact-match and single-pass-scoped. Known corners that fail
+ * conservative (row stays flagged for a manual Forget): a boarding UTXO
+ * riding the same round (its sats inflate the output), an offboard round
+ * (output went onchain, not into the live set), the lump being spent before
+ * this pass ran, or a crash that already deleted some forfeited siblings.
+ */
+export function resolveAbsorbedByConservation(
+  disappeared: readonly AbsorptionCandidate[],
+  liveVtxos: readonly Pick<VirtualCoin, 'value' | 'virtualStatus'>[],
+): Set<string> {
+  const groups = new Map<string, AbsorptionCandidate[]>()
+  for (const c of disappeared) {
+    if (!c.settledBy) continue
+    const g = groups.get(c.settledBy)
+    if (g) g.push(c)
+    else groups.set(c.settledBy, [c])
+  }
+  const absorbed = new Set<string>()
+  for (const [commitment, rows] of groups) {
+    const consumedSat = rows.reduce((s, r) => s + r.valueSat, 0)
+    // A round's outputs for us = live vtxos whose commitmentTxIds are exactly
+    // this commitment (the SDK's own settlement correlation). Children spent
+    // onward or received C-descendants carry different/multiple ids and drop
+    // out, which can only break the equality — the safe direction.
+    const createdSat = liveVtxos.reduce((s, v) => {
+      const ids = v.virtualStatus?.commitmentTxIds
+      const fromThisRound = !!ids && ids.length > 0 && ids.every((id) => id === commitment)
+      return s + (fromThisRound ? v.value : 0)
+    }, 0)
+    if (consumedSat > 0 && consumedSat === createdSat) {
+      for (const r of rows) absorbed.add(r.outpoint)
+    }
+  }
+  return absorbed
 }
 
 /**

@@ -47,7 +47,9 @@ src/
                                sync_service.ts (mirror proofs while the ASP is
                                alive; GC is evidence-gated), evidence.ts
                                (classify a disappearance: verified spend by
-                               OUR key / local expiry / unproven→quarantine),
+                               OUR key / settlement absorption via value
+                               conservation (no-forfeit sub-dust refresh) /
+                               local expiry / unproven→quarantine),
                                esplora.ts (pickEsplora),
                                vault_indexer.ts (serve Unroll.Session offline),
                                csv.ts (CSV-elapsed judgment), estimate.ts
