@@ -19,22 +19,40 @@ export function faqView(): RawHtml {
         <strong>Can I always escape to onchain L1 without anyone's help?</strong> Yes.
         Ark guarantees this at the protocol level — every VTXO carries a pre-signed
         unilateral exit chain that needs nobody's cooperation to broadcast — and this
-        app makes the guarantee usable: the <a href="/exit">Exit tab</a> keeps those
-        proofs mirrored locally and works even with the server dead. Two conditions,
-        both watched on the dashboard: the proofs must be synced (the
-        <em>Exit readiness</em> tile), and the exit must happen before the VTXO's
-        expiry.
+        app makes the guarantee usable: while it runs, the <a href="/exit">Exit tab</a>
+        keeps those proofs mirrored locally on its own, so the escape hatch works even
+        with the server dead. This isn't a chore you have to tend — leave the bridge
+        running and the <em>Exit readiness</em> tile on the dashboard just tells you the
+        proofs are backed up. The one judgment call that is genuinely yours: if the
+        server has truly vanished, exit <em>before</em> your VTXOs' expiry — past that
+        the proofs are dead paper. But a server that briefly blipped offline is not a
+        server that fled. If it's just down, wait for it to come back and move your
+        money out with an ordinary onchain send from the <a href="/send">Send tab</a> —
+        that is always far cheaper than a unilateral exit. Press the exit button only
+        once you are convinced the server is gone for good.
       </p>
       <p>
         <strong>Am I the only one who can spend it?</strong> Almost — with one edge
         worth knowing. A VTXO you <em>received</em> offchain could in theory be
-        double-spent if the Ark server and the VTXO's previous owner colluded. That
-        window closes at the next settlement round: a refresh anchors the VTXO
-        onchain and makes it unconditionally yours. So received funds are, strictly
-        speaking, not 100% yours until the next refresh — refresh after receiving and
-        the answer becomes an unqualified yes. (Change from your own sends is safe
-        either way: the "previous owner" is you.) Sub-dust amounts have their own
-        caveat — see the sub-dust question below.
+        double-spent if the Ark server and a <em>previous owner</em> colluded. And
+        "previous owner" means the whole chain of custody back to the last time that
+        VTXO was anchored onchain by a refresh — not just the person who handed it to
+        you. That window closes at the next settlement round: a refresh anchors the
+        VTXO onchain and makes it unconditionally yours. So received funds are,
+        strictly speaking, not 100% yours until the next refresh.
+      </p>
+      <p>
+        This is why a single refresh right after receiving buys full ownership for
+        everything downstream. Once a refresh has made a VTXO unconditionally yours,
+        spending it and taking the change back <em>looks</em> like it could still be
+        double-spent — but trace the chain of previous owners and it stops at your own
+        refresh, all of it you, so there's no one left to collude with. In practice: if
+        your style is to receive a large amount now and then and spend it down, refresh
+        once immediately after each receive and then just spend — from that point on
+        everything is always fully yours. And as the server matures and refreshes can
+        run far more often, that cryptographic finality will lock in almost the instant
+        you receive. Sub-dust amounts have their own caveat — see the sub-dust question
+        below.
       </p>
 
       <h2>What is a refresh?</h2>
@@ -47,6 +65,19 @@ export function faqView(): RawHtml {
         into one fresh VTXO — fewer rounds for the server, one defragmented VTXO
         with a full expiry reset for you. The manual button and the details are on
         the <a href="/send">Send tab</a>.
+      </p>
+
+      <h2>If full ownership needs an onchain refresh, why use Ark at all?</h2>
+      <p>
+        Because a refresh isn't one onchain transaction per person. A settlement round
+        is a <em>shared</em> transaction: many people refresh together in it, and its
+        onchain footprint stays essentially constant no matter how many join — the
+        per-user VTXO tree and connectors live offchain, and only one small commitment
+        lands on L1. Thousands of participants could settle in the same fixed-size
+        transaction. That is the whole scaling argument: the block space a
+        Lightning-only world burns opening and closing channels one pair at a time, Ark
+        spends once for an entire round — so the number of self-custodial users a single
+        block can serve is far higher.
       </p>
 
       <h2>What are the fees?</h2>
@@ -73,13 +104,18 @@ export function faqView(): RawHtml {
         onchain output.
       </p>
 
-      <h2>Other Ark wallets can't swap under 330 sats. This one can — is it really atomic?</h2>
+      <h2>Arkade can't swap under 330 sats. This one can — is it really atomic?</h2>
       <p>
-        <strong>Why others can't:</strong> Bitcoin has a dust floor — an output below
-        330 sats can't stand on its own onchain, and Ark inherits that limit because
-        every offchain claim must be backed by a real onchain output. The standard
-        swap construction holds the amount in an HTLC <em>output</em>, which simply
-        cannot exist below dust, so official infrastructure sets ~330-sat minimums.
+        <strong>Why Arkade can't:</strong> Bitcoin has a dust floor of ~330 sats. A
+        sub-dust output <em>can</em> still exist on Ark — as a <em>recoverable</em>
+        VTXO — but it can't be spent or swept on its own until a refresh folds it in.
+        A plain sub-dust send is therefore fine: it drops that recoverable VTXO straight
+        onto the recipient's address, no middle step. A <em>swap</em> is where it
+        breaks. The standard construction routes the amount through an intermediate
+        HTLC script address that the counterparty has to sweep to complete the atomic
+        exchange — and while that HTLC output is sub-dust it can't be swept until a
+        refresh, so the atomic step never closes. That's why Arkade's own swap path
+        sets a ~330-sat minimum.
       </p>
       <p>
         <strong>How this one does:</strong> the amount is never an output. The swap
@@ -101,7 +137,55 @@ export function faqView(): RawHtml {
         inherent to sub-dust on any Ark, not to this swap.
       </p>
 
+      <h2>But some Ark wallets do sub-dust swaps already — how?</h2>
+      <p>
+        Those aren't running arkd's design — that's <strong>bark</strong>, the
+        implementation from the Second team, and the difference is a deliberate policy
+        trade-off, not magic. Bark <em>never</em> merges VTXOs. Because inputs are never
+        combined, a sub-dust VTXO's un-exitability can never leak into the exit rights
+        of the VTXOs around it — each stays linearly isolated. So a sub-dust piece is
+        free to move around on the premise that it simply has no unilateral-exit right,
+        and that is what lets bark hand a sub-dust amount across a swap at all.
+      </p>
+      <p>
+        One honest correction, because it's exactly this wallet's differentiator: bark's
+        sub-dust swaps are <strong>not atomic</strong>. They're server-trusted — there's
+        no pre-signed commitment underneath, so if a swap half-completes the server can
+        end up sweeping the sub-dust HTLC. Receiving the piece works, and unilaterally
+        exiting the piece you received is blocked — but that exit limitation is true
+        here too; it's inherent to sub-dust on any Ark.
+      </p>
+      <p>
+        Bark's real cost is fragmentation. Because VTXOs only ever split and never
+        merge, they multiply — and the sharp part is that <em>when you receive money you
+        don't control how many sub-dust pieces it arrives as</em>. You think you got
+        30,000 sats; it could be a hundred 300-sat pieces, each with no unilateral-exit
+        right — funds that depend entirely on the ASP. Arkade's design forbids spending
+        sub-dust before a refresh, which is more restrictive, but it also means those
+        fragmented, non-exitable crumbs can never land on you in the first place: an
+        ordinary receive is always a single, fully-exitable chunk.
+      </p>
+      <p>
+        So each design pays for its own strength. Bark buys relatively free sub-dust
+        swaps at the risk that a receiver ends up holding fragmented, largely
+        non-exitable money. Arkade avoids that risk entirely but historically couldn't
+        do sub-dust swaps at all — and closing exactly that gap, <em>atomically</em>, is
+        what this wallet is.
+      </p>
+
       <h2>I used the same key in another wallet — do the exit proofs stay correct?</h2>
+      <p>
+        First, what "another wallet" has to mean: the same key doesn't make two wallets
+        compatible on its own — they also have to be on the <em>same Ark server</em>,
+        because a VTXO only exists on the server that issued it. Which server this bridge
+        talks to is the choice you made at fresh start: pick Official Arkade and you
+        share a wallet with <code>arkade.money</code>; pick this bridge's operator (the
+        default) and you share one with
+        <code>https://wallet.hoppe-relay.it.com/</code>. With that settled — same key,
+        same server — anything you receive in the other wallet, <em>including the change
+        left over from its own sends</em>, shows up here and gets its exit proofs
+        mirrored just the same.
+      </p>
       <p>
         Yes. The bridge continuously mirrors every VTXO's pre-signed exit proofs
         while the server is reachable, and it never takes the server's word for a
@@ -119,11 +203,19 @@ export function faqView(): RawHtml {
       <h2>What do I need to back up?</h2>
       <p>
         One secret: the nsec. It is both the wallet key (all VTXOs, the boarding
-        address, the exit fuel) and the Nostr identity (NWC connections, the
-        noffer). <code>bun run show-nsec</code> prints it;
-        <code>bun run show-btc-key</code> prints the same key as WIF + descriptor
-        for import into any descriptor wallet — the funds never depend on this
-        bridge existing.
+        address, the exit fuel) and the Nostr identity (NWC connections, the noffer).
+        <code>bun run show-nsec</code> prints it. As long as the Ark server is
+        cooperative you don't need to separately back up the exit proofs — the bridge
+        re-mirrors them from the server on any fresh start, out of that one secret.
+      </p>
+      <p>
+        <code>bun run show-btc-key</code> prints the <em>same</em> key as WIF +
+        descriptor. It isn't a second thing to back up — it's the same secret in
+        different clothing, there for one specific job: importing into any onchain
+        descriptor wallet to directly reclaim the <strong>exit-fuel</strong> coins (the
+        onchain sats that pay for CPFP/sweep during an exit) without this bridge. If you
+        do that, note the imported wallet won't see those UTXOs until <em>you</em> run a
+        rescan yourself.
       </p>
 
       <h2>What if the Ark server goes down — or disappears for good?</h2>
@@ -149,12 +241,21 @@ export function faqView(): RawHtml {
 
       <h2>Do I need to keep the bridge running?</h2>
       <p>
-        Mostly yes — it's a small server, not a phone app. While it runs, refreshes
-        are automatic and nothing expires. If it stays down long enough for a VTXO's
-        expiry to pass, the server is entitled to sweep those funds — and past expiry
-        even the unilateral exit proofs are dead paper. Expiry windows are measured
-        in weeks (each VTXO's countdown is on the <a href="/send">Send tab</a>), so
-        "keep it running, check in now and then" is the whole operational burden.
+        It comes down to how much you trust the server. Keep it running if you think the
+        server might try to cheat you — a live bridge keeps proofs mirrored and runs
+        refreshes automatically, so nothing quietly expires out from under you. Keep it
+        running too if you use NWC, since those connections need it reachable.
+      </p>
+      <p>
+        If you don't use NWC and don't think the server will cheat, it's fine to leave
+        it off. Even past a VTXO's expiry a cooperative server will still refresh you
+        into a clean VTXO — your money doesn't vanish the instant the clock ticks over.
+        The catch is that this is a courtesy, not a cryptographic guarantee: once expiry
+        passes, the trustless unilateral-exit proofs are dead paper and recovery is up
+        to the server's goodwill. So the safe habit is to turn the bridge on once as
+        each expiry window approaches — while it runs it refreshes you trustlessly,
+        before the clock ever runs out. Expiry windows are measured in weeks (each
+        VTXO's countdown is on the <a href="/send">Send tab</a>).
       </p>
     `,
   })
