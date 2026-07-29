@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { SqliteAtomicSwapRepository, SwapDirection } from '../../src/atomic'
 import {
+  inflightSends,
   RefundNotYetError,
   resumeAtomicSends,
   type AtomicSendDeps,
@@ -209,6 +210,73 @@ describe('resumeAtomicSends', () => {
     // Terminal now — listResumable excludes it, so the next pass can't re-DM.
     await resumeAtomicSends(deps, noRefund, spent)
     expect(calls.length).toBe(1)
+  })
+
+  // F19: rows a live atomicSubdustSend is driving are off-limits to the
+  // reconciler. The boltz-ws poke runs a pass right at swap creation, so
+  // without the skip the F15 pre-pass steals the funding bookkeeping mid-send
+  // (illegal funded→funded on the live path — mainnet 2026-07-29) and
+  // markClaimed races the live 'claimed' transition the same way.
+
+  test('F19: in-flight init row is untouched — no recovery attempt, no status poll', async () => {
+    repo.create({
+      id: 's-live',
+      direction: SwapDirection.Send,
+      paymentHash: 'aa'.repeat(32),
+      state: 'init', // exactly the fundShared→setFundingOutpoint window
+      amount: 21,
+      refundLocktime: NOW + 3600,
+      peerPubkey: 'cd'.repeat(32),
+      exitDelay: 512,
+    })
+    inflightSends.add('s-live')
+    try {
+      let fetches = 0
+      globalThis.fetch = (async () => {
+        fetches++
+        throw new Error('the reconciler must not touch a live send at all')
+      }) as unknown as typeof fetch
+      const r = await resumeAtomicSends(makeDeps(), noRefund)
+      expect(repo.get('s-live')?.state).toBe('init') // the live send will advance it
+      expect(r.failed).toEqual([])
+      expect(r.waiting).toBe(1)
+      expect(fetches).toBe(0)
+    } finally {
+      inflightSends.delete('s-live')
+    }
+  })
+
+  test('F19 control: the same row NOT in-flight still gets the F15 recovery attempt', async () => {
+    // Pins that the skip above is what protects the live row — a genuine
+    // crash orphan (send died, finally released the id) must keep being
+    // recovered. The stubbed ark is down, so the attempt surfaces as failed.
+    repo.create({
+      id: 's-orphan',
+      direction: SwapDirection.Send,
+      paymentHash: 'bb'.repeat(32),
+      state: 'init',
+      amount: 21,
+      refundLocktime: NOW + 3600,
+      peerPubkey: 'cd'.repeat(32),
+      exitDelay: 512,
+    })
+    stubStatus({}) // every endpoint down
+    const r = await resumeAtomicSends(makeDeps(), noRefund)
+    expect(r.failed.map((f) => f.id)).toEqual(['s-orphan'])
+  })
+
+  test('F19: in-flight ln_inflight row is not markClaimed underneath the live send', async () => {
+    plantSend('s-live-claim', 'ln_inflight', NOW + 3600)
+    inflightSends.add('s-live-claim')
+    try {
+      stubStatus({ 's-live-claim': { state: 'claimed', preimage: 'ab'.repeat(32) } })
+      const r = await resumeAtomicSends(makeDeps(), noRefund, spent)
+      expect(r.claimed).toEqual([]) // the live flow does its own 'claimed' transition
+      expect(r.waiting).toBe(1)
+      expect(repo.get('s-live-claim')?.state).toBe('ln_inflight')
+    } finally {
+      inflightSends.delete('s-live-claim')
+    }
   })
 
   test('operator DM: failed→refund_wait notifies on the transition edge only', async () => {

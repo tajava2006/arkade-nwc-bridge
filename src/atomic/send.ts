@@ -92,6 +92,19 @@ interface InitResponse {
 /** Funding-input batch expiry must clear T by this (mirror of boltz's payMargin). */
 const FUNDING_MARGIN_SECS = 600
 
+/**
+ * Swap ids a live atomicSubdustSend call is currently driving (F19). The
+ * reconciler must skip these: the F15 pre-pass cannot tell a crash remnant
+ * from a send inside its fundShared→setFundingOutpoint window (both read as
+ * 'init' + no outpoint + coin on-chain), and markClaimed would race the live
+ * flow's own 'claimed' transition — either steal makes the send throw
+ * `illegal transition` mid-flight (mainnet 2026-07-29, boltz-ws poke landing
+ * in the window). Single-process, so a Set is the whole truth; the send's
+ * finally releases the id, so a genuine orphan (throw mid-send) is recovered
+ * by the next reconcile tick exactly as before. Exported for tests only.
+ */
+export const inflightSends = new Set<string>()
+
 // confirmClaimSpent = the shared confirmSpent poll (verify-before-bookkeep, F4):
 // boltz replying `status: 'claimed'` is NOT proof it spent our funding — only the
 // indexer showing the outpoint spent is. Imported (aliased) from ./ark_util.
@@ -185,124 +198,132 @@ export async function atomicSubdustSend(
   // that blocks retrying the same invoice — boltz's /send/init is idempotent for
   // an unfunded row, so the retry gets the same swapId and this create runs
   // cleanly (F17).
-  repo.create({
-    id: init.swapId,
-    direction: SwapDirection.Send,
-    paymentHash,
-    state: 'init',
-    amount: a,
-    refundLocktime: init.refundLocktime,
-    invoice,
-    peerPubkey: hex.encode(boltzXOnly),
-    exitDelay: Number(d),
-  })
-
-  const funderInputs: ArkTxInput[] = funding.map((f) => ({
-    txid: f.txid,
-    vout: f.vout,
-    value: f.value,
-    tapLeafScript: userScript.forfeit(),
-    tapTree: userScript.encode(),
-  }))
-  const Vp = funding.reduce((n, f) => n + f.value, 0)
-  const outpoint = await fundShared(
-    funderInputs,
-    [{ script: script.pkScript, amount: BigInt(Vp) }],
-    unroll,
-    deps.wallet.identity,
-    ark,
-  )
-  const txid = outpoint.txid
-
-  const { shared, coin } = await locateFunding(indexer, script, Vp, txid)
-  repo.setFundingOutpoint(init.swapId, `${shared.txid}:${shared.vout}`)
-
-  // Mirror the shared vtxo's exit material into the vault before boltz gets to
-  // act: it lives at a script address the wallet never lists, so ProofSync
-  // alone would leave it invisible — and the ASP dying mid-swap is exactly
-  // when the pre-signed chain is needed (ATOMIC_SUBDUST_PLAN.md §8).
-  // Best-effort: a degraded safety mirror must not fail the swap.
+  // Registered before the row exists (same sync block — no await between),
+  // so a reconcile pass poked mid-send can never read the row without seeing
+  // the registration (F19).
+  inflightSends.add(init.swapId)
   try {
-    await captureVtxo(deps.db, indexer, {
-      txid: shared.txid,
-      vout: shared.vout,
-      valueSat: shared.value,
-      source: 'atomic',
-      script: hex.encode(script.pkScript),
-      tapTree: hex.encode(script.encode()),
-      status: coin.virtualStatus?.state ?? 'unknown',
-      expiresAt: expirySec(coin),
+    repo.create({
+      id: init.swapId,
+      direction: SwapDirection.Send,
+      paymentHash,
+      state: 'init',
+      amount: a,
+      refundLocktime: init.refundLocktime,
+      invoice,
+      peerPubkey: hex.encode(boltzXOnly),
+      exitDelay: Number(d),
     })
-  } catch (err) {
-    console.warn(`atomic send ${init.swapId}: vault capture failed (swap unaffected):`, err)
-  }
 
-  // 4. compute the split + pre-sign the claim pair. boltz's output uses
-  // boltz's own wallet-script delay (boltzScriptDelay) — building it with d
-  // would make boltz's sendFund reconstruction reject our presigs.
-  const funderAddr = ArkAddress.decode(await deps.wallet.getAddress())
-  const boltzD = init.boltzScriptDelay !== undefined ? BigInt(init.boltzScriptDelay) : d
-  const boltzAddr = new DefaultVtxo.Script({
-    pubKey: boltzXOnly,
-    serverPubKey: serverXOnly,
-    csvTimelock: { type: timelockType(boltzD), value: boltzD },
-  }).address(hrp(info.network), serverXOnly)
-  const split = computeClaimSplit({
-    funderAddress: funderAddr,
-    claimerAddress: boltzAddr,
-    fundingValue: Vp,
-    amount: a,
-    dust,
-    // boltz's advertised fee — folded into its claim output (a + fee, one
-    // note). Must mirror its sendFund reconstruction exactly.
-    feeSats: fee,
-  })
-  const presig = await presignClaim(shared, split.outputs, unroll, deps.wallet.identity)
-  repo.setPresigs(init.swapId, presig)
-  repo.transition(init.swapId, 'funded')
+    const funderInputs: ArkTxInput[] = funding.map((f) => ({
+      txid: f.txid,
+      vout: f.vout,
+      value: f.value,
+      tapLeafScript: userScript.forfeit(),
+      tapTree: userScript.encode(),
+    }))
+    const Vp = funding.reduce((n, f) => n + f.value, 0)
+    const outpoint = await fundShared(
+      funderInputs,
+      [{ script: script.pkScript, amount: BigInt(Vp) }],
+      unroll,
+      deps.wallet.identity,
+      ark,
+    )
+    const txid = outpoint.txid
 
-  // 5. hand boltz the presigs → it verifies, pays, claims. Handing them over =
-  // boltz's LN pay is now in flight (the state machine requires this hop:
-  // claimed/refund_wait are only reachable from ln_inflight, not funded).
-  repo.transition(init.swapId, 'ln_inflight')
-  const fund = await boltzFetch<{ status: string; preimage?: string; error?: string }>(
-    `${deps.boltzApiUrl}/v2/subdust/atomic/send/fund`,
-    { swapId: init.swapId, fundingOutpoint: `${shared.txid}:${shared.vout}`, presigs: presig },
-  )
-  if (fund.status !== 'claimed' || fund.preimage === undefined) {
-    repo.transition(init.swapId, fund.status === 'failed' ? 'refund_wait' : 'failed')
+    const { shared, coin } = await locateFunding(indexer, script, Vp, txid)
+    repo.setFundingOutpoint(init.swapId, `${shared.txid}:${shared.vout}`)
+
+    // Mirror the shared vtxo's exit material into the vault before boltz gets to
+    // act: it lives at a script address the wallet never lists, so ProofSync
+    // alone would leave it invisible — and the ASP dying mid-swap is exactly
+    // when the pre-signed chain is needed (ATOMIC_SUBDUST_PLAN.md §8).
+    // Best-effort: a degraded safety mirror must not fail the swap.
+    try {
+      await captureVtxo(deps.db, indexer, {
+        txid: shared.txid,
+        vout: shared.vout,
+        valueSat: shared.value,
+        source: 'atomic',
+        script: hex.encode(script.pkScript),
+        tapTree: hex.encode(script.encode()),
+        status: coin.virtualStatus?.state ?? 'unknown',
+        expiresAt: expirySec(coin),
+      })
+    } catch (err) {
+      console.warn(`atomic send ${init.swapId}: vault capture failed (swap unaffected):`, err)
+    }
+
+    // 4. compute the split + pre-sign the claim pair. boltz's output uses
+    // boltz's own wallet-script delay (boltzScriptDelay) — building it with d
+    // would make boltz's sendFund reconstruction reject our presigs.
+    const funderAddr = ArkAddress.decode(await deps.wallet.getAddress())
+    const boltzD = init.boltzScriptDelay !== undefined ? BigInt(init.boltzScriptDelay) : d
+    const boltzAddr = new DefaultVtxo.Script({
+      pubKey: boltzXOnly,
+      serverPubKey: serverXOnly,
+      csvTimelock: { type: timelockType(boltzD), value: boltzD },
+    }).address(hrp(info.network), serverXOnly)
+    const split = computeClaimSplit({
+      funderAddress: funderAddr,
+      claimerAddress: boltzAddr,
+      fundingValue: Vp,
+      amount: a,
+      dust,
+      // boltz's advertised fee — folded into its claim output (a + fee, one
+      // note). Must mirror its sendFund reconstruction exactly.
+      feeSats: fee,
+    })
+    const presig = await presignClaim(shared, split.outputs, unroll, deps.wallet.identity)
+    repo.setPresigs(init.swapId, presig)
+    repo.transition(init.swapId, 'funded')
+
+    // 5. hand boltz the presigs → it verifies, pays, claims. Handing them over =
+    // boltz's LN pay is now in flight (the state machine requires this hop:
+    // claimed/refund_wait are only reachable from ln_inflight, not funded).
+    repo.transition(init.swapId, 'ln_inflight')
+    const fund = await boltzFetch<{ status: string; preimage?: string; error?: string }>(
+      `${deps.boltzApiUrl}/v2/subdust/atomic/send/fund`,
+      { swapId: init.swapId, fundingOutpoint: `${shared.txid}:${shared.vout}`, presigs: presig },
+    )
+    if (fund.status !== 'claimed' || fund.preimage === undefined) {
+      repo.transition(init.swapId, fund.status === 'failed' ? 'refund_wait' : 'failed')
+      deps.notify?.(
+        'send-fail',
+        () =>
+          `send: sub-dust LN pay failed (${fund.error || fund.status}) — funding refundable after T [hash ${paymentHash.slice(0, 8)}]`,
+      )
+      throw new Error(`atomic send did not complete (${fund.status}): ${fund.error ?? ''} — funds refundable after T`)
+    }
+    // Verify-before-bookkeep (F4): confirm boltz actually spent our funding before
+    // terminal-claiming + releasing the vault row. The LN payment already
+    // succeeded (we hold the preimage), so we still report success either way —
+    // but if the claim hasn't landed on-chain we keep the swap recoverable in
+    // ln_inflight so the refund executor reclaims V after T (boltz can't have it
+    // both ways: it took V, or we get it back).
+    if (await confirmClaimSpent(indexer, shared.txid, shared.vout)) {
+      repo.transition(init.swapId, 'claimed')
+      // Terminal success: the shared vtxo is spent by the claim split (our change
+      // arrives at the wallet address, where ProofSync covers it) — release the
+      // lifecycle-owned vault row.
+      releaseVaultRow(deps.db, shared.txid, shared.vout)
+    } else {
+      repo.setPreimage(init.swapId, fund.preimage)
+      console.warn(
+        `atomic send ${init.swapId}: boltz reported claimed but the shared vtxo isn't spent per the indexer — keeping recoverable (F4); refund executor reclaims V after T`,
+      )
+    }
+    // After the F4 if/else on purpose: the LN payment succeeded either way
+    // (we hold the preimage) — only the claim bookkeeping differs.
     deps.notify?.(
-      'send-fail',
-      () =>
-        `send: sub-dust LN pay failed (${fund.error || fund.status}) — funding refundable after T [hash ${paymentHash.slice(0, 8)}]`,
+      'send-subdust',
+      () => `send: LN paid — ${a} sats (+${fee} fee, sub-dust) [hash ${paymentHash.slice(0, 8)}]`,
     )
-    throw new Error(`atomic send did not complete (${fund.status}): ${fund.error ?? ''} — funds refundable after T`)
+    return { amount: a + fee, preimage: fund.preimage, txid }
+  } finally {
+    inflightSends.delete(init.swapId)
   }
-  // Verify-before-bookkeep (F4): confirm boltz actually spent our funding before
-  // terminal-claiming + releasing the vault row. The LN payment already
-  // succeeded (we hold the preimage), so we still report success either way —
-  // but if the claim hasn't landed on-chain we keep the swap recoverable in
-  // ln_inflight so the refund executor reclaims V after T (boltz can't have it
-  // both ways: it took V, or we get it back).
-  if (await confirmClaimSpent(indexer, shared.txid, shared.vout)) {
-    repo.transition(init.swapId, 'claimed')
-    // Terminal success: the shared vtxo is spent by the claim split (our change
-    // arrives at the wallet address, where ProofSync covers it) — release the
-    // lifecycle-owned vault row.
-    releaseVaultRow(deps.db, shared.txid, shared.vout)
-  } else {
-    repo.setPreimage(init.swapId, fund.preimage)
-    console.warn(
-      `atomic send ${init.swapId}: boltz reported claimed but the shared vtxo isn't spent per the indexer — keeping recoverable (F4); refund executor reclaims V after T`,
-    )
-  }
-  // After the F4 if/else on purpose: the LN payment succeeded either way
-  // (we hold the preimage) — only the claim bookkeeping differs.
-  deps.notify?.(
-    'send-subdust',
-    () => `send: LN paid — ${a} sats (+${fee} fee, sub-dust) [hash ${paymentHash.slice(0, 8)}]`,
-  )
-  return { amount: a + fee, preimage: fund.preimage, txid }
 }
 
 export interface AtomicRefundResult {
@@ -631,6 +652,7 @@ export async function resumeAtomicSends(
   // is already on-chain but unrecorded to 'funded', so the loop below refunds it
   // after T instead of polling boltz forever with V stranded in the shared vtxo.
   for (const swap of repo.listResumable()) {
+    if (inflightSends.has(swap.id)) continue // a live send owns this row (F19)
     if (swap.direction === SwapDirection.Send && !swap.fundingOutpoint && swap.state === 'init') {
       try {
         await recoverFundingOutpoint(deps, repo, swap)
@@ -642,6 +664,13 @@ export async function resumeAtomicSends(
 
   for (const swap of repo.listResumable()) {
     if (swap.direction !== SwapDirection.Send) continue
+    if (inflightSends.has(swap.id)) {
+      // The live send is somewhere between fundShared and its own terminal
+      // bookkeeping — any transition landed here would collide with the one
+      // it performs next (F19: illegal funded→funded / claimed→claimed).
+      result.waiting++
+      continue
+    }
     const action = classifyResume({
       direction: swap.direction,
       state: swap.state,
