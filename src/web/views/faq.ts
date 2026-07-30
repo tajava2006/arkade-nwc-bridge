@@ -137,11 +137,17 @@ export function faqView(): RawHtml {
         path sets a ~330-sat minimum.
       </p>
       <p>
-        <strong>How this one does:</strong> the amount is never an output. The swap
-        funds one shared VTXO of normal size and pre-signs two split states of it —
-        the amount is the <em>delta</em> between them. Revealing the Lightning
-        preimage is the act that executes the pre-signed split, so a 1-sat payment
-        rides on a normal-sized commitment without ever being a dust output.
+        <strong>How this one does:</strong> the amount never has to stand alone as a
+        dust output that someone sweeps by itself. The swap funds one shared VTXO of
+        normal size — comfortably above dust — and the funder pre-signs the claim as a
+        split of it: <code>{ funder: V − a, claimer: a }</code>. Revealing the Lightning
+        preimage is what lets the claimer execute that pre-signed split. So the amount
+        <em>a</em> does end up as an output — but as an ordinary sub-dust recoverable
+        VTXO handed over by the funder's pre-signature, not as an independent HTLC output
+        that has to clear the dust floor to be swept. The only thing that must stay above
+        dust is the shared funding output (and the refund path), and it is — that's what
+        carries the real onchain exit. A 1-sat payment rides inside a normal-sized
+        commitment.
       </p>
       <p>
         <strong>Is it atomic?</strong> Yes, in the exact swap sense: the funder
