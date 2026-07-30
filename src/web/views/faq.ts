@@ -193,9 +193,8 @@ export function faqView(): RawHtml {
         swaps at the risk that a receiver ends up holding fragmented, largely
         non-exitable money. Arkade keeps the upside — clean, single-chunk,
         fully-exitable receives — and its one real downside, no sub-dust swaps, is
-        exactly the gap this wallet closes, <em>atomically</em>. So on this side you get
-        the Arkade design's strengths with its weakness already solved — the best of
-        both, if I do say so myself.
+        exactly the gap this wallet closes, <em>atomically</em>. So on this side you keep
+        the Arkade design's strengths, with that weakness solved by this app.
       </p>
 
       <h2>I used the same key in another wallet — do the exit proofs stay correct?</h2>
