@@ -304,6 +304,31 @@ export function gcOrphanProofs(db: Database): number {
   return removed
 }
 
+/**
+ * Betrayal-class quarantines (server dropped a row without evidence, exit
+ * window still open) that have been flagged at least `graceSec` — long enough
+ * that a transient post-settle indexer lag would already have self-healed
+ * (the next pass deletes the row on late evidence). `quarantined_at` is the
+ * age clock: persisted and COALESCE-first, so it survives restarts and repeated
+ * passes — no counter or "notified" column needed; the caller dedupes the DM
+ * with an in-memory latch. Expired-window flags are excluded here (same split
+ * vaultStats uses for quarantinedCount) — they own a separate immediate DM.
+ */
+export function listMaturedBetrayals(
+  db: Database,
+  graceSec: number,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): { outpoint: string; reason: string | null }[] {
+  return listVaultVtxos(db)
+    .filter(
+      (v) =>
+        v.quarantinedAt !== null &&
+        nowSec - v.quarantinedAt >= graceSec &&
+        !(v.expiresAt !== null && v.expiresAt <= nowSec),
+    )
+    .map((v) => ({ outpoint: `${v.txid}:${v.vout}`, reason: v.quarantineReason }))
+}
+
 export function vaultStats(db: Database, nowSec: number = Math.floor(Date.now() / 1000)): VaultStats {
   const all = listVaultVtxos(db)
   // Quarantined rows leave the readiness math (the server no longer claims

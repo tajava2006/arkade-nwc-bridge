@@ -1,8 +1,8 @@
 import type { Database } from 'bun:sqlite'
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { syncProofs, type ProofSyncIndexer, type ProofSyncResult } from './proof_sync'
-import { vaultStats, type VaultStats } from './vault'
-import { EXIT_SYNC_ALERT_THRESHOLD } from '../defaults'
+import { listMaturedBetrayals, vaultStats, type VaultStats } from './vault'
+import { EXIT_QUARANTINE_DM_GRACE_MS, EXIT_SYNC_ALERT_THRESHOLD } from '../defaults'
 import type { NotifyFn } from '../nostr/notifier'
 
 // Scheduling shell around syncProofs — #04 keeps the pass pure, this owns
@@ -49,6 +49,12 @@ export interface ProofSyncTiming {
    * unreachability — the bridge's de-facto ASP health probe.
    */
   alertThreshold: number
+  /**
+   * How long a betrayal quarantine must persist before its operator DM
+   * fires — the grace that lets a transient post-settle quarantine self-heal
+   * unannounced. See EXIT_QUARANTINE_DM_GRACE_MS.
+   */
+  quarantineDmGraceMs: number
 }
 
 const DEFAULT_TIMING: ProofSyncTiming = {
@@ -56,6 +62,7 @@ const DEFAULT_TIMING: ProofSyncTiming = {
   retryDelaysMs: [5_000, 15_000, 60_000],
   pollIntervalMs: 10 * 60 * 1_000,
   alertThreshold: EXIT_SYNC_ALERT_THRESHOLD,
+  quarantineDmGraceMs: EXIT_QUARANTINE_DM_GRACE_MS,
 }
 
 // DM-sized outpoint list: a mass-sweep pass can quarantine dozens at once.
@@ -75,9 +82,19 @@ export function startProofSync(deps: {
   log?: (msg: string) => void
   /** Operator DM sink (named apart from the local snapshot notify()). */
   alert?: NotifyFn
+  /** Unix-seconds clock for the betrayal-DM grace gate; injectable for tests. */
+  now?: () => number
 }): ProofSyncService {
   const timing = { ...DEFAULT_TIMING, ...deps.timing }
   const log = deps.log ?? (() => {})
+  const now = deps.now ?? (() => Math.floor(Date.now() / 1000))
+  const graceSec = Math.ceil(timing.quarantineDmGraceMs / 1000)
+  // In-memory latch for the betrayal DM: which matured quarantines we've
+  // already announced. Process-local on purpose — like aspAlerted, a restart
+  // re-arms it, which only re-DMs genuine, still-unresolved betrayals (the
+  // transient ones self-heal well before grace and never reach this set). The
+  // persisted signal lives in quarantined_at; this just dedupes the alert.
+  let notifiedBetrayals = new Set<string>()
   const listeners = new Set<(snap: ProofSyncSnapshot) => void>()
   // Edge latch: one DM when consecutive failures cross the threshold, one
   // when the next pass succeeds. Process-local on purpose — a restart
@@ -105,6 +122,30 @@ export function startProofSync(deps: {
     for (const cb of listeners) cb(snap)
   }
 
+  // Betrayal-DM gate. Runs after every pass (success or failure) because a
+  // quarantine matures purely by the clock, so the poll is what re-checks it.
+  // Fires one batched DM for the newly-matured, then re-syncs the latch to the
+  // currently-matured set: self-healed/released rows drop out (re-arming the
+  // latch if they ever re-quarantine), persistent ones stay (no re-DM). Own
+  // try/catch — it must never break the run() finally / teardown.
+  const checkMaturedBetrayals = (): void => {
+    try {
+      const matured = listMaturedBetrayals(deps.db, graceSec, now())
+      const fresh = matured.filter((m) => !notifiedBetrayals.has(m.outpoint))
+      if (fresh.length > 0) {
+        log(`exit-sync: ⚠ ${fresh.length} betrayal quarantine(s) survived grace — alerting: ${fresh.map((m) => m.outpoint).join(', ')}`)
+        deps.alert?.(
+          'health-vault',
+          () =>
+            `health: ${fresh.length} vtxo(s) QUARANTINED (dropped by ASP without evidence): ${listSome(fresh.map((m) => m.outpoint))}`,
+        )
+      }
+      notifiedBetrayals = new Set(matured.map((m) => m.outpoint))
+    } catch (err) {
+      log(`exit-sync: matured-betrayal check failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   const run = async (reason: string): Promise<void> => {
     if (stopped) return
     if (running) {
@@ -125,16 +166,12 @@ export function startProofSync(deps: {
         )
       }
       if (result.gc.quarantined.length > 0) {
+        // Log immediately for an operator tailing stdout, but do NOT DM here.
+        // A post-settle indexer lag quarantines transiently and the next pass
+        // self-heals it (removeVtxo on late evidence), so an immediate DM cries
+        // wolf. The DM is gated on grace-survival — checkMaturedBetrayals below.
         log(
-          `exit-sync: ⚠ ${result.gc.quarantined.length} vtxo(s) QUARANTINED — dropped by the ASP without evidence: ${result.gc.quarantined.join(', ')}`,
-        )
-        // Batched per pass, and quarantineVtxo flags each row only once —
-        // the list here contains just the newly-flagged, so no re-DM on
-        // later passes.
-        deps.alert?.(
-          'health-vault',
-          () =>
-            `health: ${result.gc.quarantined.length} vtxo(s) QUARANTINED (dropped by ASP without evidence): ${listSome(result.gc.quarantined)}`,
+          `exit-sync: ⚠ ${result.gc.quarantined.length} vtxo(s) newly QUARANTINED (unproven drop, DM deferred past ${graceSec}s grace): ${result.gc.quarantined.join(', ')}`,
         )
       }
       if (result.gc.expired.length > 0) {
@@ -204,6 +241,7 @@ export function startProofSync(deps: {
       retryTimer = setTimeout(() => void run('retry'), delay)
     } finally {
       running = false
+      if (!stopped) checkMaturedBetrayals()
       notify()
       if (pendingReason !== null && !stopped) {
         const next = pendingReason

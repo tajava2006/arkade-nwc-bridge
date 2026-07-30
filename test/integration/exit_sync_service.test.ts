@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { base64, hex } from '@scure/base'
 import { ChainTxType, Transaction, type ChainTx, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { openTempDb, type TempDb } from '../helpers/db'
-import { isVtxoExitReady } from '../../src/exit/vault'
+import { getVaultVtxo, isVtxoExitReady } from '../../src/exit/vault'
 import type { ProofSyncIndexer } from '../../src/exit/proof_sync'
 import { startProofSync, type ProofSyncService } from '../../src/exit/sync_service'
 
@@ -190,5 +190,130 @@ describe('proof sync service (scheduler)', () => {
     await sleep(80)
     expect(calls.length).toBe(2)
     expect(calls[1]!.text).toContain('recovered')
+  })
+})
+
+describe('betrayal-quarantine DM (grace gate)', () => {
+  let temp: TempDb
+  let svc: ProofSyncService | undefined
+  beforeEach(() => {
+    temp = openTempDb()
+  })
+  afterEach(() => {
+    svc?.stop()
+    temp.cleanup()
+  })
+
+  // batchExpiry far in the future so the disappearance is judged 'unproven'
+  // (betrayal), never the local-expiry shortcut.
+  const futureVtxo = {
+    txid: ark.txid,
+    vout: 0,
+    value: 1000,
+    script: '5120' + 'ab'.repeat(32),
+    tapTree: hex.decode('c0de'),
+    virtualStatus: { state: 'preconfirmed', batchExpiry: 4_000_000_000_000 },
+  } as unknown as ExtendedVirtualCoin
+
+  // An indexer that serves the proof/chain but, when asked to EXPLAIN a
+  // disappearance (getVtxos), never acknowledges the outpoint → 'unproven'.
+  function betrayalIndexer(live: () => ExtendedVirtualCoin[]) {
+    const txs = new Map([[ark.txid, ark.psbtB64]])
+    const indexer: ProofSyncIndexer = {
+      async getVtxos() {
+        return { vtxos: [] }
+      },
+      async getVtxoChain() {
+        return { chain, page: { current: 0, next: 0, total: 1 } }
+      },
+      async getVirtualTxs(txids) {
+        const found = txids.map((id) => txs.get(id)).filter((x): x is string => !!x)
+        return { txs: found, page: { current: 0, next: 0, total: 1 } }
+      },
+    }
+    return { indexer, listVtxos: async () => live() }
+  }
+  const quarantineDms = <T extends { text: string }>(calls: T[]) =>
+    calls.filter((c) => c.text.includes('QUARANTINED'))
+
+  test('an unexplained drop quarantines immediately but the DM waits for grace, fires once, then dedupes', async () => {
+    let live: ExtendedVirtualCoin[] = [futureVtxo]
+    const { indexer, listVtxos } = betrayalIndexer(() => live)
+    const calls: Array<{ kind: string; text: string }> = []
+    let fakeNow = Math.floor(Date.now() / 1000)
+    svc = startProofSync({
+      db: temp.db,
+      indexer,
+      listVtxos,
+      xOnlyPubkey: new Uint8Array(32).fill(1),
+      timing: { ...TIMING, quarantineDmGraceMs: 60_000 }, // 60s grace
+      now: () => fakeNow,
+      alert: ((kind: string, build: () => string) => calls.push({ kind, text: build() })) as never,
+    })
+
+    // pass 1: vtxo is live → mirrored, nothing flagged
+    svc.trigger('boot')
+    await sleep(20)
+    expect(getVaultVtxo(temp.db, ark.txid, 0)!.quarantinedAt).toBeNull()
+
+    // pass 2: vtxo gone + indexer won't explain → quarantined NOW (safety net),
+    // but age 0 < grace → no DM yet
+    live = []
+    svc.trigger('gone')
+    await sleep(20)
+    expect(getVaultVtxo(temp.db, ark.txid, 0)!.quarantinedAt).not.toBeNull()
+    expect(quarantineDms(calls).length).toBe(0)
+
+    // clock crosses grace → the flag has "survived" → exactly one DM
+    fakeNow += 120
+    svc.trigger('poll')
+    await sleep(20)
+    const dms = quarantineDms(calls)
+    expect(dms.length).toBe(1)
+    expect(dms[0]!.kind).toBe('health-vault')
+    expect(dms[0]!.text).toContain(`${ark.txid}:0`)
+
+    // subsequent passes: the in-memory latch holds → no re-DM
+    fakeNow += 60
+    svc.trigger('poll2')
+    await sleep(20)
+    expect(quarantineDms(calls).length).toBe(1)
+  })
+
+  test('a transient quarantine that self-heals (re-listed) before grace never DMs', async () => {
+    let live: ExtendedVirtualCoin[] = [futureVtxo]
+    const { indexer, listVtxos } = betrayalIndexer(() => live)
+    const calls: Array<{ text: string }> = []
+    let fakeNow = Math.floor(Date.now() / 1000)
+    svc = startProofSync({
+      db: temp.db,
+      indexer,
+      listVtxos,
+      xOnlyPubkey: new Uint8Array(32).fill(1),
+      timing: { ...TIMING, quarantineDmGraceMs: 60_000 },
+      now: () => fakeNow,
+      alert: ((_kind: string, build: () => string) => calls.push({ text: build() })) as never,
+    })
+
+    svc.trigger('boot')
+    await sleep(20) // mirrored
+
+    live = []
+    svc.trigger('gone')
+    await sleep(20) // quarantined, age 0 < grace → no DM
+    expect(getVaultVtxo(temp.db, ark.txid, 0)!.quarantinedAt).not.toBeNull()
+    expect(quarantineDms(calls).length).toBe(0)
+
+    // the server re-lists it (glitch, not theft) before grace → quarantine clears
+    live = [futureVtxo]
+    svc.trigger('back')
+    await sleep(20)
+    expect(getVaultVtxo(temp.db, ark.txid, 0)!.quarantinedAt).toBeNull()
+
+    // clock jumps well past grace: nothing is still-quarantined → still no DM
+    fakeNow += 600
+    svc.trigger('poll')
+    await sleep(20)
+    expect(quarantineDms(calls).length).toBe(0)
   })
 })
