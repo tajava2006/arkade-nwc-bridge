@@ -57,8 +57,11 @@ export function faqView(): RawHtml {
 
       <h2>What is a refresh?</h2>
       <p>
-        A settlement round that resets a VTXO's expiry clock and — as above — makes
-        ownership unconditionally yours, committed onchain. The server pays the
+        An onchain settlement round that wipes a VTXO's history clean. It cuts the chain
+        of previous owners described above — the very thing that leaves received funds
+        theoretically double-spendable — and re-issues a brand-new VTXO bound to you and
+        you alone, committed onchain. At the same time it resets the expiry clock. The
+        server pays the
         round's onchain fee; it costs you nothing. You rarely trigger it by hand:
         while the bridge is running, the moment any VTXO comes within
         ${RENEW_WINDOW_LABEL} of expiry, <em>all</em> VTXOs are automatically folded
@@ -69,15 +72,20 @@ export function faqView(): RawHtml {
 
       <h2>If full ownership needs an onchain refresh, why use Ark at all?</h2>
       <p>
-        Because a refresh isn't one onchain transaction per person. A settlement round
-        is a <em>shared</em> transaction: many people refresh together in it, and its
-        onchain footprint stays essentially constant no matter how many join — the
-        per-user VTXO tree and connectors live offchain, and only one small commitment
-        lands on L1. Thousands of participants could settle in the same fixed-size
-        transaction. That is the whole scaling argument: the block space a
-        Lightning-only world burns opening and closing channels one pair at a time, Ark
-        spends once for an entire round — so the number of self-custodial users a single
-        block can serve is far higher.
+        Because a refresh isn't one onchain transaction per person. Lightning is the
+        clean contrast: once a channel is open it gives you nearly unlimited scale
+        <em>inside</em> it — but opening and closing that channel each burns block space
+        in proportion to the number of people, and that block space is spent
+        <em>exclusively</em> for that one participant. An Ark settlement round is a
+        <em>shared</em> transaction: many people refresh together in it, and its onchain
+        footprint stays essentially constant no matter how many join — the per-user VTXO
+        tree and connectors live offchain, and only one small commitment lands on L1.
+        Thousands could settle in the same fixed-size transaction. So in theory you can
+        confirm your ownership without ever once consuming block space for yourself
+        alone — you ride along in a round that was going to happen anyway. That is the
+        whole scaling argument: the block space a Lightning-only world spends one pair at
+        a time, Ark spends once for an entire round, so the number of self-custodial
+        users a single block can serve is far higher.
       </p>
 
       <h2>What are the fees?</h2>
@@ -104,18 +112,29 @@ export function faqView(): RawHtml {
         onchain output.
       </p>
 
+      <h2>What is "sub-dust"?</h2>
+      <p>
+        Amounts below 330 sats — the dust floor for this output type. They can't be
+        standalone onchain outputs, so on Ark they exist as <em>recoverable</em>
+        VTXOs: really yours, but not spendable on their own until a refresh, with
+        ASP-cooperative rather than unilateral enforcement. They fold back into your
+        spendable balance at the next refresh (automatic) or ride out with an
+        onchain withdrawal — never lost, just parked. The upside of supporting them
+        at all: 1-sat zaps work here, which is what the atomic-swap question below
+        exists to make honest.
+      </p>
+
       <h2>Arkade can't swap under 330 sats. This one can — is it really atomic?</h2>
       <p>
-        <strong>Why Arkade can't:</strong> Bitcoin has a dust floor of ~330 sats. A
-        sub-dust output <em>can</em> still exist on Ark — as a <em>recoverable</em>
-        VTXO — but it can't be spent or swept on its own until a refresh folds it in.
-        A plain sub-dust send is therefore fine: it drops that recoverable VTXO straight
-        onto the recipient's address, no middle step. A <em>swap</em> is where it
-        breaks. The standard construction routes the amount through an intermediate
-        HTLC script address that the counterparty has to sweep to complete the atomic
-        exchange — and while that HTLC output is sub-dust it can't be swept until a
-        refresh, so the atomic step never closes. That's why Arkade's own swap path
-        sets a ~330-sat minimum.
+        <strong>Why Arkade can't:</strong> A sub-dust output <em>can</em> still exist on
+        Ark — that's the recoverable VTXO from the question above — you just can't use it
+        until a refresh folds it in. A plain sub-dust send is therefore fine: it drops
+        that recoverable VTXO straight onto the recipient's address, done. A <em>swap</em>
+        is where it breaks. The standard construction routes the amount through an
+        intermediate HTLC script address that the counterparty has to claim to complete
+        the atomic exchange — but while that HTLC output is sub-dust, nobody can use it
+        until a refresh, so the atomic step never closes. That's why Arkade's own swap
+        path sets a ~330-sat minimum.
       </p>
       <p>
         <strong>How this one does:</strong> the amount is never an output. The swap
@@ -129,12 +148,16 @@ export function faqView(): RawHtml {
         cannot lose the funding without the preimage being revealed (full refund
         after the timeout, unilateral exit underneath), and the claimer can only get
         paid by revealing the preimage — the same act that settles the Lightning
-        side. Verified live on mainnet in both directions. One honest caveat: the
-        sub-dust piece the winner ends up with is a standard Ark
-        <em>recoverable</em> VTXO — its onchain claim is below dust, so turning it
-        into spendable money relies on ASP cooperation (the next refresh folds it
-        in). That limitation is bounded by the amount itself (&lt; 330 sats) and is
-        inherent to sub-dust on any Ark, not to this swap.
+        side. Verified live on mainnet in both directions. One honest caveat, on the
+        success path specifically: when the Lightning side settles and the claimer takes
+        their share, that share is a sub-dust <em>recoverable</em> VTXO — so, like any
+        sub-dust, it can't be used until the next refresh folds it in. Put plainly: the
+        VTXO piece is exchanged <em>atomically</em>, but the piece you walk away holding
+        has no unilateral-exit right of its own. (That's the success path only. If
+        Lightning fails and the swap refunds, the funder gets their original
+        dust-or-larger VTXO back intact — no sub-dust in the picture.) The limitation is
+        bounded by the amount itself (&lt; 330 sats) and is inherent to sub-dust on any
+        Ark, not to this swap.
       </p>
 
       <h2>But some Ark wallets do sub-dust swaps already — how?</h2>
@@ -168,9 +191,11 @@ export function faqView(): RawHtml {
       <p>
         So each design pays for its own strength. Bark buys relatively free sub-dust
         swaps at the risk that a receiver ends up holding fragmented, largely
-        non-exitable money. Arkade avoids that risk entirely but historically couldn't
-        do sub-dust swaps at all — and closing exactly that gap, <em>atomically</em>, is
-        what this wallet is.
+        non-exitable money. Arkade keeps the upside — clean, single-chunk,
+        fully-exitable receives — and its one real downside, no sub-dust swaps, is
+        exactly the gap this wallet closes, <em>atomically</em>. So on this side you get
+        the Arkade design's strengths with its weakness already solved — the best of
+        both, if I do say so myself.
       </p>
 
       <h2>I used the same key in another wallet — do the exit proofs stay correct?</h2>
@@ -225,18 +250,6 @@ export function faqView(): RawHtml {
         pre-signed chains, wait out the timelock, sweep to an address you control.
         The clock that matters is each VTXO's expiry — exit before it. That is why
         <em>Exit readiness</em> lives on the dashboard rather than buried in a menu.
-      </p>
-
-      <h2>What is "sub-dust"?</h2>
-      <p>
-        Amounts below 330 sats — the dust floor for this output type. They can't be
-        standalone onchain outputs, so on Ark they exist as <em>recoverable</em>
-        VTXOs: really yours, but not spendable offchain on their own, with
-        ASP-cooperative rather than unilateral enforcement. They fold back into your
-        spendable balance at the next refresh (automatic) or ride out with an
-        onchain withdrawal — never lost, just parked. The upside of supporting them
-        at all: 1-sat zaps work here, which is what the atomic-swap question above
-        exists to make honest.
       </p>
 
       <h2>Do I need to keep the bridge running?</h2>
