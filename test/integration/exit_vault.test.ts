@@ -7,6 +7,7 @@ import {
   getProofPsbts,
   getVaultVtxo,
   isVtxoExitReady,
+  listMaturedBetrayals,
   listVaultVtxos,
   missingProofTxids,
   proofTxidsOf,
@@ -199,5 +200,44 @@ describe('exit vault', () => {
     expect(stats.proofBytes).toBeGreaterThan(0)
     expect(stats.soonestExpiresAt).toBe(1700000000)
     expect(stats.lastSyncedAt).not.toBeNull()
+  })
+})
+
+describe('listMaturedBetrayals (betrayal-DM grace gate)', () => {
+  let temp: TempDb
+  beforeEach(() => {
+    temp = openTempDb()
+  })
+  afterEach(() => {
+    temp.cleanup()
+  })
+
+  // 2096 — safely past any real/test clock so these rows read as betrayal
+  // (window open), not expired-window.
+  const FUTURE = 4_000_000_000
+
+  test('a betrayal quarantine matures only once its flag is >= grace old', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    quarantineVtxo(temp.db, 'a-ark', 0, 'indexer no longer acknowledges the outpoint')
+    const at = getVaultVtxo(temp.db, 'a-ark', 0)!.quarantinedAt!
+
+    expect(listMaturedBetrayals(temp.db, 100, at)).toEqual([]) // age 0
+    expect(listMaturedBetrayals(temp.db, 100, at + 99)).toEqual([]) // age 99 < 100
+    expect(listMaturedBetrayals(temp.db, 100, at + 100)).toEqual([
+      { outpoint: 'a-ark:0', reason: 'indexer no longer acknowledges the outpoint' },
+    ])
+  })
+
+  test('an expired-window flag is excluded (it owns a separate immediate DM)', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('b-ark', chainB), expiresAt: 1_700_000_000 }, proofsFor(chainB))
+    quarantineVtxo(temp.db, 'b-ark', 0, 'batch expired before a refresh and the server dropped it')
+    const at = getVaultVtxo(temp.db, 'b-ark', 0)!.quarantinedAt!
+    // well past grace, but expiresAt (1.7e9) <= now → not a betrayal alarm
+    expect(listMaturedBetrayals(temp.db, 100, Math.max(at + 1000, 1_800_000_000))).toEqual([])
+  })
+
+  test('a non-quarantined row is never matured, even at grace 0', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('c-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    expect(listMaturedBetrayals(temp.db, 0, FUTURE - 1)).toEqual([])
   })
 })
