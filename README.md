@@ -9,8 +9,15 @@ The Lightning side is handled via [Boltz](https://docs.boltz.exchange)
 submarine/reverse swaps against an [Ark Protocol](https://arkadeos.com)
 wallet.
 
+> [!WARNING]
+> **Proof-of-concept — not audited.** This wallet exists to demonstrate
+> unilateral exit. It has **not** had a security audit, and the Ark
+> protocol it is built on is itself **not battle-tested**. Do **not** put
+> a meaningful amount of money in here — use it only for small, everyday
+> spending amounts.
+
 > **Status:** Personal mainnet alpha. Operates against alpha SDKs and
-> live Boltz/Arkade infrastructure. Use small amounts.
+> live Boltz/Arkade infrastructure.
 
 ## Who this is for
 

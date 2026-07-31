@@ -13,8 +13,12 @@ export function faqView(): RawHtml {
     title: 'FAQ',
     current: 'faq',
     body: html`
-      <h2>Is this wallet 100% self-custodial?</h2>
-      <p>On a Bitcoin L2 that claim splits into two separate questions.</p>
+      <h2>Is this wallet self-custodial?</h2>
+      <p>
+        <strong>Strictly speaking, no.</strong> For the full picture, see the two
+        paragraphs below. On a Bitcoin L2 the claim splits into two separate questions,
+        and each has a sharp edge worth knowing.
+      </p>
       <p>
         <strong>Can I always escape to onchain L1 without anyone's help?</strong> Yes.
         Ark guarantees this at the protocol level — every VTXO carries a pre-signed

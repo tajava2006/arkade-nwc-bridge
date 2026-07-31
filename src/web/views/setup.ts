@@ -37,6 +37,14 @@ export function setupView(args?: {
         .setup-custom { margin: 0.4rem 0 0 1.5rem }
       </style>
 
+      <div style="border:2px solid #c00; background:#fff5f5; color:#900; padding:0.75rem 0.95rem; border-radius:6px; margin:0 0 1.1rem; line-height:1.5">
+        <strong>⚠️ Proof-of-concept wallet — not audited.</strong> This wallet exists to
+        demonstrate unilateral exit. It has <strong>not</strong> been security-audited,
+        and the Ark protocol it is built on is itself <strong>not battle-tested</strong>.
+        Putting a meaningful amount of money in here is <strong>not recommended</strong> —
+        treat it as a wallet for small, everyday spending amounts only.
+      </div>
+
       <p>This bridge needs the server it will talk to (an Ark + Boltz pair) and an Ark identity (nsec). Both are set once, here. The <strong>server choice is then locked to this wallet</strong> — changing it means draining the funds and starting over from a fresh database (there is no multi-server wallet). The nsec is stored in this machine's SQLite file and never sent to the browser again after this flow.</p>
 
       ${args?.error ? html`<p style="color:#c00"><strong>${args.error}</strong></p>` : null}
