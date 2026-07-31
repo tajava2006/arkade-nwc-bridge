@@ -31,6 +31,7 @@ import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { startNotifier, type Notifier, type NotifyFn } from './nostr/notifier'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
+import type { SendData } from './send'
 import { SseHub } from './lib/sse'
 import { AsyncCache } from './lib/cache'
 import {
@@ -466,7 +467,7 @@ async function main(): Promise<void> {
         // parallel so the page renders from a snapshot instead of blocking on
         // sequential round-trips. The set churns, but we push the whole table
         // fragment over SSE (no diffing).
-        sendData: new AsyncCache({
+        sendData: new AsyncCache<SendData>({
           label: 'send-data',
           fetcher: async () => {
             const [arkInfo, vtxos, fees] = await Promise.all([

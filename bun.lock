@@ -5,14 +5,14 @@
     "": {
       "name": "arkade-nwc-bridge",
       "dependencies": {
-        "@arkade-os/boltz-swap": "^0.3.52",
-        "@arkade-os/sdk": "^0.4.47",
+        "@arkade-os/boltz-swap": "^0.3.58",
+        "@arkade-os/sdk": "^0.4.53",
         "@noble/curves": "2.0.1",
         "@scure/base": "^2.0.0",
         "@scure/btc-signer": "2.0.1",
         "eventsource": "^4.1.0",
         "light-bolt11-decoder": "^3.2.0",
-        "nostr-tools": "^2.23.12",
+        "nostr-tools": "^2.24.1",
         "qr": "^0.6.0",
       },
       "devDependencies": {
@@ -24,9 +24,9 @@
     },
   },
   "packages": {
-    "@arkade-os/boltz-swap": ["@arkade-os/boltz-swap@0.3.52", "", { "dependencies": { "@arkade-os/sdk": "0.4.47", "@noble/curves": "2.0.1", "@noble/hashes": "2.0.1", "@scure/base": "2.0.0", "@scure/btc-signer": "2.0.1", "bip68": "1.0.4", "light-bolt11-decoder": "3.2.0" }, "peerDependencies": { "expo-background-task": ">=0.1.0", "expo-task-manager": ">=3.0.0" }, "optionalPeers": ["expo-background-task", "expo-task-manager"] }, "sha512-cyakpJv7ksl0qD+c+XnZhbR+omy/XchW+vJthG/FB0ZnsRBPOoz4QVpKGCpBjSfoxrDAsx835Ps7+IUk/ILgCw=="],
+    "@arkade-os/boltz-swap": ["@arkade-os/boltz-swap@0.3.58", "", { "dependencies": { "@arkade-os/sdk": "0.4.53", "@noble/curves": "2.0.1", "@noble/hashes": "2.0.1", "@scure/base": "2.0.0", "@scure/btc-signer": "2.0.1", "bip68": "1.0.4", "light-bolt11-decoder": "3.2.0" }, "peerDependencies": { "expo-background-task": ">=0.1.0", "expo-task-manager": ">=3.0.0" }, "optionalPeers": ["expo-background-task", "expo-task-manager"] }, "sha512-8oQJhVz/g+tJhpnRueCOs3TM8SexNltQTFwRwTJZD50UEH8uHsHWCA3/96j6CTeQEmPIuiPu0fGXZnuECgo3hw=="],
 
-    "@arkade-os/sdk": ["@arkade-os/sdk@0.4.47", "", { "dependencies": { "@bitcoinerlab/descriptors-scure": "3.1.7", "@marcbachmann/cel-js": "8.0.0", "@noble/curves": "2.0.1", "@noble/secp256k1": "3.0.0", "@scure/base": "2.0.0", "@scure/bip39": "2.0.1", "@scure/btc-signer": "2.0.1", "bip68": "1.0.4", "ws-electrumx-client": "1.0.5" }, "peerDependencies": { "@react-native-async-storage/async-storage": ">=1.0.0", "expo": ">=54.0.0", "expo-background-task": "~1.0.10 || >=55.0.0", "expo-sqlite": "~16.0.10 || >=55.0.0", "expo-task-manager": "~14.0.9 || >=55.0.0" }, "optionalPeers": ["@react-native-async-storage/async-storage", "expo", "expo-background-task", "expo-sqlite", "expo-task-manager"] }, "sha512-uaDi1AYt9BQBnG5zCAXT+4FKfzXsJcywdwBljY++Vho2rSLl4qexZpk/FAmpYDtkfJ0XoNs7pRwr4lQp13XBWA=="],
+    "@arkade-os/sdk": ["@arkade-os/sdk@0.4.53", "", { "dependencies": { "@bitcoinerlab/descriptors-scure": "3.1.7", "@marcbachmann/cel-js": "8.0.0", "@noble/curves": "2.0.1", "@noble/secp256k1": "3.0.0", "@scure/base": "2.0.0", "@scure/bip39": "2.0.1", "@scure/btc-signer": "2.0.1", "bip68": "1.0.4", "ws-electrumx-client": "1.0.5" }, "peerDependencies": { "@react-native-async-storage/async-storage": ">=1.0.0", "expo": ">=54.0.0", "expo-background-task": "~1.0.10 || >=55.0.0", "expo-sqlite": "~16.0.10 || >=55.0.0", "expo-task-manager": "~14.0.9 || >=55.0.0" }, "optionalPeers": ["@react-native-async-storage/async-storage", "expo", "expo-background-task", "expo-sqlite", "expo-task-manager"] }, "sha512-e+ddKze2JO79bo+pJE5zh89RGVFINNCxeruBiZl/rBulClZ4/2Ex3B0HHRKx26gj8fd2jX8ridxQfyVlrb9jpQ=="],
 
     "@bitcoinerlab/descriptors-core": ["@bitcoinerlab/descriptors-core@3.1.7", "", { "dependencies": { "@bitcoinerlab/miniscript": "^2.0.0", "lodash.memoize": "^4.1.2", "uint8array-tools": "^0.0.9", "varuint-bitcoin": "^2.0.0" }, "peerDependencies": { "@ledgerhq/ledger-bitcoin": "^0.3.1", "@noble/curves": "^2.0.1", "@noble/hashes": "^2.0.1", "@scure/base": "^2.0.0", "@scure/bip32": "^2.0.1", "@scure/btc-signer": "^2.0.1", "bip32": "^5.0.1", "bitcoinjs-lib": "^7.0.1", "ecpair": "^3.0.1" }, "optionalPeers": ["@ledgerhq/ledger-bitcoin", "@noble/curves", "@noble/hashes", "@scure/base", "@scure/bip32", "@scure/btc-signer", "bip32", "bitcoinjs-lib", "ecpair"] }, "sha512-7VccUDvKcHK7RF07Vo19Obax9jO3wlPWIXtvXy61GBqXptKv156O9Z4+sm2py1CuxPRpTXHlvH70G4KVVDoKlw=="],
 
@@ -72,7 +72,7 @@
 
     "micro-packed": ["micro-packed@0.8.0", "", { "dependencies": { "@scure/base": "2.0.0" } }, "sha512-AKb8znIvg9sooythbXzyFeChEY0SkW0C6iXECpy/ls0e5BtwXO45J9wD9SLzBztnS4XmF/5kwZknsq+jyynd/A=="],
 
-    "nostr-tools": ["nostr-tools@2.23.12", "", { "dependencies": { "@noble/ciphers": "2.1.1", "@noble/curves": "2.0.1", "@noble/hashes": "2.0.1", "@scure/base": "2.0.0", "@scure/bip32": "2.0.1", "@scure/bip39": "2.0.1", "nostr-wasm": "0.1.0" }, "peerDependencies": { "typescript": ">=5.0.0" }, "optionalPeers": ["typescript"] }, "sha512-dLE9r0b4pCmrOKLUPD0KhUj9IXeh6RwiYoonEWeBh2AaDmlczUjJqJC8pQfggXzKUZ7+uZvhcrKkfwuZk0/e1g=="],
+    "nostr-tools": ["nostr-tools@2.24.1", "", { "dependencies": { "@noble/ciphers": "2.1.1", "@noble/curves": "2.0.1", "@noble/hashes": "2.0.1", "@scure/base": "2.0.0", "@scure/bip32": "2.0.1", "@scure/bip39": "2.0.1", "nostr-wasm": "0.1.0" }, "peerDependencies": { "typescript": ">=5.0.0" }, "optionalPeers": ["typescript"] }, "sha512-KdrKjC74n/rr6J3eCSfZj8dcbZFvolHYe4S22SefNZ5YWbhHiB0KL/mmJjEZ0u6B9mZK0YcQtl+WQ46KzwapeQ=="],
 
     "nostr-wasm": ["nostr-wasm@0.1.0", "", {}, "sha512-78BTryCLcLYv96ONU8Ws3Q1JzjlAt+43pWQhIl86xZmWeegYCNLPml7yQ+gG3vR6V5h4XGj+TxO+SS5dsThQIA=="],
 
