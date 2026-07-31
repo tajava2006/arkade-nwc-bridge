@@ -96,13 +96,15 @@ import {
   renderOffboardsFragment,
 } from './views/send'
 import { qrSvg } from './qr'
-import { Ramps } from '@arkade-os/sdk'
+import { DustChangeError, Ramps } from '@arkade-os/sdk'
 import {
   classifyDestination,
   classifyVtxos,
   lightningPreview,
+  offboardDustChange,
   offboardFeeSat,
   offboardMaxSat,
+  type OffboardDustChange,
   type SendData,
 } from '../send'
 import {
@@ -220,6 +222,16 @@ export function startWebServer(deps: WebServerDeps): WebServer {
 
   const sendError = (label: string, detail: string): Response =>
     htmlResponse(sendResultView({ label, ok: false, detail }), { status: 400 })
+
+  // Shared by the review + confirm offboard guards: explain the sub-dust
+  // change window (a round cannot mint a change leaf below dust) and the two
+  // ways out. Amounts are recipient-net, matching what the form asks for.
+  const offboardDustDetail = (hit: OffboardDustChange, dust: bigint): string =>
+    `This amount would leave ${hit.changeSat.toLocaleString()} sats of change — below dust ` +
+    `(${dust.toLocaleString()} sats), and a settlement round cannot create a sub-dust change VTXO. ` +
+    (hit.maxKeepingChangeSat !== null
+      ? `Send ${hit.maxKeepingChangeSat.toLocaleString()} sats or less, or check Max to drain everything.`
+      : 'Check Max to drain everything.')
 
   // Parse a positive-integer sats amount from form input. null = invalid.
   const parseSats = (raw: string): number | null => {
@@ -1104,14 +1116,14 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // Onchain offboard. The entered amount is what the RECIPIENT gets;
           // the fee is added on top, so total out = amount + fee.
           const arkInfo = await ready.arkProvider.getInfo()
+          const buckets = classifyVtxos(
+            await ready.wallet.getVtxos({ withRecoverable: true }),
+            arkInfo.dust,
+          )
           let recipientSat: number
           let feeSat: number
           let totalOut: number
           if (isMax) {
-            const buckets = classifyVtxos(
-              await ready.wallet.getVtxos({ withRecoverable: true }),
-              arkInfo.dust,
-            )
             const max = offboardMaxSat(arkInfo, buckets)
             if (max === null) {
               return sendError('onchain', 'Total minus fee is below dust — cannot offboard.')
@@ -1124,6 +1136,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             if (recipient === null) {
               return sendError('onchain', 'amount must be a positive integer (sats)')
             }
+            const dustHit = offboardDustChange(arkInfo, buckets, recipient)
+            if (dustHit) return sendError('onchain', offboardDustDetail(dustHit, arkInfo.dust))
             recipientSat = recipient
             feeSat = offboardFeeSat(arkInfo, recipient)
             totalOut = recipient + feeSat
@@ -1237,14 +1251,14 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // destination receives exactly what was shown. Max omits the amount
           // for a true drain (a numeric "max" would leave a fee-sized change).
           const arkInfo = await ready.arkProvider.getInfo()
+          const buckets = classifyVtxos(
+            await ready.wallet.getVtxos({ withRecoverable: true }),
+            arkInfo.dust,
+          )
           let amountArg: bigint | undefined
           let recipientSat: number
           let feeSat: number
           if (isMax) {
-            const buckets = classifyVtxos(
-              await ready.wallet.getVtxos({ withRecoverable: true }),
-              arkInfo.dust,
-            )
             const max = offboardMaxSat(arkInfo, buckets)
             if (max === null) {
               return sendError('onchain', 'Total minus fee is below dust — cannot offboard.')
@@ -1257,6 +1271,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             if (recipient === null) {
               return sendError('onchain', 'amount must be a positive integer (sats)')
             }
+            const dustHit = offboardDustChange(arkInfo, buckets, recipient)
+            if (dustHit) return sendError('onchain', offboardDustDetail(dustHit, arkInfo.dust))
             feeSat = offboardFeeSat(arkInfo, recipient)
             recipientSat = recipient
             amountArg = BigInt(recipient + feeSat)
@@ -1293,11 +1309,18 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                   `offboard: ${recipientSat.toLocaleString()} sats -> ${destination.slice(0, 12)}…${destination.slice(-4)} settled (ark tx ${txid.slice(0, 12)}…)`,
               )
             } catch (err) {
-              markOffboardFailed(db, row.id, errMsg(err))
+              // The pre-submit guard normally catches the sub-dust change
+              // window; this maps the race leftovers (balance moved between
+              // confirm and round) to the same explanation.
+              const reason =
+                err instanceof DustChangeError
+                  ? `change ${err.change} sats is below dust (${err.dustAmount} sats) — send less or use Max`
+                  : errMsg(err)
+              markOffboardFailed(db, row.id, reason)
               notify?.(
                 'offboard',
                 () =>
-                  `offboard: ${recipientSat.toLocaleString()} sats -> ${destination.slice(0, 12)}…${destination.slice(-4)} FAILED: ${errMsg(err)}`,
+                  `offboard: ${recipientSat.toLocaleString()} sats -> ${destination.slice(0, 12)}…${destination.slice(-4)} FAILED: ${reason}`,
               )
             }
             broadcastOffboards()

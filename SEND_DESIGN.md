@@ -173,6 +173,17 @@ as offchain-unspendable on the bridge too.**
   onchain output. **DustChangeError can't fire** (it's only for *partial*
   offboard change < dust: `if (change > 0n && change < dustAmount)`). So do NOT
   disable MAX when sub-dust exists — full-drain offboard is the cleanup path.
+- **Partial offboard has a blocked top-dust window.** Round change is a freshly
+  minted vtxo-tree leaf and arkd rejects leaves < dust (`AMOUNT_TOO_LOW`), and
+  `Ramps.offboard` spends ALL vtxos (no coin selection) — so any recipient
+  amount whose gross lands in `(roundTotal − dust, roundTotal)` cannot settle,
+  regardless of vtxo composition. Anything below that window is fine (change
+  leaf ≥ dust back to our own ark address). `offboardDustChange` (send.ts)
+  pre-checks this at review AND confirm with a "send ≤ X or use Max" message;
+  the background catch maps a raced `DustChangeError` to the same explanation.
+  Burning the sub-dust remainder as extra intent fee would technically pass
+  (arkd only enforces `fees ≥ minFees`) but is rejected on policy: operator =
+  fee recipient, so it reads as skimming the user in a published product.
 - **Genuinely stuck case:** total spendable < onchain dust (~330) — no rail can
   form a valid output. CLAUDE.md 차별화 #2's "합계 < dust로 stuck". Only then
   block send + show a top-up hint.

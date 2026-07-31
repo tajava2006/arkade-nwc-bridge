@@ -3,6 +3,7 @@ import type { ArkInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   classifyDestination,
   classifyVtxos,
+  offboardDustChange,
   offboardFeeSat,
   offboardMaxSat,
 } from '../../src/send'
@@ -79,6 +80,57 @@ describe('offboard fee + max', () => {
   test('max is null when total minus fee is below dust (stuck)', () => {
     const b = classifyVtxos([vtxo({ value: 400 })], DUST) // total 400
     expect(offboardMaxSat(arkInfo({ onchainOutput: '100.0' }), b)).toBeNull() // 300 < 330
+  })
+})
+
+describe('offboardDustChange', () => {
+  // The 2026-08-01 shape: 10000 + 300×4 = 11200 total, flat 1000 output fee.
+  const info = arkInfo({ onchainOutput: '1000.0' })
+  const buckets = () =>
+    classifyVtxos(
+      [
+        vtxo({ value: 10000 }),
+        vtxo({ value: 300 }),
+        vtxo({ value: 300 }),
+        vtxo({ value: 300 }),
+        vtxo({ value: 300 }),
+      ],
+      DUST,
+    )
+
+  test('amount in the top-dust window is blocked with a suggestion', () => {
+    // gross 10100 + 1000 = 11100 → change 100 ∈ (0, 330)
+    const hit = offboardDustChange(info, buckets(), 10100)
+    expect(hit).not.toBeNull()
+    expect(hit!.changeSat).toBe(100)
+    // largest recipient keeping a ≥ dust change: 11200 − 330 − 1000
+    expect(hit!.maxKeepingChangeSat).toBe(9870)
+  })
+
+  test('change exactly at dust passes', () => {
+    expect(offboardDustChange(info, buckets(), 9870)).toBeNull() // change 330
+  })
+
+  test('exact drain (change 0) passes', () => {
+    expect(offboardDustChange(info, buckets(), 10200)).toBeNull() // gross 11200 = total
+  })
+
+  test('insufficient funds is not this guard (falls through to the SDK)', () => {
+    expect(offboardDustChange(info, buckets(), 10300)).toBeNull() // gross > total
+  })
+
+  test('zero-fee program (our policy) still detects the window', () => {
+    const hit = offboardDustChange(arkInfo(), classifyVtxos([vtxo({ value: 500 })], DUST), 400)
+    expect(hit).not.toBeNull()
+    expect(hit!.changeSat).toBe(100)
+    expect(hit!.maxKeepingChangeSat).toBe(170) // 500 − 330
+  })
+
+  test('no fitting amount → null suggestion (Max is the only way out)', () => {
+    const b = classifyVtxos([vtxo({ value: 400 })], DUST)
+    const hit = offboardDustChange(arkInfo({ onchainOutput: '100.0' }), b, 50)
+    expect(hit).not.toBeNull() // change 250 < 330
+    expect(hit!.maxKeepingChangeSat).toBeNull() // 400 − 330 − 100 < 0
   })
 })
 

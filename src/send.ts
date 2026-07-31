@@ -143,6 +143,45 @@ export function offboardMaxSat(arkInfo: ArkInfo, buckets: VtxoBuckets): number |
   return out
 }
 
+export interface OffboardDustChange {
+  /** The sub-dust change the requested amount would leave. */
+  changeSat: number
+  /** Largest recipient amount that still leaves ≥ dust change (null if none fits). */
+  maxKeepingChangeSat: number | null
+}
+
+/**
+ * Guard for fixed-amount offboards: round change is a freshly minted vtxo-tree
+ * leaf and arkd rejects leaves below dust, so any amount whose change lands in
+ * (0, dust) cannot settle. `Ramps.offboard` always spends every VTXO (no coin
+ * selection — the SDK throws DustChangeError only after submission), which
+ * makes the blocked window a pure function of the round total: gross ∈
+ * (total − dust, total). This pre-check explains that at review/confirm time
+ * instead of recording a failed row; the SDK error stays the authority for
+ * races and config drift (see the DustChangeError mapping in the confirm
+ * handler). Input fees are hard-zero by policy (see offboardMaxSat), so the
+ * round total needs no per-input deduction.
+ */
+export function offboardDustChange(
+  arkInfo: ArkInfo,
+  buckets: VtxoBuckets,
+  recipientSat: number,
+): OffboardDustChange | null {
+  const dust = Number(arkInfo.dust)
+  const changeSat = buckets.roundTotalSat - recipientSat - offboardFeeSat(arkInfo, recipientSat)
+  if (changeSat <= 0 || changeSat >= dust) return null
+  // Largest recipient keeping a ≥ dust change. The fee depends on the amount,
+  // so walk to a fixed point — flat programs converge immediately,
+  // proportional ones within the cap; the number is advisory either way.
+  let candidate = buckets.roundTotalSat - dust - offboardFeeSat(arkInfo, recipientSat)
+  for (let i = 0; i < 4 && candidate > 0; i++) {
+    const next = buckets.roundTotalSat - dust - offboardFeeSat(arkInfo, candidate)
+    if (next === candidate) break
+    candidate = next
+  }
+  return { changeSat, maxKeepingChangeSat: candidate > 0 ? candidate : null }
+}
+
 /**
  * Boltz submarine-swap fee for paying a `amountSats` invoice. Deterministic:
  * the LN routing cost is Boltz's (covered by its margin / our boltz.conf
