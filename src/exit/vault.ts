@@ -70,16 +70,27 @@ export interface VaultStats {
   readyCount: number
   /**
    * flagged rows whose exit window is still open — the server dropped them
-   * without evidence and exiting them IS the recourse; shown loudly
+   * without evidence and exiting them IS the recourse; shown loudly.
+   * Grace-survived only (see inGraceCount).
    */
   quarantinedCount: number
   /**
    * flagged rows whose batch expiry has passed — nothing left to exit
    * (regardless of why they were flagged: an unrefreshed lapse the server
    * dropped, or a betrayal quarantine that aged past its window). Kept for
-   * the user to review and forget, never silently deleted.
+   * the user to review and forget, never silently deleted. Grace-survived
+   * only (see inGraceCount).
    */
   expiredCount: number
+  /**
+   * flagged rows younger than the grace window — almost always the sync pass
+   * racing an in-flight settle (the SDK masks a settlement's inputs from
+   * getVtxos until it resolves) or post-settle indexer lag, both of which
+   * self-heal on re-listing within a pass or two. Counted apart so the red
+   * counters keep meaning "survived verification", not "a round is running".
+   * graceSec 0 (the default) matures every flag instantly.
+   */
+  inGraceCount: number
   proofTxCount: number
   /** total stored PSBT size (base64 chars ≈ bytes on disk) */
   proofBytes: number
@@ -329,7 +340,11 @@ export function listMaturedBetrayals(
     .map((v) => ({ outpoint: `${v.txid}:${v.vout}`, reason: v.quarantineReason }))
 }
 
-export function vaultStats(db: Database, nowSec: number = Math.floor(Date.now() / 1000)): VaultStats {
+export function vaultStats(
+  db: Database,
+  nowSec: number = Math.floor(Date.now() / 1000),
+  graceSec = 0,
+): VaultStats {
   const all = listVaultVtxos(db)
   // Quarantined rows leave the readiness math (the server no longer claims
   // them, so counting them as "ready" would inflate proven vs claimed) but
@@ -338,7 +353,14 @@ export function vaultStats(db: Database, nowSec: number = Math.floor(Date.now() 
   // NOW" vs "review and forget").
   const vtxos = all.filter((v) => v.quarantinedAt === null)
   const flagged = all.filter((v) => v.quarantinedAt !== null)
-  const expiredCount = flagged.filter((v) => v.expiresAt !== null && v.expiresAt <= nowSec).length
+  // Same maturity clock the betrayal DM uses (listMaturedBetrayals): a flag
+  // younger than grace stays out of both loud buckets. graceSec 0 skips the
+  // age check entirely — not just "matures instantly": callers passing a
+  // historical nowSec (degraded snapshots, tests) must never see a flag
+  // vanish because its wall-clock stamp post-dates their reference time.
+  const matured =
+    graceSec > 0 ? flagged.filter((v) => nowSec - v.quarantinedAt! >= graceSec) : flagged
+  const expiredCount = matured.filter((v) => v.expiresAt !== null && v.expiresAt <= nowSec).length
   const readyCount = vtxos.filter((v) => missingProofTxids(db, v.chain).length === 0).length
   const proofs = db
     .query<{ count: number; bytes: number | null }, []>(
@@ -357,8 +379,9 @@ export function vaultStats(db: Database, nowSec: number = Math.floor(Date.now() 
   return {
     vtxoCount: vtxos.length,
     readyCount,
-    quarantinedCount: flagged.length - expiredCount,
+    quarantinedCount: matured.length - expiredCount,
     expiredCount,
+    inGraceCount: flagged.length - matured.length,
     proofTxCount: proofs?.count ?? 0,
     proofBytes: proofs?.bytes ?? 0,
     lastSyncedAt,

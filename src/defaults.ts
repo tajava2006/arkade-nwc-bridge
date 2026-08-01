@@ -92,15 +92,20 @@ export const OUTBOX_INITIAL_TIMEOUT_MS = 10_000
 // to skip transient blips, short enough to matter.
 export const EXIT_SYNC_ALERT_THRESHOLD = 5
 
-// Defer the "quarantined without evidence" operator DM until a betrayal flag
-// has survived this long. A vtxo is quarantined the instant it disappears
-// unexplained (exit safety net — immediate), but right after a settlement the
-// indexer can lag on serving the fresh spend PSBT / settledBy, so that pass
-// quarantines transiently and the NEXT pass self-heals it (removeVtxo on late
-// evidence). 20 min = 2× the sync poll interval (DEFAULT_TIMING.pollIntervalMs
-// = 10 min), so a lag that clears within one poll is gone before the alarm.
-// Only the DM waits; the quarantine (and its exitability) is unaffected. If
-// the poll interval changes, revisit this. See sync_service.ts.
+// Defer the LOUD surfaces of a quarantine — the operator DM and the red
+// dashboard/exit badges — until the flag has survived this long. A vtxo is
+// quarantined the instant it disappears unexplained (exit safety net —
+// immediate), but the disappearance is often transient: right after a
+// settlement the indexer lags on serving the fresh spend PSBT / settledBy,
+// and DURING a settle attempt the SDK masks the round's inputs from
+// getVtxos entirely (observed mainnet 2026-08-01: a failing consolidate-all
+// made a healthy vtxo flap in and out of quarantine). The next pass
+// self-heals both (removeVtxo on late evidence / release on re-listing).
+// 20 min = 2× the sync poll interval (DEFAULT_TIMING.pollIntervalMs =
+// 10 min), so a lag that clears within one poll is gone before the alarm.
+// Only the loud surfaces wait — the quarantine itself (and its exitability)
+// is immediate, and in-grace flags still show muted ("verifying"). If the
+// poll interval changes, revisit this. See sync_service.ts / vault.ts.
 export const EXIT_QUARANTINE_DM_GRACE_MS = 20 * 60 * 1_000
 
 // CLINK Offers (noffer) — the static, Nostr-native receive code shown on

@@ -48,8 +48,18 @@ export function expiryCountdown(expiresAt: number | null, nowSec: number): RawHt
 // the verdict instead of replacing it. Once the window has closed the label
 // flips: nothing exitable remains, the ask is "review & forget", and calling
 // an unrefreshed lapse a QUARANTINE would dress user fault up as betrayal.
-function quarantinePill(v: VaultVtxo, nowSec: number): RawHtml {
+// A flag younger than the grace window (same clock as the betrayal DM) is
+// almost always a transient — the sync pass racing an in-flight settle —
+// so it renders as a fact under verification, not a verdict.
+function quarantinePill(v: VaultVtxo, nowSec: number, graceSec: number): RawHtml {
   if (v.quarantinedAt === null) return html``
+  if (nowSec - v.quarantinedAt < graceSec) {
+    return html`<span
+      class="pill pending"
+      title="${v.quarantineReason ?? 'dropped from the live set'}"
+      >dropped — verifying</span
+    > `
+  }
   const windowClosed = v.expiresAt !== null && v.expiresAt <= nowSec
   return html`<span
     class="pill failed"
@@ -87,7 +97,7 @@ function opPill(op: ExitOp | null): RawHtml {
   return html`<span class="pill ${cls}" data-exit-op-state>${op.state}</span>`
 }
 
-export function renderExitRows(rows: ExitRow[], nowSec: number): RawHtml {
+export function renderExitRows(rows: ExitRow[], nowSec: number, graceSec = 0): RawHtml {
   if (rows.length === 0) {
     return html`<tr><td colspan="6" class="muted">The vault has no mirrored vtxos.</td></tr>`
   }
@@ -98,7 +108,7 @@ export function renderExitRows(rows: ExitRow[], nowSec: number): RawHtml {
         <td class="num">${fmtSats(row.vtxo.valueSat)}</td>
         <td>${expiryCountdown(row.vtxo.expiresAt, nowSec)}</td>
         <td>${estimateCell(row.estimate)}</td>
-        <td>${quarantinePill(row.vtxo, nowSec)}${verdict(row)}</td>
+        <td>${quarantinePill(row.vtxo, nowSec, graceSec)}${verdict(row)}</td>
         <td>${opPill(row.op)}</td>
       </tr>
     `,
@@ -266,6 +276,8 @@ export function exitView(args: {
   degraded: boolean
   stats: VaultStats
   nowSec: number
+  /** badge/pill grace, seconds — flags younger than this render muted (0 = off) */
+  graceSec?: number
   fundingAddress: string
   fundingBalanceSat: number | null
   dest: ExitDest | null
@@ -296,6 +308,13 @@ export function exitView(args: {
             open each row below and use <em>Forget</em> once you've made peace with it.
           </p>`
         : html``}
+      ${stats.inGraceCount > 0
+        ? html`<p class="muted">
+            ${stats.inGraceCount} vtxo(s) recently dropped from the live set — being
+            re-verified. A transient drop (a settlement in flight, indexer lag) clears on
+            the next sync pass; it turns into a quarantine only if it persists.
+          </p>`
+        : html``}
       <p class="muted">
         ${stats.readyCount}/${stats.vtxoCount} vtxos exit-ready · proofs
         ${(stats.proofBytes / 1024).toFixed(0)} KB · fee rate ${args.feeRate} sat/vB ·
@@ -314,7 +333,7 @@ export function exitView(args: {
           <th>verdict</th>
           <th>op</th>
         </tr>
-        ${renderExitRows(rows, args.nowSec)}
+        ${renderExitRows(rows, args.nowSec, args.graceSec ?? 0)}
       </table>
       <p class="muted">
         Expiry is the hard deadline: once the ASP sweeps an expired batch the

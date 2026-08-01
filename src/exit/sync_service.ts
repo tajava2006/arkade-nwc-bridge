@@ -111,7 +111,9 @@ export function startProofSync(deps: {
   let retryTimer: ReturnType<typeof setTimeout> | undefined
 
   const snapshot = (): ProofSyncSnapshot => ({
-    stats: vaultStats(deps.db),
+    // Same grace the betrayal DM waits out: a fresh flag renders as the muted
+    // inGraceCount, and only a grace-survivor reaches the red counters.
+    stats: vaultStats(deps.db, now(), graceSec),
     claim,
     lastRun,
     running,

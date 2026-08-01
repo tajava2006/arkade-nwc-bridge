@@ -8,6 +8,7 @@ import { readServerOverrides } from '../config'
 import {
   ARK_SERVER_URL,
   BOLTZ_API_URL,
+  EXIT_QUARANTINE_DM_GRACE_MS,
   OFFICIAL_ARK_SERVER_URL,
   OFFICIAL_BOLTZ_API_URL,
   type Network,
@@ -468,13 +469,17 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               sendInfo = null
             }
           }
+          // Same grace the betrayal DM and the dashboard badge honor — a
+          // flag younger than this renders muted ("verifying"), not red.
+          const graceSec = Math.ceil(EXIT_QUARANTINE_DM_GRACE_MS / 1000)
           return htmlResponse(
             exitView({
               rows,
               feeRate,
               degraded: st.mode === 'degraded',
-              stats: vaultStats(db),
+              stats: vaultStats(db, nowSec, graceSec),
               nowSec,
+              graceSec,
               fundingAddress: funding.address,
               fundingBalanceSat: funding.balanceSat,
               dest,

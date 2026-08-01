@@ -91,11 +91,22 @@ export function renderExitReadinessFragment(snap: ProofSyncSnapshot | null): Raw
           <a href="/exit">review &amp; forget</a>.
         </div>`
       : html``
+  // Flags still inside the grace window stay muted: a drop this fresh is
+  // almost always the sync pass racing an in-flight settle (or post-settle
+  // indexer lag) and self-heals on re-listing. Red must keep meaning
+  // "survived verification", or it trains the operator to shrug at it.
+  const inGrace =
+    stats.inGraceCount > 0
+      ? html`<div class="muted">
+          ${stats.inGraceCount} vtxo(s) dropped from the live set — verifying (self-heals if
+          transient; alarms only if it persists)
+        </div>`
+      : html``
   return html`${headline}
     <div class="muted" style="font-size:0.55em; font-weight: normal;">
       proven / ASP-claimed · ${freshness} · proofs ${(stats.proofBytes / 1024).toFixed(0)} KB
     </div>
-    ${quarantine} ${expired} ${shortfall} ${gaps}`
+    ${quarantine} ${expired} ${inGrace} ${shortfall} ${gaps}`
 }
 
 /**

@@ -241,3 +241,60 @@ describe('listMaturedBetrayals (betrayal-DM grace gate)', () => {
     expect(listMaturedBetrayals(temp.db, 0, FUTURE - 1)).toEqual([])
   })
 })
+
+describe('vaultStats grace window (loud-badge gate)', () => {
+  let temp: TempDb
+  beforeEach(() => {
+    temp = openTempDb()
+  })
+  afterEach(() => {
+    temp.cleanup()
+  })
+
+  const FUTURE = 4_000_000_000
+
+  test('a fresh flag counts muted, then matures into quarantinedCount', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    quarantineVtxo(temp.db, 'a-ark', 0, 'outpoint still unspent per the indexer')
+    const at = getVaultVtxo(temp.db, 'a-ark', 0)!.quarantinedAt!
+
+    const inGrace = vaultStats(temp.db, at + 99, 100)
+    expect(inGrace.quarantinedCount).toBe(0)
+    expect(inGrace.expiredCount).toBe(0)
+    expect(inGrace.inGraceCount).toBe(1)
+    // muted or loud, a flagged row stays out of the readiness math
+    expect(inGrace.vtxoCount).toBe(0)
+
+    const matured = vaultStats(temp.db, at + 100, 100)
+    expect(matured.quarantinedCount).toBe(1)
+    expect(matured.inGraceCount).toBe(0)
+  })
+
+  test('an expired-window flag waits out the same grace', () => {
+    storeVtxoWithProofs(
+      temp.db,
+      { ...vtxo('b-ark', chainB), expiresAt: 1_700_000_000 },
+      proofsFor(chainB),
+    )
+    quarantineVtxo(temp.db, 'b-ark', 0, 'batch expired before a refresh')
+    const at = getVaultVtxo(temp.db, 'b-ark', 0)!.quarantinedAt!
+
+    // expiry long past, but the flag itself is fresh → muted, not loud
+    const inGrace = vaultStats(temp.db, at + 99, 100)
+    expect(inGrace.expiredCount).toBe(0)
+    expect(inGrace.inGraceCount).toBe(1)
+
+    const matured = vaultStats(temp.db, at + 100, 100)
+    expect(matured.expiredCount).toBe(1)
+    expect(matured.inGraceCount).toBe(0)
+  })
+
+  test('grace 0 (the default) matures every flag instantly', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    quarantineVtxo(temp.db, 'a-ark', 0, 'r')
+    const at = getVaultVtxo(temp.db, 'a-ark', 0)!.quarantinedAt!
+    const stats = vaultStats(temp.db, at)
+    expect(stats.quarantinedCount).toBe(1)
+    expect(stats.inGraceCount).toBe(0)
+  })
+})

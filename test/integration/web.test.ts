@@ -82,6 +82,7 @@ const STUB_PROOF_SYNC: ProofSyncService = {
       readyCount: 0,
       quarantinedCount: 0,
       expiredCount: 0,
+      inGraceCount: 0,
       proofTxCount: 0,
       proofBytes: 0,
       lastSyncedAt: null,
