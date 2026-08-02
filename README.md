@@ -21,10 +21,11 @@ wallet.
 
 ## Who this is for
 
-You want a self-custodial Lightning wallet attached to your nostr
-client, you'd rather not run a Lightning node + manage inbound
-liquidity, but you *can* keep a personal machine up 24/7. Main use
-case: zapping.
+You want a self-hosted Lightning wallet attached to your nostr
+client (self-custody with real but bounded caveats — see the FAQ),
+you'd rather not run a Lightning node + manage inbound liquidity,
+but you *can* keep a personal machine up 24/7. Main use case:
+zapping.
 
 ## How it works
 
