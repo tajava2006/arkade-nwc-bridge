@@ -321,6 +321,63 @@ function extractDmRelays(event: NostrEvent): string[] {
   return extractTagUrls(event, 'relay')
 }
 
+/**
+ * Only these WS schemes are ever accepted for a relay we connect to. Anything
+ * else (http/https/ftp/…) is a tell of a non-relay endpoint being smuggled in —
+ * the core of both the outbox-relay and noffer-relay SSRF vectors.
+ */
+function isRelayScheme(u: URL): boolean {
+  return u.protocol === 'wss:' || u.protocol === 'ws:'
+}
+
+/**
+ * Is this host an IP literal that should never be a relay target? Loopback
+ * (127/8, ::1), RFC1918 private (10/8, 172.16/12, 192.168/16), link-local
+ * (169.254/16), CGNAT (100.64/10), and reserved/multicast (0/8, 224+/8).
+ * Hostnames ("localhost", public domains) are allowed so local/dev relays keep
+ * working — the realistic SMTP here is an attacker pointing a noffer at an
+ * internal *IP*, which this blocks.
+ */
+function isBlockedIpLiteral(host: string): boolean {
+  if (host.includes(':')) return true // IPv6 literal (::1, fc00::/7, …)
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (!m) return false // not an IP literal — a hostname
+  const a = +m[1]!
+  const b = +m[2]!
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    a >= 224
+  )
+}
+
+/**
+ * A relay URL safe to connect out to (M6/M7 hardening): a ws(s) scheme and a
+ * host that isn't a loopback/private IP literal. Rejects malformed URLs outright
+ * so garbage can't sneak past as "unparseable → pass through".
+ */
+export function isSafeRelayUrl(url: string): boolean {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return false
+  }
+  if (!isRelayScheme(u)) return false
+  if (!u.hostname) return false
+  return !isBlockedIpLiteral(u.hostname)
+}
+
+// Cap on relays taken from a single signed 10002/10050 event. NIP-65 allows an
+// unlimited list; we don't need hundreds of open sockets, and a bloated/stale
+// event must not let a self-published (or relay-served) list exhaust the bridge.
+const MAX_RELAY_TAGS = 50
+
 function extractTagUrls(event: NostrEvent, tagName: string): string[] {
   const out: string[] = []
   const seen = new Set<string>()
@@ -328,9 +385,12 @@ function extractTagUrls(event: NostrEvent, tagName: string): string[] {
     if (tag[0] !== tagName) continue
     const url = tag[1]
     if (typeof url !== 'string' || url === '') continue
-    if (seen.has(url)) continue
-    seen.add(url)
-    out.push(url)
+    const norm = normalizeRelayUrl(url)
+    if (isSafeRelayUrl(norm) === false) continue
+    if (seen.has(norm)) continue
+    seen.add(norm)
+    out.push(norm)
+    if (out.length >= MAX_RELAY_TAGS) break
   }
   return out
 }

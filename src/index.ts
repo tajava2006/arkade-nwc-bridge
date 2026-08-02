@@ -16,7 +16,7 @@ import { loadAccount } from './account'
 import { resolveServerSet, getServerRow, setServerRow } from './server_config'
 import { EsploraProvider, OnchainWallet, RestArkProvider, SingleKey } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
-import { initBoltz } from './boltz'
+import { initBoltz, reconcilePendingIncoming } from './boltz'
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
@@ -346,10 +346,16 @@ async function main(): Promise<void> {
       // were down) + sub-dust acks, and NWC make_invoice sub-dust rows — those
       // have no settlement event at all (no swap object), so this poll is the
       // only thing that ever flips them (see ln_receive.ts).
-      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, notify }
+      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, wallet, notify }
       const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
       const runReconcilePasses = async (): Promise<void> => {
         const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
+        // M3 self-heal for dust+ reverse swaps: a boltz-reported success that
+        // wasn't confirmed on-Ark (or a swap that settled while we were down) is
+        // settled here on a later pass, once the vtxo visibly lands. This is also
+        // the (M1) crash-window reconcile for interrupted sub-dust sends.
+        const incoming = reconcilePendingIncoming(db, wallet, notify)
+          .catch((err) => console.error('boltz: pending reconcile failed:', err))
         const receives = reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
           .then((settledHashes) => {
             // Ack same-pass settles immediately — otherwise the CLINK receipt
@@ -378,7 +384,7 @@ async function main(): Promise<void> {
             }
           })
           .catch((err) => console.error('atomic send resume failed:', err))
-        await Promise.allSettled([acks, receives, sends])
+        await Promise.allSettled([acks, incoming, receives, sends])
       }
       // Single-flight with a trailing rerun: ws pokes can land mid-pass (or in
       // bursts — funded then settled seconds apart), and two concurrent

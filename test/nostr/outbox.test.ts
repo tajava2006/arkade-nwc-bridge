@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools/pure'
 
-import { startOutboxWatcher, normalizeRelayUrl } from '../../src/nostr/outbox'
+import { startOutboxWatcher, normalizeRelayUrl, isSafeRelayUrl } from '../../src/nostr/outbox'
 
 // Same minimal relay as persistent_sub.test: REQ → EOSE, broadcast()
 // pushes an EVENT to every open sub. Author/kind filtering is the
@@ -236,5 +236,36 @@ describe('startOutboxWatcher DM relay list (10050)', () => {
       pool.close([URL])
       relay.stop()
     }
+  })
+})
+
+describe('isSafeRelayUrl (M6/M7 hardening)', () => {
+  test('accepts public wss and local ws hostnames', () => {
+    expect(isSafeRelayUrl('wss://nos.lol')).toBe(true)
+    expect(isSafeRelayUrl('wss://relay.example.com/')).toBe(true)
+    // local/dev relays use a hostname ("localhost") — allowed, or the drill breaks
+    expect(isSafeRelayUrl('ws://localhost:10547')).toBe(true)
+  })
+
+  test('rejects non-ws schemes (http/https/ftp/mailto…)', () => {
+    expect(isSafeRelayUrl('http://127.0.0.1:7070')).toBe(false)
+    expect(isSafeRelayUrl('https://ark.example')).toBe(false)
+    expect(isSafeRelayUrl('ftp://x')).toBe(false)
+  })
+
+  test('rejects loopback / private / link-local / CGNAT / reserved IP literals', () => {
+    expect(isSafeRelayUrl('ws://127.0.0.1:9001')).toBe(false)
+    expect(isSafeRelayUrl('wss://10.0.0.5')).toBe(false)
+    expect(isSafeRelayUrl('wss://192.168.1.10')).toBe(false)
+    expect(isSafeRelayUrl('wss://172.16.5.5')).toBe(false)
+    expect(isSafeRelayUrl('wss://169.254.1.1')).toBe(false)
+    expect(isSafeRelayUrl('wss://100.64.0.1')).toBe(false)
+    expect(isSafeRelayUrl('ws://[::1]:1234')).toBe(false)
+  })
+
+  test('rejects malformed / host-less URLs', () => {
+    expect(isSafeRelayUrl('not a url')).toBe(false)
+    expect(isSafeRelayUrl('ws://')).toBe(false)
+    expect(isSafeRelayUrl('wss://')).toBe(false)
   })
 })

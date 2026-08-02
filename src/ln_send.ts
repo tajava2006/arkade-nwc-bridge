@@ -30,6 +30,13 @@ export interface LnSendDeps {
   arkServerUrl: string
   /** sqlite handle — the atomic sub-dust send persists swaps for refund recovery. */
   db: Database
+  /**
+   * Fired as soon as a swap has been *created* (submarine: right after the
+   * create call) so the caller can write the swap id to its ledger row before
+   * the (long) settlement wait — a crash mid-await otherwise leaves the row
+   * pending with no swap link, and restart reconcile can't match it (M1/R1).
+   */
+  onSwapCreated?: (swapId: string) => void
   /** Operator DM sink — passed through to the atomic send path. */
   notify?: NotifyFn
 }
@@ -40,6 +47,8 @@ export interface LnSendResult {
   preimage: string
   /** ark txid (submarine swap funding, or the sub-dust funding tx) */
   txid: string
+  /** boltz swap id — the ledger link that makes an interrupted send reconcilable */
+  swapId: string
 }
 
 /**
@@ -105,11 +114,12 @@ export async function sendLightning(deps: LnSendDeps, invoice: string): Promise<
   }
 
   if (invoiceSats > 0 && invoiceSats < DUST_SATS) {
-    return atomicSubdustSend(
+    const r = await atomicSubdustSend(
       { wallet: deps.wallet, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl, notify: deps.notify },
       invoice,
       invoiceSats,
     )
+    return { amount: r.amount, preimage: r.preimage, txid: r.txid, swapId: r.swapId }
   }
   return sendSubmarine(deps, invoice)
 }
@@ -127,6 +137,10 @@ export async function sendLightning(deps: LnSendDeps, invoice: string): Promise<
  */
 async function sendSubmarine(deps: LnSendDeps, invoice: string): Promise<LnSendResult> {
   const pending = await deps.swaps.createSubmarineSwap({ invoice })
+  // Persist the swap link the moment the swap exists (R1) — before the
+  // settlement wait. A crash here leaves swap_id on the row, so the SwapManager
+  // resume + syncSwapToDb can settle it; without this the row is orphaned.
+  deps.onSwapCreated?.(pending.id)
   const { address, expectedAmount } = pending.response
   if (!address) {
     throw new Error(`Swap ${pending.id}: missing address in submarine swap response`)
@@ -135,6 +149,6 @@ async function sendSubmarine(deps: LnSendDeps, invoice: string): Promise<LnSendR
   const amount = fundingAmount(expectedAmount, await spendableSats(deps.wallet))
   const txid = await deps.wallet.send({ address, amount })
   const { preimage } = await deps.swaps.waitForSwapSettlement(pending)
-  return { amount, preimage, txid }
+  return { amount, preimage, txid, swapId: pending.id }
 }
 

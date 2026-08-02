@@ -49,6 +49,29 @@ export async function handlePayInvoice(
   }
   const invoiceMsat = satsToMsats(decoded.amountSats)
 
+  // M2: an already-settled payment for this hash must not re-fund a second swap.
+  // LN itself refuses to double-settle a payment hash, but a retried request
+  // would otherwise mint a fresh swap — burning the swap fee and locking the
+  // funding for T. Replay the stored preimage instead.
+  const settled = deps.db
+    .query<{ preimage: string }, [string]>(
+      `SELECT preimage FROM transactions WHERE type = 'outgoing' AND payment_hash = ? AND state = 'settled' LIMIT 1`,
+    )
+    .get(decoded.paymentHash)
+  if (settled?.preimage) {
+    return { preimage: settled.preimage }
+  }
+  // A payment for this hash still in flight on this connection — refuse rather
+  // than run a concurrent second swap.
+  const inFlight = deps.db
+    .query<{ id: number }, [number, string]>(
+      `SELECT id FROM transactions WHERE connection_id = ? AND type = 'outgoing' AND payment_hash = ? AND state = 'pending' LIMIT 1`,
+    )
+    .get(deps.conn.id, decoded.paymentHash)
+  if (inFlight) {
+    throw new NwcError('OTHER', 'an identical invoice is already being paid on this connection')
+  }
+
   if (deps.conn.budgetMsat !== null) {
     // Recomputed here (not the dispatch-time Connection snapshot) and
     // pending-inclusive, with no await between this check and the INSERT
@@ -86,7 +109,28 @@ export async function handlePayInvoice(
   // bounded by Boltz's LN payment timeout, not by our code.
   let result
   try {
-    result = await sendLightning(deps, invoice)
+    result = await sendLightning(
+      {
+        swaps: deps.swaps,
+        wallet: deps.wallet,
+        boltzApiUrl: deps.boltzApiUrl,
+        arkServerUrl: deps.arkServerUrl,
+        db: deps.db,
+        notify: deps.notify,
+        // R1: link the ledger row to the swap the instant it's created, so a
+        // crash during the long settlement wait still recovers on restart
+        // (SwapManager resume → syncSwapToDb) instead of leaving a permanent
+        // pending row that eats budget and blocks this invoice's retry.
+        onSwapCreated: (swapId) => {
+          deps.db
+            .query(
+              `UPDATE transactions SET swap_id = ? WHERE request_event_id = ? AND state = 'pending'`,
+            )
+            .run(swapId, deps.eventId)
+        },
+      },
+      invoice,
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     deps.db
@@ -119,10 +163,10 @@ export async function handlePayInvoice(
   deps.db.transaction(() => {
     deps.db
       .query(
-        `UPDATE transactions SET state = 'settled', preimage = ?, fees_paid_msat = ?, settled_at = ?
+        `UPDATE transactions SET state = 'settled', preimage = ?, fees_paid_msat = ?, settled_at = ?, swap_id = ?
          WHERE request_event_id = ?`,
       )
-      .run(result.preimage, feesPaidMsat, settledAt, deps.eventId)
+      .run(result.preimage, feesPaidMsat, settledAt, result.swapId, deps.eventId)
     deps.db
       .query(`UPDATE connections SET spent_msat = spent_msat + ? WHERE id = ?`)
       .run(paidMsat, deps.conn.id)

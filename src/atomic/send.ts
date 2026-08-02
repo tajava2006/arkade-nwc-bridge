@@ -64,6 +64,8 @@ export interface AtomicSendResult {
   preimage: string
   /** funding arkTxid */
   txid: string
+  /** boltz swap id — lets the NWC ledger row link to the atomic swap for resize-safe reconcile */
+  swapId: string
 }
 
 interface InitResponse {
@@ -320,7 +322,7 @@ export async function atomicSubdustSend(
       'send-subdust',
       () => `send: LN paid — ${a} sats (+${fee} fee, sub-dust) [hash ${paymentHash.slice(0, 8)}]`,
     )
-    return { amount: a + fee, preimage: fund.preimage, txid }
+    return { amount: a + fee, preimage: fund.preimage, txid, swapId: init.swapId }
   } finally {
     inflightSends.delete(init.swapId)
   }

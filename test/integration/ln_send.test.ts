@@ -46,7 +46,7 @@ describe('sendLightning — submarine rail (≥ dust / amountless)', () => {
     })
     const res = await sendLightning({ swaps, wallet, boltzApiUrl: '', ...noAtomic }, INVOICE_2000_SAT)
     expect(sends[0]).toEqual({ address: 'tark1boltzlockup', amount: 2006 })
-    expect(res).toEqual({ amount: 2006, preimage: 'cd'.repeat(32), txid: 'arktxid-lockup' })
+    expect(res).toEqual({ amount: 2006, preimage: 'cd'.repeat(32), txid: 'arktxid-lockup', swapId: 'swap-id-fake' })
   })
 
   test('an amountless invoice routes submarine, never the sub-dust path', async () => {

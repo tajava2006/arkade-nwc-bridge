@@ -217,6 +217,69 @@ export function startWebServer(deps: WebServerDeps): WebServer {
 
   const redirectToSetup = (): Response => Response.redirect('/setup', 303)
 
+  // The web UI's only exposure control is loopback binding — and loopback
+  // binding is NOT a CSRF control: a page at any origin the operator merely
+  // opens in a browser can POST to http://127.0.0.1:<port> (form posts are
+  // "simple requests" — no CORS preflight, no SameSite cookie involved). Every
+  // state-changing route therefore asserts the request came from the bridge's
+  // own origin / Host:
+  //   - Origin: a browser sends it for cross- AND same-origin POSTs. Absent
+  //     (curl / non-browser tooling — the loopback operator themselves) is the
+  //     trusted case. A present Origin must be loopback + our port.
+  //   - Host: covers DNS-rebinding (an attacker domain resolving to 127.0.0.1
+  //     would send Host: attacker.com against a loopback-bound server). Must
+  //     be loopback.
+  const isLoopbackHostname = (h: string): boolean => {
+    const host = h.replace(/^\[|\]$/g, '')
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1'
+  }
+  const isLoopbackOrigin = (origin: string | null): boolean => {
+    if (origin === null) return true
+    let u: URL
+    try {
+      u = new URL(origin)
+    } catch {
+      return false
+    }
+    // URL.port is '' only for the default ports (80/443); our bind is always an
+    // explicit port, so a non-empty mismatch means a non-bridge origin.
+    return isLoopbackHostname(u.hostname) && String(u.port) === String(cfg.httpPort)
+  }
+  const loopbackHostHeader = (host: string | null): boolean => {
+    if (host === null) return true
+    try {
+      return isLoopbackHostname(new URL(`http://${host}`).hostname)
+    } catch {
+      return false
+    }
+  }
+  // Returns a 403 Response to reject when the request isn't from the bridge
+  // itself, or null to allow. Wrap every state-changing POST handler with it.
+  const csrfGuard = (req: Request): Response | null => {
+    if (!isLoopbackOrigin(req.headers.get('origin'))) {
+      return htmlResponse(
+        sendResultView({ label: 'guard', ok: false, detail: 'cross-origin request rejected (CSRF guard)' }),
+        { status: 403 },
+      )
+    }
+    if (!loopbackHostHeader(req.headers.get('host'))) {
+      return htmlResponse(
+        sendResultView({ label: 'guard', ok: false, detail: 'unexpected Host header (DNS-rebinding guard)' }),
+        { status: 403 },
+      )
+    }
+    return null
+  }
+  // R4: GET (read) routes carry no Origin from most browsers, so the CSRF guard
+  // can't see them — but DNS-rebinding reads (balance / history / exit / swaps)
+  // are blocked the same way by asserting a loopback Host on every request.
+  const readGuard = (req: Request): Response | null => {
+    if (!loopbackHostHeader(req.headers.get('host'))) {
+      return new Response('unexpected Host header', { status: 403 })
+    }
+    return null
+  }
+
   const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
   const fmtSats = (n: number): string => `${n.toLocaleString()} sats`
@@ -275,7 +338,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     idleTimeout: 30,
     routes: {
       '/setup': {
-        GET: () => {
+        GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           if (state.current.mode !== 'setup') return Response.redirect('/', 303)
           const override = readServerOverrides()
           return htmlResponse(
@@ -286,6 +351,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           )
         },
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           if (state.current.mode !== 'setup') return Response.redirect('/', 303)
           const form = await req.formData()
           const mode = form.get('mode')
@@ -405,7 +472,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/': {
-        GET: () => {
+        GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           if (state.current.mode === 'degraded') {
             return htmlResponse(degradedView({ state: state.current, stats: vaultStats(db) }))
           }
@@ -435,7 +504,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/exit': {
-        GET: async () => {
+        GET: async (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           // ready AND degraded — this page must hold with the ASP dead
@@ -491,6 +562,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/exit/:txid/:vout': {
         GET: async (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const { txid } = req.params
@@ -534,6 +607,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       // chain can't stall the page (see statusFillIn in views/exit_detail.ts).
       '/exit/:txid/:vout/step/:stepTxid': {
         GET: async (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const st = state.current
           if (st.mode === 'setup') return new Response('setup required', { status: 409 })
           const { txid, stepTxid } = req.params
@@ -572,6 +647,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       // probes. 204 = nothing to correct (no sweep, or esplora can't see it).
       '/exit/:txid/:vout/sweep-status': {
         GET: async (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const st = state.current
           if (st.mode === 'setup') return new Response('setup required', { status: 409 })
           const { txid } = req.params
@@ -597,6 +674,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       // shouldn't be asked to pick a fee rate mid-emergency).
       '/exit/:txid/:vout/boost/:stepTxid': {
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const { txid, stepTxid } = req.params
@@ -615,6 +694,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/exit/:txid/:vout/boost-sweep': {
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const { txid } = req.params
@@ -633,6 +714,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/exit/:txid/:vout/start': {
         POST: (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const { txid } = req.params
@@ -651,6 +734,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       // and live rows must not be droppable by a misclick.
       '/exit/:txid/:vout/forget': {
         POST: (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const { txid } = req.params
@@ -668,6 +753,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/exit/:txid/:vout/sweep': {
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const { txid } = req.params
@@ -697,6 +784,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/exit/dest': {
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const form = await req.formData()
@@ -710,6 +799,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/exit/dest/verify': {
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           const form = await req.formData()
@@ -724,7 +815,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/exit/dest/clear': {
-        POST: () => {
+        POST: (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           st.exitEngine.clearDest()
@@ -732,7 +825,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/exit/final-send': {
-        POST: async () => {
+        POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           try {
@@ -747,7 +842,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/exit/final-send/boost': {
-        POST: async () => {
+        POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const st = state.current
           if (st.mode === 'setup') return redirectToSetup()
           try {
@@ -762,7 +859,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/connections': {
-        GET: () => {
+        GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const r = requireReady()
           if (!r.ok) return r.response
           const { active, revoked } = listAllConnections(db)
@@ -789,12 +888,16 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       '/connections/new': {
-        GET: () => {
+        GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const r = requireReady()
           if (!r.ok) return r.response
           return htmlResponse(newConnectionForm())
         },
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const r = requireReady()
           if (!r.ok) return r.response
           const form = await req.formData()
@@ -872,6 +975,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/connections/:id': {
         GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const r = requireReady()
           if (!r.ok) return r.response
           const id = Number.parseInt(req.params.id, 10)
@@ -895,6 +1000,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/connections/:id/revoke': {
         POST: (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const r = requireReady()
           if (!r.ok) return r.response
           const id = Number.parseInt(req.params.id, 10)
@@ -916,7 +1023,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         // relay (e.g. after swapping a flaky relay out of the NIP-65 list)
         // and move the subscription to it. Invalidates previously shared
         // copies of the old code — that's the point.
-        POST: () => {
+        POST: (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const r = requireReady()
           if (!r.ok) return r.response
           r.ready.offers.regenerate()
@@ -925,6 +1034,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/swaps': {
         GET: async (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const r = requireReady()
           if (!r.ok) return r.response
           const url = new URL(req.url)
@@ -944,6 +1055,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       // so a reload can't re-fire the spend.
       '/swaps/refund': {
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const r = requireReady()
           if (!r.ok) return r.response
           const form = await req.formData()
@@ -970,6 +1083,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         // offboard) are re-synced from their source tables right before the
         // read; everything else was written final by its own flow.
         GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const r = requireReady()
           if (!r.ok) return r.response
           try {
@@ -985,13 +1100,17 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       '/faq': {
         // Static content, no wallet reads — serve it in degraded mode too (it
         // explains exactly the situation a degraded operator is in).
-        GET: () => {
+        GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           if (state.current.mode === 'setup') return redirectToSetup()
           return htmlResponse(faqView())
         },
       },
       '/send': {
-        GET: async () => {
+        GET: async (req) => {
+          const g = readGuard(req)
+          if (g) return g
           const r = requireReady()
           if (!r.ok) return r.response
           // SWR: render from the cached snapshot instantly (or a loading
@@ -1010,6 +1129,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         // billed, the fee, and the total leaving the wallet), then render a
         // confirm page. No funds move here — /send/confirm executes.
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const r = requireReady()
           if (!r.ok) return r.response
           const ready = r.ready
@@ -1169,6 +1290,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         // the round-trip) and run the rail: Ark/LN block (instant–seconds),
         // onchain offboard is fire-and-forget (a round can take >10 min).
         POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const r = requireReady()
           if (!r.ok) return r.response
           const ready = r.ready
@@ -1351,7 +1474,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         // window: a fast deferral/error becomes a clear result page, while a
         // real round falls through to fire-and-forget (background completes,
         // balance reflects it over SSE). Not a money-out action → no durable row.
-        POST: async () => {
+        POST: async (req) => {
+          const csrf = csrfGuard(req)
+          if (csrf) return csrf
           const r = requireReady()
           if (!r.ok) return r.response
           const ready = r.ready
@@ -1415,6 +1540,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       },
       '/events': {
         GET: (req) => {
+          const g = readGuard(req)
+          if (g) return g
           // Server-Sent Events feed for live UI updates. Open one per
           // browser tab; nostr-side and (later) wallet-side state changes
           // get fanned out through sseHub.broadcast.

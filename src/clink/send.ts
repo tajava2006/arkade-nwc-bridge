@@ -2,7 +2,7 @@ import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, generateSecretKey, getPublicKey, type EventTemplate } from 'nostr-tools/pure'
 
 import { decryptContent, encryptContent } from '../nostr/crypto'
-import { normalizeRelayUrl } from '../nostr/outbox'
+import { isSafeRelayUrl, normalizeRelayUrl } from '../nostr/outbox'
 import { nofferDecode, OfferPriceType } from './nip19_offer'
 
 // CLINK Offers payer side: resolve a noffer to a BOLT11 by asking the offer
@@ -74,6 +74,20 @@ export function requestNofferInvoice(opts: NofferRequestOpts): Promise<NofferRes
       ok: false,
       kind: 'decode',
       message: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  // M7: a noffer's relay is chosen by the *counterparty* (the payee who handed
+  // us the code), so it is attacker-influenced input that we'd otherwise connect
+  // out to verbatim — an SSRF into internal ws(s) endpoints. Accept only a
+  // safe relay URL (ws(s) scheme, non-loopback/private IP). A legit noffer's
+  // relay is a public/wss relay (or a local dev `ws://localhost`, which passes —
+  // hostnames aren't blocked).
+  if (isSafeRelayUrl(pointer.relay) === false) {
+    return Promise.resolve({
+      ok: false,
+      kind: 'decode',
+      message: `noffer relay '${pointer.relay}' is not a safe relay URL — refusing to connect`,
     })
   }
 
