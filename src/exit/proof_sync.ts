@@ -275,8 +275,10 @@ export async function syncProofs(
     }
     // Our own exit engine explains (or still needs) some disappearances
     // before the server is even asked. An unrolled vtxo leaves the live
-    // list while the exit is still in flight — sweep reads the vault row,
-    // so GC must not touch it (under the old unconditional GC this could
+    // list while the exit is still in flight (our own doing —
+    // installUnrolledVtxoFilter in wallet.ts; arkd itself never
+    // reclassifies an unrolled row) — sweep reads the vault row, so GC
+    // must not touch it (under the old unconditional GC this could
     // strand a ready-mode exit). And a completed exit (state 'swept',
     // sweep broadcast by US) is its own evidence — without this check
     // every successful exit would end in a false betrayal alarm.

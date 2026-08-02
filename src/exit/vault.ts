@@ -64,10 +64,19 @@ export interface VaultVtxo {
 }
 
 export interface VaultStats {
-  /** live rows (quarantined excluded — they're no longer server-claimed) */
+  /** live rows (quarantined and mid-exit excluded — neither is server-claimed) */
   vtxoCount: number
   /** live vtxos whose every non-commitment chain tx has a stored proof */
   readyCount: number
+  /**
+   * vtxos mid-unilateral-exit (op unrolling/waiting/sweepable): gone from the
+   * live set on purpose, funds in transit onchain until the sweep lands. Their
+   * own bucket so the dashboard can say so instead of letting the balance
+   * silently shrink; a 'swept' op leaves it (row is moments from GC).
+   */
+  exitingCount: number
+  /** vault value of the mid-exit rows — the "sats in transit" the dashboard shows */
+  exitingSat: number
   /**
    * flagged rows whose exit window is still open — the server dropped them
    * without evidence and exiting them IS the recourse; shown loudly.
@@ -325,14 +334,36 @@ export function gcOrphanProofs(db: Database): number {
  * with an in-memory latch. Expired-window flags are excluded here (same split
  * vaultStats uses for quarantinedCount) — they own a separate immediate DM.
  */
+/**
+ * Outpoints owned by a non-failed exit op — the exit lifecycle, not the
+ * vault's readiness/quarantine math. Once the operator pulls the trigger the
+ * row's story is told on /exit (op pill), so counting or alarming on it here
+ * would double-report a deliberate act; a 'failed' op hands the row back.
+ */
+function exitOwnedOutpoints(db: Database): Map<string, string> {
+  return new Map(
+    db
+      .query<{ txid: string; vout: number; state: string }, []>(
+        `SELECT txid, vout, state FROM exit_ops WHERE state != 'failed'`,
+      )
+      .all()
+      .map((o) => [`${o.txid}:${o.vout}`, o.state]),
+  )
+}
+
 export function listMaturedBetrayals(
   db: Database,
   graceSec: number,
   nowSec: number = Math.floor(Date.now() / 1000),
 ): { outpoint: string; reason: string | null }[] {
+  // Same op exclusion vaultStats applies: a quarantined row the operator is
+  // actively exiting must not keep DM-ing as a betrayal — exiting IS the
+  // recommended recourse, and the badge already stopped counting it.
+  const owned = exitOwnedOutpoints(db)
   return listVaultVtxos(db)
     .filter(
       (v) =>
+        !owned.has(`${v.txid}:${v.vout}`) &&
         v.quarantinedAt !== null &&
         nowSec - v.quarantinedAt >= graceSec &&
         !(v.expiresAt !== null && v.expiresAt <= nowSec),
@@ -345,7 +376,18 @@ export function vaultStats(
   nowSec: number = Math.floor(Date.now() / 1000),
   graceSec = 0,
 ): VaultStats {
-  const all = listVaultVtxos(db)
+  // Rows owned by a non-failed exit op leave the readiness math entirely:
+  // the wallet-boundary unrolled filter drops them from the server-claimed
+  // live set, so counting them as "ready" would inflate proven vs claimed
+  // (same reasoning as the quarantine split below). In-flight ops get their
+  // own exiting bucket; a 'failed' op falls back to the normal machinery.
+  const opState = exitOwnedOutpoints(db)
+  const everything = listVaultVtxos(db)
+  const all = everything.filter((v) => !opState.has(`${v.txid}:${v.vout}`))
+  const exiting = everything.filter((v) => {
+    const s = opState.get(`${v.txid}:${v.vout}`)
+    return s !== undefined && s !== 'swept'
+  })
   // Quarantined rows leave the readiness math (the server no longer claims
   // them, so counting them as "ready" would inflate proven vs claimed) but
   // keep their own loud counters — split on whether the exit window is
@@ -379,6 +421,8 @@ export function vaultStats(
   return {
     vtxoCount: vtxos.length,
     readyCount,
+    exitingCount: exiting.length,
+    exitingSat: exiting.reduce((s, v) => s + v.valueSat, 0),
     quarantinedCount: matured.length - expiredCount,
     expiredCount,
     inGraceCount: flagged.length - matured.length,

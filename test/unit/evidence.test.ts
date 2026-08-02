@@ -126,6 +126,22 @@ describe('classifyDisappearance', () => {
     expect(verdict.kind).toBe('unproven')
   })
 
+  test('unrolled without a local exit op → unproven with the sweep-it story', async () => {
+    // Reaches evidence only when no exit op explains it (ops are honored
+    // first in proof_sync) — another device unrolled it, or a local op died.
+    const verdict = await classifyDisappearance(
+      indexerOf({ vtxos: [{ txid: row.txid, vout: row.vout, isUnrolled: true }] }),
+      row,
+      new Uint8Array(32),
+      1_000,
+    )
+    expect(verdict.kind).toBe('unproven')
+    if (verdict.kind === 'unproven') {
+      expect(verdict.reason).toContain('unilateral exit')
+      expect(verdict.reason).toContain('sweep it from /exit')
+    }
+  })
+
   test('spentBy named but not served → unproven', async () => {
     const verdict = await classifyDisappearance(
       indexerOf({ vtxos: [{ txid: row.txid, vout: row.vout, spentBy: fakeTxid(0x44) }] }),

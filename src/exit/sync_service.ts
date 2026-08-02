@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { syncProofs, type ProofSyncIndexer, type ProofSyncResult } from './proof_sync'
+import { listExitOps } from './ops'
 import { listMaturedBetrayals, vaultStats, type VaultStats } from './vault'
 import { EXIT_QUARANTINE_DM_GRACE_MS, EXIT_SYNC_ALERT_THRESHOLD } from '../defaults'
 import type { NotifyFn } from '../nostr/notifier'
@@ -158,7 +159,19 @@ export function startProofSync(deps: {
     notify() // dashboards show "syncing…" while a pass is in flight
     try {
       const vtxos = await deps.listVtxos()
-      claim = { total: vtxos.length, at: Math.floor(Date.now() / 1000) }
+      // Keep the claim on the same footing as vaultStats' readiness math:
+      // rows owned by a non-failed exit op are out of both sides. A vtxo can
+      // straggle in the live set for a moment after Start exit (arkd flags
+      // `unrolled` when the broadcast hits its scanner, not instantly) —
+      // without this, proven-vs-claimed flashes red for exactly the vtxo the
+      // operator is deliberately exiting.
+      const exitOwned = new Set(
+        listExitOps(deps.db, ['unrolling', 'waiting', 'sweepable', 'swept']).map(
+          (o) => `${o.txid}:${o.vout}`,
+        ),
+      )
+      const claimed = vtxos.filter((v) => !exitOwned.has(`${v.txid}:${v.vout}`))
+      claim = { total: claimed.length, at: Math.floor(Date.now() / 1000) }
       const result = await syncProofs(deps.db, deps.indexer, vtxos, deps.xOnlyPubkey)
       lastRun = { ...result, at: Math.floor(Date.now() / 1000), reason }
       if (result.gc.absorbed.length > 0) {

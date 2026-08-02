@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { ChainTxType, type ChainTx } from '@arkade-os/sdk'
 import { openTempDb, type TempDb } from '../helpers/db'
+import { createOrRestartExitOp, setExitOpState } from '../../src/exit/ops'
 import {
   clearQuarantine,
   gcOrphanProofs,
@@ -296,5 +297,66 @@ describe('vaultStats grace window (loud-badge gate)', () => {
     const stats = vaultStats(temp.db, at)
     expect(stats.quarantinedCount).toBe(1)
     expect(stats.inGraceCount).toBe(0)
+  })
+})
+
+describe('vaultStats exiting bucket (rows owned by an exit op)', () => {
+  let temp: TempDb
+  beforeEach(() => {
+    temp = openTempDb()
+  })
+  afterEach(() => {
+    temp.cleanup()
+  })
+
+  const FUTURE = 4_000_000_000
+
+  test('an in-flight op moves the row from readiness math into exiting', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    storeVtxoWithProofs(temp.db, { ...vtxo('b-ark', chainB, 500), expiresAt: FUTURE }, proofsFor(chainB))
+    createOrRestartExitOp(temp.db, 'a-ark', 0)
+
+    for (const state of ['unrolling', 'waiting', 'sweepable'] as const) {
+      setExitOpState(temp.db, 'a-ark', 0, state)
+      const stats = vaultStats(temp.db)
+      expect(stats.vtxoCount).toBe(1) // only b-ark stays server-claimed
+      expect(stats.readyCount).toBe(1)
+      expect(stats.exitingCount).toBe(1)
+      expect(stats.exitingSat).toBe(1000)
+    }
+  })
+
+  test('a swept op leaves exiting too — the row is moments from GC', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    createOrRestartExitOp(temp.db, 'a-ark', 0)
+    setExitOpState(temp.db, 'a-ark', 0, 'swept')
+
+    const stats = vaultStats(temp.db)
+    expect(stats.vtxoCount).toBe(0)
+    expect(stats.exitingCount).toBe(0)
+    expect(stats.exitingSat).toBe(0)
+  })
+
+  test('a failed op hands the row back to the normal machinery', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    createOrRestartExitOp(temp.db, 'a-ark', 0)
+    setExitOpState(temp.db, 'a-ark', 0, 'failed')
+
+    const stats = vaultStats(temp.db)
+    expect(stats.vtxoCount).toBe(1)
+    expect(stats.readyCount).toBe(1)
+    expect(stats.exitingCount).toBe(0)
+  })
+
+  test('exiting a quarantined row silences both the badge and the betrayal DM', () => {
+    storeVtxoWithProofs(temp.db, { ...vtxo('a-ark', chainA), expiresAt: FUTURE }, proofsFor(chainA))
+    quarantineVtxo(temp.db, 'a-ark', 0, 'indexer no longer acknowledges the outpoint')
+    const at = getVaultVtxo(temp.db, 'a-ark', 0)!.quarantinedAt!
+    createOrRestartExitOp(temp.db, 'a-ark', 0)
+
+    const stats = vaultStats(temp.db, at + 1000, 100)
+    expect(stats.quarantinedCount).toBe(0)
+    expect(stats.exitingCount).toBe(1)
+    expect(listMaturedBetrayals(temp.db, 100, at + 1000)).toEqual([])
   })
 })

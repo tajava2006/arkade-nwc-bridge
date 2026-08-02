@@ -102,11 +102,22 @@ export function renderExitReadinessFragment(snap: ProofSyncSnapshot | null): Raw
           transient; alarms only if it persists)
         </div>`
       : html``
+  // Deliberate activity, not an alarm: an exit in flight leaves the balance
+  // on purpose and lands onchain after its CSV. Says where the sats went so
+  // the balance tile shrinking doesn't read as a loss; clears on sweep.
+  const exiting =
+    stats.exitingCount > 0
+      ? html`<div class="muted">
+          ${stats.exitingCount} vtxo(s) exiting unilaterally —
+          ${stats.exitingSat.toLocaleString()} sats in transit onchain (not in the balance
+          above); <a href="/exit">track progress</a>
+        </div>`
+      : html``
   return html`${headline}
     <div class="muted" style="font-size:0.55em; font-weight: normal;">
       proven / ASP-claimed · ${freshness} · proofs ${(stats.proofBytes / 1024).toFixed(0)} KB
     </div>
-    ${quarantine} ${expired} ${inGrace} ${shortfall} ${gaps}`
+    ${exiting} ${quarantine} ${expired} ${inGrace} ${shortfall} ${gaps}`
 }
 
 /**

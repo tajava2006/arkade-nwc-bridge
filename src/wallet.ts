@@ -3,6 +3,8 @@ import {
   InMemoryWalletRepository,
   SingleKey,
   Wallet,
+  type ExtendedVirtualCoin,
+  type GetVtxosFilter,
 } from '@arkade-os/sdk'
 import type { Config } from './config'
 
@@ -21,6 +23,39 @@ export interface ArkContext {
 // round per minute. 1h is safely below any expiry config we'd ever run.
 // Invariant: this < AUTO_REFRESH_THRESHOLD_SECONDS (tested).
 export const VTXO_RENEW_THRESHOLD_SECONDS = 3600
+
+/**
+ * The default-filter semantics `getVtxos` documents but does not deliver:
+ * `withUnrolled: false` is consulted only after `hasTerminalSpend`, and an
+ * unrolled-but-unspent vtxo is NOT terminal (arkd sets `spent` on offchain
+ * spends only), so it short-circuits into every "spendable" result. arkd
+ * never reclassifies such a row either — the batch sweeper explicitly skips
+ * unrolled leaves — so without this filter the exited vtxo haunts balance,
+ * /send and settle() input selection forever, and one ghost input makes the
+ * consolidate-all intent rejected wholesale (VTXO_ALREADY_UNROLLED, observed
+ * mainnet 2026-08-01). arkd's own `spendableOnly` filter and its bundled Go
+ * client both already treat unrolled as spent; this applies the same rule.
+ */
+export function withoutUnrolled(
+  vtxos: ExtendedVirtualCoin[],
+  filter?: GetVtxosFilter,
+): ExtendedVirtualCoin[] {
+  return filter?.withUnrolled ? vtxos : vtxos.filter((v) => !v.isUnrolled)
+}
+
+/**
+ * Wrap `wallet.getVtxos` with {@link withoutUnrolled}. Instance-level on
+ * purpose: getBalance / settle / the SDK's backstop renew all read vtxos via
+ * `this.getVtxos(...)`, so one boundary catches every consumer — bridge code
+ * AND the SDK's own selection paths — without forking the SDK.
+ */
+export function installUnrolledVtxoFilter(wallet: {
+  getVtxos(filter?: GetVtxosFilter): Promise<ExtendedVirtualCoin[]>
+}): void {
+  const sdkGetVtxos = wallet.getVtxos.bind(wallet)
+  wallet.getVtxos = async (filter?: GetVtxosFilter) =>
+    withoutUnrolled(await sdkGetVtxos(filter), filter)
+}
 
 export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promise<ArkContext> {
   const identity = SingleKey.fromPrivateKey(privateKey)
@@ -51,6 +86,7 @@ export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promis
     // field with `?? DEFAULT_SETTLEMENT_CONFIG.*`). Seconds, not ms.
     settlementConfig: { vtxoThreshold: VTXO_RENEW_THRESHOLD_SECONDS },
   })
+  installUnrolledVtxoFilter(wallet)
 
   const address = await wallet.getAddress()
   return { identity, wallet, address }

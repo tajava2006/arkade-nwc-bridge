@@ -69,6 +69,14 @@ function quarantinePill(v: VaultVtxo, nowSec: number, graceSec: number): RawHtml
 }
 
 function verdict(row: ExitRow): RawHtml {
+  // A live op outranks the static analysis — the decision was already made,
+  // so "exitable" would be stale advice. 'failed' falls through: the row is
+  // back on the table and the static verdict is the retry guidance.
+  if (row.op && row.op.state !== 'failed') {
+    return row.op.state === 'swept'
+      ? html`<span class="pill settled">exit complete</span>`
+      : html`<span class="pill pending">exit in progress</span>`
+  }
   if (row.vtxo.status === 'swept') {
     // §2.7: the ASP already spent the tree root — complete proofs or not,
     // unilateral exit is gone; only a cooperative settlement recovers this

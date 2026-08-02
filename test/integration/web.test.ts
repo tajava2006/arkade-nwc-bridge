@@ -80,6 +80,8 @@ const STUB_PROOF_SYNC: ProofSyncService = {
     stats: {
       vtxoCount: 0,
       readyCount: 0,
+      exitingCount: 0,
+      exitingSat: 0,
       quarantinedCount: 0,
       expiredCount: 0,
       inGraceCount: 0,

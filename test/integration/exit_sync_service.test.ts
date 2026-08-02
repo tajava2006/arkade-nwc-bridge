@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { base64, hex } from '@scure/base'
 import { ChainTxType, Transaction, type ChainTx, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { openTempDb, type TempDb } from '../helpers/db'
+import { createOrRestartExitOp } from '../../src/exit/ops'
 import { getVaultVtxo, isVtxoExitReady } from '../../src/exit/vault'
 import type { ProofSyncIndexer } from '../../src/exit/proof_sync'
 import { startProofSync, type ProofSyncService } from '../../src/exit/sync_service'
@@ -159,6 +160,23 @@ describe('proof sync service (scheduler)', () => {
     const snap = svc.snapshot()
     expect(snap.lastRun?.failed[0]?.outpoint).toBe('*')
     expect(snap.claim?.total).toBe(1)
+  })
+
+  test('claim excludes exit-owned vtxos, matching the readiness math', async () => {
+    // Right after Start exit the vtxo can straggle in the live set until arkd
+    // flags it unrolled — the claim must not count it against proven or the
+    // dashboard flashes red for a deliberate exit.
+    const d = deps(new Map([[ark.txid, ark.psbtB64]]))
+    createOrRestartExitOp(temp.db, ark.txid, 0) // state: 'unrolling'
+    svc = startProofSync({ db: temp.db, indexer: d.indexer, listVtxos: d.listVtxos, xOnlyPubkey: new Uint8Array(32).fill(1), timing: TIMING })
+
+    svc.trigger('boot')
+    await sleep(60)
+    const snap = svc.snapshot()
+    expect(snap.claim?.total).toBe(0)
+    expect(snap.stats.vtxoCount).toBe(0) // both sides agree: not server-claimed
+    expect(snap.stats.exitingCount).toBe(1)
+    expect(snap.stats.exitingSat).toBe(1000)
   })
 
   test('operator DM: ASP-down edge fires once at the threshold, recovery once', async () => {

@@ -230,6 +230,20 @@ export async function classifyDisappearance(
     return { kind: 'unproven', reason: 'indexer no longer acknowledges the outpoint' }
   }
   if (!row.spentBy) {
+    // Unrolled-but-unspent: the pre-signed chain hit the chain, but no exit op
+    // here explains it (ops are honored before evidence is asked) — another
+    // device holding the nsec, or a local op that failed mid-broadcast. The
+    // funds sit onchain at our own key with the CSV clock running, so the ask
+    // is "go sweep it", not "the server is lying" — but quarantine (row +
+    // proofs kept, loud after grace) is still the right mechanics: it must
+    // not be deletable on the server's word, and it must not stay silent.
+    if (row.isUnrolled) {
+      return {
+        kind: 'unproven',
+        reason:
+          'broadcast onchain via unilateral exit, but no exit op on this bridge — unrolled from another device or a failed local op; the CSV clock is running, sweep it from /exit',
+      }
+    }
     return {
       kind: 'unproven',
       reason: `outpoint still ${row.virtualStatus?.state ?? 'unspent'} per the indexer, yet dropped from the live set`,
