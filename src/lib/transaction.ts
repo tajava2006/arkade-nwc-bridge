@@ -31,17 +31,24 @@ export interface TransactionRow {
 }
 
 export function transactionRowToNwc(row: TransactionRow): Record<string, unknown> {
+  // preimage and settled_at are payment evidence — NIP-47 defines both as
+  // present only for paid invoices. Internally the writers use settled_at as
+  // a generic "resolved at" on some failure paths (M1), and rows written
+  // before the onSwapTerminal fix may carry a preimage despite never being
+  // paid — gate on state here so the NWC surface can't attest a payment that
+  // didn't happen.
+  const settled = row.state === 'settled'
   return {
     type: row.type,
     state: row.state,
     invoice: row.invoice,
     description: row.description ?? undefined,
-    preimage: row.preimage ?? undefined,
+    preimage: settled ? (row.preimage ?? undefined) : undefined,
     payment_hash: row.payment_hash,
     amount: row.amount_msat,
     fees_paid: row.fees_paid_msat ?? undefined,
     created_at: row.created_at,
     expires_at: row.expires_at ?? undefined,
-    settled_at: row.settled_at ?? undefined,
+    settled_at: settled ? (row.settled_at ?? undefined) : undefined,
   }
 }

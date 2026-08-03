@@ -6,11 +6,13 @@ import {
   isPendingSubmarineSwap,
   isReverseFinalStatus,
   isReverseSuccessStatus,
+  isSubmarineSuccessStatus,
   type BoltzReverseSwap,
   type BoltzSwap,
   type BoltzSwapStatus,
 } from '@arkade-os/boltz-swap'
-import type { Wallet } from '@arkade-os/sdk'
+import { ArkAddress, RestIndexerProvider, type Wallet } from '@arkade-os/sdk'
+import { hex } from '@scure/base'
 import type { Database } from 'bun:sqlite'
 import { SqliteSwapRepository } from './boltz_repository'
 import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
@@ -23,56 +25,145 @@ export interface BoltzContext {
 
 // M3: an inbound reverse swap "settled" is boltz's word, not evidence. The whole
 // point of this wallet is not trusting the swap provider, so before we mark the
-// recv row settled or hand a payer a 9735 receipt, confirm a vtxo of about the
-// landed amount actually showed up on Ark (from the SDK's own wallet view, which
-// is fed by the arkd indexer — not boltz). Poll a bounded window (the vtxo can
-// land a beat after the settle event); on no confirm we defer so a later
-// reconcile pass retries — self-healing, never a false success. The receipt
-// therefore can't be forged by boltz claiming success without the Ark side
-// landing. Landed ≈ invoice nominal − boltz's reverse fee.
+// recv row settled or hand a payer a 9735 receipt, confirm on the arkd indexer
+// (not boltz) that THIS swap's VHTLC was spent into OUR wallet. The binding is
+// exact — txids, never amounts: a value≈ match can be satisfied by a different
+// same-amount swap's coin (the 2026-07-29 twin-invoice pair made that concrete,
+// see the twin regression test). Poll a bounded window (the claim can land a
+// beat after the settle event); on no confirm we defer so a later reconcile
+// pass retries — self-healing, never a false success.
 const REVERSE_LAND_POLLS = 4
 const REVERSE_LAND_GAP_MS = 1000
 
-function reverseLandedSat(swap: BoltzReverseSwap): number {
-  const onchain = swap.response?.onchainAmount
-  return typeof onchain === 'number' ? onchain : swap.request.invoiceAmount
-}
-
-/**
- * Swap creation time in ms (R3 baseline). Boltz's `createdAt` is unix seconds;
- * tolerate a ms-valued payload so an upstream change can't double-count.
- */
-export function swapCreatedMs(swap: { createdAt?: number }): number | undefined {
-  const raw = swap.createdAt
-  if (raw === undefined || raw === null) return undefined
-  return raw > 1e12 ? raw : raw * 1000
-}
+/** The narrow indexer surface confirmReverseLanded needs (stubbable in tests). */
+export type VtxoIndexer = Pick<RestIndexerProvider, 'getVtxos'>
 
 export async function confirmReverseLanded(
   wallet: Wallet,
-  expectedSat: number,
-  sinceMs?: number,
+  indexer: VtxoIndexer,
+  swap: BoltzReverseSwap,
 ): Promise<boolean> {
-  if (!(expectedSat > 0)) return false
-  const tol = Math.max(2, Math.ceil(expectedSat * 0.02))
+  // The VHTLC lockup address was committed into the swap at create time and is
+  // unique to it (the payment hash is in the script) — decoding it gives the
+  // exact script whose spend is this swap's landing, and nothing else's.
+  const lockup = swap.response?.lockupAddress
+  if (!lockup) {
+    console.warn(
+      `boltz: reverse swap ${swap.id} carries no lockupAddress — cannot verify the Ark landing, deferring`,
+    )
+    return false
+  }
+  let lockupScript: string
+  let ourScript: string
+  try {
+    lockupScript = hex.encode(ArkAddress.decode(lockup).pkScript)
+    ourScript = hex.encode(ArkAddress.decode(await wallet.getAddress()).pkScript)
+  } catch (err) {
+    console.warn(`boltz: reverse swap ${swap.id}: address decode failed — deferring:`, err)
+    return false
+  }
+
   for (let i = 0; i < REVERSE_LAND_POLLS; i++) {
     try {
-      const vtxos = await wallet.getVtxos({ withRecoverable: true })
-      // R3: value-approx alone can false-positive on a *previous* same-amount
-      // vtxo (e.g. repeated 21-sat zaps) — boltz lying about swap #2 would
-      // still match swap #1's vtxo. Requiring the vtxo to have been created
-      // at/after this swap was created distinguishes the actual landing.
-      const hit = (v: { value: number; createdAt?: Date }): boolean =>
-        Math.abs(v.value - expectedSat) <= tol &&
-        (sinceMs === undefined || (v.createdAt !== undefined && v.createdAt.getTime() >= sinceMs))
-      if (vtxos.some(hit)) return true
+      const { vtxos: lockupCoins } = await indexer.getVtxos({ scripts: [lockupScript] })
+      const spent = lockupCoins.filter((v) => v.arkTxId || v.spentBy || v.settledBy)
+      if (spent.length > 0) {
+        // Our side comes from the indexer too, not wallet.getVtxos: by the time
+        // a late reconcile runs, the claim output may itself have been spent or
+        // refreshed away — the indexer still returns it for our script.
+        const { vtxos: ourCoins } = await indexer.getVtxos({ scripts: [ourScript] })
+        const landed = ourCoins.some((o) =>
+          spent.some(
+            (s) =>
+              // offchain claim: the Arkade tx that spent the VHTLC is the tx
+              // that created our coin (checkpoint id kept as a fallback match)
+              (s.arkTxId !== undefined && s.arkTxId === o.txid) ||
+              (s.spentBy !== undefined && s.spentBy === o.txid) ||
+              // batch claim (recoverable VHTLC joined a round): our coin hangs
+              // off the same commitment that absorbed the VHTLC
+              (s.settledBy !== undefined &&
+                (o.virtualStatus?.commitmentTxIds?.includes(s.settledBy) ?? false)),
+          ),
+        )
+        if (landed) return true
+      }
     } catch {
-      // transient wallet/indexer read failure — retry the poll
+      // transient indexer read failure — retry the poll
     }
     await new Promise((r) => setTimeout(r, REVERSE_LAND_GAP_MS))
   }
   return false
 }
+/**
+ * Classify a swap the SwapManager stopped monitoring. `onSwapCompleted` means
+ * "monitoring completed", NOT "swap succeeded": finalizeMonitoredSwap emits it
+ * on EVERY terminal status — invoice.expired, swap.expired, invoice.failedToPay
+ * and transaction.refunded included — and the status-shaped failures never
+ * reach onSwapFailed (that only fires on ws error payloads / action exceptions
+ * / 404s). Success is a property of swap.status, so route on it; treating the
+ * event itself as success recorded an unpaid invoice.expired receive as
+ * settled — with a servable preimage — in transactions/history (2026-07-29).
+ */
+export async function onSwapTerminal(
+  deps: {
+    db: Database
+    wallet: Wallet
+    indexer: VtxoIndexer
+    onReverseSettled?: (swap: BoltzReverseSwap) => void
+    notify?: NotifyFn
+  },
+  swap: BoltzSwap,
+): Promise<void> {
+  if (isPendingReverseSwap(swap)) {
+    if (!isReverseSuccessStatus(swap.status)) {
+      // A failed reverse swap is an unpaid invoice expiring — routine noise,
+      // recorded but deliberately not DMed. Must also not reach
+      // onReverseSettled: that hook DMs recv-ln and publishes CLINK 9735
+      // receipts, both of which assert the payer actually paid.
+      syncSwapToDb(deps.db, swap, 'failed', `terminal status: ${swap.status}`)
+      return
+    }
+    // M3: don't mark settled / don't ack the payer until the Ark vtxo has
+    // actually landed (boltz's word isn't evidence). Deferred ones self-heal
+    // via the periodic reconcile.
+    const landed = await confirmReverseLanded(deps.wallet, deps.indexer, swap)
+    if (!landed) {
+      console.warn(
+        `boltz: reverse swap ${swap.id} reported settled but no on-Ark vtxo ~${swap.request.invoiceAmount}s confirmed — not recording/acking (M3), retried by the reconcile pass`,
+      )
+      deps.notify?.(
+        'recv-ln',
+        () => `recv: reverse swap ${swap.id.slice(0, 8)} reported settled but the Ark vtxo wasn't confirmed yet — will retry`,
+      )
+      return
+    }
+    syncSwapToDb(deps.db, swap, 'settled')
+    deps.onReverseSettled?.(swap)
+    return
+  }
+
+  if (isPendingSubmarineSwap(swap)) {
+    if (!isSubmarineSuccessStatus(swap.status)) {
+      // Status-shaped submarine failure (invoice.failedToPay / swap.expired).
+      // The live handler also marks its own row failed; this write is the
+      // restart-resume backup and is pending-gated either way.
+      syncSwapToDb(deps.db, swap, 'failed', `terminal status: ${swap.status}`)
+      deps.notify?.('send-fail', () => {
+        const nominal = decodeInvoice(swap.request.invoice).amountSats
+        return `send: LN payment FAILED — ${nominal} sats (${swap.status}) [swap ${swap.id.slice(0, 8)}]`
+      })
+      return
+    }
+    syncSwapToDb(deps.db, swap, 'settled')
+    deps.notify?.('send-ln', () => {
+      const nominal = decodeInvoice(swap.request.invoice).amountSats
+      const fee = swap.response.expectedAmount - nominal
+      return `send: LN paid — ${nominal} sats (+${fee} fee) [swap ${swap.id.slice(0, 8)}]`
+    })
+  }
+  // Chain swaps aren't surfaced through NWC — ignored (syncSwapToDb skips too).
+}
+
 export async function initBoltz(deps: {
   db: Database
   wallet: Wallet
@@ -92,6 +183,9 @@ export async function initBoltz(deps: {
    */
   notify?: NotifyFn
 }): Promise<BoltzContext> {
+  // M3's landing verification reads the arkd indexer directly — the same
+  // server the wallet trusts, never boltz.
+  const indexer = new RestIndexerProvider(deps.cfg.arkServerUrl)
   const swaps = await ArkadeSwaps.create({
     wallet: deps.wallet,
     swapProvider: new BoltzSwapProvider({
@@ -102,41 +196,15 @@ export async function initBoltz(deps: {
     swapManager: {
       autoStart: true,
       events: {
-        onSwapCompleted: async (swap) => {
-          // M3: for reverse (inbound) swaps, don't mark settled / don't ack the
-          // payer until the Ark vtxo has actually landed (boltz's word isn't
-          // evidence). Deferred ones self-heal via the periodic reconcile.
-          if (isPendingReverseSwap(swap)) {
-            const landed = await confirmReverseLanded(
-              deps.wallet,
-              reverseLandedSat(swap),
-              swapCreatedMs(swap),
-            )
-            if (!landed) {
-              console.warn(
-                `boltz: reverse swap ${swap.id} reported settled but no on-Ark vtxo ~${swap.request.invoiceAmount}s confirmed — not recording/acking (M3), retried by the reconcile pass`,
-              )
-              deps.notify?.(
-                'recv-ln',
-                () => `recv: reverse swap ${swap.id.slice(0, 8)} reported settled but the Ark vtxo wasn't confirmed yet — will retry`,
-              )
-              return
-            }
-          }
-          syncSwapToDb(deps.db, swap, 'settled')
-          if (deps.onReverseSettled && isPendingReverseSwap(swap)) deps.onReverseSettled(swap)
-          if (isPendingSubmarineSwap(swap)) {
-            deps.notify?.('send-ln', () => {
-              const nominal = decodeInvoice(swap.request.invoice).amountSats
-              const fee = swap.response.expectedAmount - nominal
-              return `send: LN paid — ${nominal} sats (+${fee} fee) [swap ${swap.id.slice(0, 8)}]`
-            })
-          }
-        },
+        onSwapCompleted: (swap) => onSwapTerminal({ ...deps, indexer }, swap),
+        // Exception-shaped failures only (ws error payload, auto-action throw,
+        // provider 404s) — status-shaped terminals (invoice.expired,
+        // invoice.failedToPay, …) arrive via onSwapCompleted and are routed by
+        // onSwapTerminal above.
         onSwapFailed: (swap, error) => {
           syncSwapToDb(deps.db, swap, 'failed', error.message)
-          // Submarine only: a failed reverse swap is an unpaid invoice
-          // expiring — routine noise, deliberately not notified.
+          // Submarine only: reverse-side failures are receive noise,
+          // deliberately not notified.
           if (isPendingSubmarineSwap(swap)) {
             deps.notify?.('send-fail', () => {
               const nominal = decodeInvoice(swap.request.invoice).amountSats
@@ -165,7 +233,7 @@ export async function initBoltz(deps: {
   // offline) will already be terminal in boltz_swaps but still 'pending'
   // in our invoices table — reconcile those once here so the SDK update
   // path and the bridge's table stay in lockstep.
-  await reconcilePendingIncoming(deps.db, deps.wallet, deps.notify)
+  await reconcilePendingIncoming(deps.db, deps.wallet, indexer, deps.notify)
 
   return { swaps }
 }
@@ -173,6 +241,7 @@ export async function initBoltz(deps: {
 export async function reconcilePendingIncoming(
   db: Database,
   wallet: Wallet,
+  indexer: VtxoIndexer,
   notify?: NotifyFn,
 ): Promise<void> {
   // Reverse swaps that completed before the listener existed (or while the
@@ -209,19 +278,20 @@ export async function reconcilePendingIncoming(
     // M3: a success reported by boltz isn't proof the Ark side landed. Confirm
     // the on-Ark vtxo before flipping to settled; otherwise defer (leave pending)
     // so a later pass re-confirms. Failed (unpaid expiry) needs no confirm.
-    if (newState === 'settled' && !(await confirmReverseLanded(wallet, reverseLandedSat(swap), swapCreatedMs(swap)))) {
+    if (newState === 'settled' && !(await confirmReverseLanded(wallet, indexer, swap))) {
       console.warn(
         `boltz: pending incoming ${swap.id} is terminal-settled but the Ark vtxo isn't confirmed yet (M3) — deferring`,
       )
       continue
     }
+    // preimage only on success — same rationale as syncSwapToDb's reverse branch.
     const res = db.query(
       `UPDATE transactions
          SET state = ?,
              preimage = COALESCE(preimage, ?),
              settled_at = COALESCE(settled_at, ?)
        WHERE type = 'incoming' AND swap_id = ? AND state = 'pending'`,
-    ).run(newState, swap.preimage, now, row.swap_id)
+    ).run(newState, newState === 'settled' ? swap.preimage : null, now, row.swap_id)
     // Notify only when THIS pass flipped the row (rows-changed gate keeps
     // it exactly-once across restarts); failed = unpaid-expiry noise, skip.
     if (res.changes > 0 && newState === 'settled') {
@@ -271,7 +341,7 @@ export async function reconcilePendingIncoming(
           ).run(row.amount_msat, row.id)
         }
       })()
-    } else if (atomic.state === 'refunded' || atomic.state === 'failed') {
+    } else if (atomic.state === 'refunded' || atomic.state === 'failed' || atomic.state === 'cancelled') {
       db.query(
         `UPDATE transactions SET state = 'failed', settled_at = ? WHERE id = ? AND state = 'pending'`,
       ).run(now, row.id)
@@ -300,13 +370,17 @@ export function syncSwapToDb(
   const now = Math.floor(Date.now() / 1000)
 
   if (isPendingReverseSwap(swap)) {
+    // preimage only on success: the reverse-swap preimage is locally generated
+    // (we're the claimant), so it exists even for an unpaid invoice — writing
+    // it to a failed row would let lookup_invoice serve a "proof of payment"
+    // for an invoice nobody paid.
     db.query(
       `UPDATE transactions
          SET state = ?,
              preimage = COALESCE(preimage, ?),
              settled_at = COALESCE(settled_at, ?)
        WHERE type = 'incoming' AND swap_id = ? AND state = 'pending'`,
-    ).run(state, swap.preimage, now, swap.id)
+    ).run(state, state === 'settled' ? swap.preimage : null, now, swap.id)
     return
   }
 

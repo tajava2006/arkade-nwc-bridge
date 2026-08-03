@@ -21,7 +21,7 @@ import { SqliteAtomicSwapRepository, SwapDirection } from '../atomic'
 import { decryptContent, encryptContent } from '../nostr/crypto'
 import { openPersistentSub, type PersistentSub } from '../nostr/persistent_sub'
 import { normalizeRelayUrl, type OutboxWatcher } from '../nostr/outbox'
-import { confirmReverseLanded, swapCreatedMs } from '../boltz'
+import { confirmReverseLanded, type VtxoIndexer } from '../boltz'
 import type { RelayStatus } from '../lib/relay_status'
 import { nofferEncode, nofferDecode, OfferPriceType } from './nip19_offer'
 import { validateZapRequest, zapDescriptionHash, publishZapReceipt } from './zap'
@@ -496,6 +496,8 @@ export async function reconcileClinkAcks(deps: {
   secretKey: Uint8Array
   boltzApiUrl: string
   wallet: Wallet
+  /** arkd indexer — the M3 landing verification binds the swap's VHTLC spend to our wallet by txid. */
+  indexer: VtxoIndexer
   notify?: NotifyFn
 }): Promise<void> {
   // ≥dust: drive off the small receipts table, PK-lookup boltz_swaps per row.
@@ -515,9 +517,7 @@ export async function reconcileClinkAcks(deps: {
         // claiming success isn't enough. The atomic/sub-dust path is already
         // verified (we hold the preimage), so this only applies to dust+ swaps.
         const swap = JSON.parse(sw.data) as BoltzReverseSwap
-        const onArk = swap.response?.onchainAmount
-        const expected = typeof onArk === 'number' ? onArk : swap.request.invoiceAmount
-        if (!(await confirmReverseLanded(deps.wallet, expected, swapCreatedMs(swap)))) {
+        if (!(await confirmReverseLanded(deps.wallet, deps.indexer, swap))) {
           console.warn(
             `clink: swap ${swap_id.slice(0, 8)} terminal-settled but Ark vtxo not confirmed (M3) — deferring receipt`,
           )

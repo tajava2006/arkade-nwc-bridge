@@ -14,7 +14,7 @@ import { getPublicKey } from 'nostr-tools/pure'
 import { openDatabase } from './db'
 import { loadAccount } from './account'
 import { resolveServerSet, getServerRow, setServerRow } from './server_config'
-import { EsploraProvider, OnchainWallet, RestArkProvider, SingleKey } from '@arkade-os/sdk'
+import { EsploraProvider, OnchainWallet, RestArkProvider, RestIndexerProvider, SingleKey } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
 import { initBoltz, reconcilePendingIncoming } from './boltz'
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
@@ -346,7 +346,10 @@ async function main(): Promise<void> {
       // were down) + sub-dust acks, and NWC make_invoice sub-dust rows — those
       // have no settlement event at all (no swap object), so this poll is the
       // only thing that ever flips them (see ln_receive.ts).
-      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, wallet, notify }
+      // arkd indexer for M3's landing verification (exact VHTLC-spend → our-coin
+      // txid binding) — same server the wallet trusts, never boltz.
+      const reconcileIndexer = new RestIndexerProvider(bootCfg.arkServerUrl)
+      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, wallet, indexer: reconcileIndexer, notify }
       const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
       const runReconcilePasses = async (): Promise<void> => {
         const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
@@ -354,7 +357,7 @@ async function main(): Promise<void> {
         // wasn't confirmed on-Ark (or a swap that settled while we were down) is
         // settled here on a later pass, once the vtxo visibly lands. This is also
         // the (M1) crash-window reconcile for interrupted sub-dust sends.
-        const incoming = reconcilePendingIncoming(db, wallet, notify)
+        const incoming = reconcilePendingIncoming(db, wallet, reconcileIndexer, notify)
           .catch((err) => console.error('boltz: pending reconcile failed:', err))
         const receives = reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
           .then((settledHashes) => {
