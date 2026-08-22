@@ -40,6 +40,7 @@ import {
 } from './lib/relay_status'
 import { renderBalanceFragment, renderExitReadinessFragment } from './web/views/dashboard'
 import { renderBreakdownFragment } from './web/views/send'
+import { splitHotPocket } from './wallet_spend'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -373,14 +374,16 @@ async function main(): Promise<void> {
           .catch((err) =>
             console.error('nwc: atomic sub-dust receive reconcile failed:', err),
           )
-        // Send-side resume (§3.4 classifyResume): post-T rows are refunded (the
+        // Send-side resume (§3.4 classifyResume): failed-but-pre-T rows are
+        // unwound through the cancel leaf, post-T rows are refunded (the
         // T-refund executor), crash-orphaned rows reconcile against boltz
         // status. Blocktime lag counts as waiting — the next tick retries.
         const sends = resumeAtomicSends(atomicDeps)
           .then((r) => {
-            if (r.refunded.length || r.claimed.length || r.refundWait.length || r.failed.length) {
+            if (r.refunded.length || r.cancelled.length || r.claimed.length || r.refundWait.length || r.failed.length) {
               console.log(
-                `atomic send resume: refunded=${r.refunded.length} claimed=${r.claimed.length} ` +
+                `atomic send resume: refunded=${r.refunded.length} cancelled=${r.cancelled.length} ` +
+                  `claimed=${r.claimed.length} ` +
                   `refund_wait=${r.refundWait.length} waiting=${r.waiting} failed=${r.failed.length}`,
               )
               for (const f of r.failed) console.error(`atomic send resume ${f.id}:`, f.error)
@@ -521,7 +524,23 @@ async function main(): Promise<void> {
         void autoRefreshPass({
           getVtxos: () => wallet.getVtxos({ withRecoverable: true }),
           getDust: () => arkProvider.getInfo().then((info) => info.dust),
-          settle: () => wallet.settle(),
+          // Consolidate-all folds everything into ONE vtxo; the split then
+          // carves the wear pocket back out so the cold remainder stops being
+          // chained by every small send (wallet_spend.ts). Inside `settle` on
+          // purpose — it must land before onSettled refreshes the caches, and
+          // before the 12h quiet window makes the next chance a day away.
+          settle: async () => {
+            const txid = await wallet.settle()
+            try {
+              await splitHotPocket({ wallet, db, arkInfo: await arkProvider.getInfo() })
+            } catch (err) {
+              // A consolidated wallet with no pocket is still perfectly good —
+              // the next refresh retries, and selection degrades to "spend the
+              // one coin", i.e. exactly the old behaviour.
+              console.warn('auto-refresh: hot pocket split failed (wallet is consolidated):', err)
+            }
+            return txid
+          },
           onSettled: () => {
             void caches.balance.refresh()
             void caches.sendData.refresh()

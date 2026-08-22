@@ -71,6 +71,19 @@ const noRefund = async (): Promise<never> => {
   throw new Error('refund must not be called in this scenario')
 }
 
+// Default cancel stub: boltz declines (older build / still paying / gone). This
+// is the pre-cancel behaviour, so every legacy expectation below must hold
+// under it — the cancel leaf may only ever ADD a recovery, never remove one.
+const noCancel = async (): Promise<never> => {
+  throw new Error('boltz refused the cooperative cancel (unavailable)')
+}
+/** Cancel stub that mirrors what the real one does to the row. */
+const okCancel = (seen: string[]) => async (_d: unknown, id: string) => {
+  seen.push(id)
+  repo.transition(id, 'cancelled')
+  return { txid: 'c'.repeat(64), amount: 351 }
+}
+
 describe('resumeAtomicSends', () => {
   test('post-T refund_wait + boltz gone → refund fires (the T-refund executor)', async () => {
     plantSend('s-refund', 'refund_wait', NOW - 600)
@@ -134,20 +147,89 @@ describe('resumeAtomicSends', () => {
     expect(repo.get('s-poison')?.state).toBe('refunded')
   })
 
-  test('pre-T funded + boltz says failed → moves to refund_wait and waits for T', async () => {
+  test('pre-T funded + boltz says failed, cancel unavailable → refund_wait, waits for T', async () => {
     plantSend('s-failing', 'funded', NOW + 3600)
     stubStatus({ 's-failing': { state: 'failed' } })
-    const r = await resumeAtomicSends(makeDeps(), noRefund)
+    const r = await resumeAtomicSends(makeDeps(), noRefund, spent, noCancel)
     expect(r.refundWait).toEqual(['s-failing'])
+    expect(r.cancelled).toEqual([])
+    expect(r.waiting).toBe(1) // a declined cancel is waiting, never a failure
+    expect(r.failed).toEqual([])
     expect(repo.get('s-failing')?.state).toBe('refund_wait')
   })
 
   test('pre-T + boltz unreachable → waiting, nothing mutated', async () => {
     plantSend('s-quiet', 'ln_inflight', NOW + 3600)
     stubStatus({})
-    const r = await resumeAtomicSends(makeDeps(), noRefund)
+    const r = await resumeAtomicSends(makeDeps(), noRefund, spent, noCancel)
     expect(r.waiting).toBe(1)
     expect(repo.get('s-quiet')?.state).toBe('ln_inflight')
+  })
+
+  // ── cooperative cancel: the funding comes back on failure, not at T ────────
+
+  test('pre-T funded + boltz says failed → unwound in the SAME pass, not next tick', async () => {
+    plantSend('s-unwind', 'funded', NOW + 3600)
+    stubStatus({ 's-unwind': { state: 'failed' } })
+    const seen: string[] = []
+    const r = await resumeAtomicSends(makeDeps(), noRefund, spent, okCancel(seen))
+    expect(seen).toEqual(['s-unwind'])
+    expect(r.cancelled).toEqual(['s-unwind'])
+    expect(repo.get('s-unwind')?.state).toBe('cancelled')
+  })
+
+  test('retro: a row stranded in refund_wait by a pre-cancel build is reclaimed on the next tick', async () => {
+    // Nothing about the row needs migrating — classifyResume simply has an
+    // action for it now. This is the whole answer to "do my stuck swaps clear
+    // themselves once this ships".
+    plantSend('s-stranded', 'refund_wait', NOW + 3600) // pre-T: was a dead wait before
+    stubStatus({})
+    const seen: string[] = []
+    const r = await resumeAtomicSends(makeDeps(), noRefund, spent, okCancel(seen))
+    expect(seen).toEqual(['s-stranded'])
+    expect(r.cancelled).toEqual(['s-stranded'])
+    expect(repo.get('s-stranded')?.state).toBe('cancelled')
+  })
+
+  test('a declined cancel leaves the T-refund intact — same row refunds once T passes', async () => {
+    plantSend('s-fallback', 'refund_wait', NOW + 3600)
+    stubStatus({})
+    const before = await resumeAtomicSends(makeDeps(), noRefund, spent, noCancel)
+    expect(before.cancelled).toEqual([])
+    expect(before.waiting).toBe(1)
+    expect(repo.get('s-fallback')?.state).toBe('refund_wait') // still recoverable
+
+    // …now T elapses (rewrite the row's locktime the way the clock would).
+    db.query('UPDATE atomic_swaps SET refund_locktime = ? WHERE id = ?').run(NOW - 600, 's-fallback')
+    const after = await resumeAtomicSends(
+      makeDeps(),
+      async (_d, id) => {
+        repo.transition(id, 'refunded')
+        return { txid: 'r'.repeat(64), amount: 351 }
+      },
+      spent,
+      noCancel,
+    )
+    expect(after.refunded).toEqual(['s-fallback'])
+  })
+
+  test('operator DM: a successful cancel is announced once as a refund', async () => {
+    plantSend('s-dm-cancel', 'refund_wait', NOW + 3600)
+    stubStatus({})
+    const calls: Array<{ kind: string; text: string }> = []
+    const notify = ((kind: string, build: () => string) => calls.push({ kind, text: build() })) as never
+    // The real cancelAtomicSend owns the DM; the stub stands in for it here.
+    await resumeAtomicSends({ ...makeDeps(), notify }, noRefund, spent, async (d, id) => {
+      repo.transition(id, 'cancelled')
+      ;(d as { notify?: (k: string, b: () => string) => void }).notify?.(
+        'refund',
+        () => 'send: sub-dust cancelled early — 351 sats returned without waiting for T',
+      )
+      return { txid: 'c'.repeat(64), amount: 351 }
+    })
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.kind).toBe('refund')
+    expect(calls[0]!.text).toContain('without waiting for T')
   })
 
   test('blocktime lag (RefundNotYetError) counts as waiting, not failure', async () => {
@@ -288,13 +370,13 @@ describe('resumeAtomicSends', () => {
       notify: ((kind: string, build: () => string) =>
         calls.push({ kind, text: build() })) as never,
     }
-    await resumeAtomicSends(deps, noRefund)
+    await resumeAtomicSends(deps, noRefund, spent, noCancel)
     expect(calls.length).toBe(1)
     expect(calls[0]!.kind).toBe('send-fail')
-    expect(calls[0]!.text).toContain('refundable after T')
+    expect(calls[0]!.text).toContain('reclaiming the funding')
 
     // Still refund_wait pre-T on the next poll — the state gate keeps quiet.
-    await resumeAtomicSends(deps, noRefund)
+    await resumeAtomicSends(deps, noRefund, spent, noCancel)
     expect(calls.length).toBe(1)
   })
 })

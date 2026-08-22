@@ -15,9 +15,10 @@ import {
   classifyResume,
   computeClaimSplit,
   fundShared,
+  isEligibleFundingInput,
+  presignCancel,
   presignClaim,
   refundSpend,
-  selectFundingInputs,
   serverUnrollScript,
   SqliteAtomicSwapRepository,
   SwapDirection,
@@ -28,7 +29,9 @@ import {
 import { boltzFetch } from './boltz_http'
 import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from './ark_util'
 import { captureVtxo, expirySec } from '../exit/proof_sync'
+import { makeExitCostOracle } from '../exit/cost_oracle'
 import { gcOrphanProofs, removeVtxo } from '../exit/vault'
+import { selectSpendInputs } from '../coin_select'
 import type { NotifyFn } from '../nostr/notifier'
 
 // Bridge side of the atomic sub-dust SEND (ARK -> LN). The bridge is the funder
@@ -180,12 +183,16 @@ export async function atomicSubdustSend(
     scripts: [hex.encode(userScript.pkScript)],
     spendableOnly: true,
   })
-  const funding = selectFundingInputs(ownVtxos, {
-    dust,
-    refundLocktime: T,
-    marginSecs: FUNDING_MARGIN_SECS,
-    amount: a + fee,
-  })
+  // Eligibility (regular / spendable / outlasts T) is the vendored rule boltz
+  // shares; WHICH eligible coin to burn is a bridge-only policy, so the
+  // ascending-by-value accumulation is replaced by the exit-cost-aware selector
+  // (coin_select.ts). Whole-input still, so no changeDust: the funding tx
+  // leaves no remainder and the claim split returns V′ − a − fee ≥ dust.
+  const eligibility = { dust, refundLocktime: T, marginSecs: FUNDING_MARGIN_SECS }
+  const funding = selectSpendInputs(
+    ownVtxos.filter((v) => isEligibleFundingInput(v, eligibility).eligible),
+    { target: dust + a + fee, exitCostOf: makeExitCostOracle(deps.db) },
+  )
   if (funding.length === 0) {
     throw new Error(
       `atomic send needs ${a + fee + dust} sats of eligible vtxos (regular, spendable, batch expiry past T+${FUNDING_MARGIN_SECS}s) — ` +
@@ -294,9 +301,30 @@ export async function atomicSubdustSend(
       deps.notify?.(
         'send-fail',
         () =>
-          `send: sub-dust LN pay failed (${fund.error || fund.status}) — funding refundable after T [hash ${paymentHash.slice(0, 8)}]`,
+          `send: sub-dust LN pay failed (${fund.error || fund.status}) — reclaiming the funding [hash ${paymentHash.slice(0, 8)}]`,
       )
-      throw new Error(`atomic send did not complete (${fund.status}): ${fund.error ?? ''} — funds refundable after T`)
+      // Unwind here, while boltz is on the line and has just declared the pay
+      // terminally failed — otherwise V sits locked until T. Best-effort by
+      // construction: any throw below leaves the row in refund_wait exactly as
+      // before, and the T-refund executor is still its backstop.
+      let unwound = false
+      if (fund.status === 'failed') {
+        try {
+          const c = await cancelAtomicSend(deps, init.swapId)
+          unwound = true
+          console.log(
+            `atomic send ${init.swapId}: cooperative cancel returned ${c.amount} sats (arkTx ${c.txid.slice(0, 12)}…)`,
+          )
+        } catch (err) {
+          console.warn(
+            `atomic send ${init.swapId}: cooperative cancel unavailable (${err instanceof Error ? err.message : err}) — refund executor reclaims V at T`,
+          )
+        }
+      }
+      throw new Error(
+        `atomic send did not complete (${fund.status}): ${fund.error ?? ''} — ` +
+          (unwound ? 'funding already returned' : 'funds refundable after T'),
+      )
     }
     // Verify-before-bookkeep (F4): confirm boltz actually spent our funding before
     // terminal-claiming + releasing the vault row. The LN payment already
@@ -383,6 +411,27 @@ async function estimateMtp(esploraUrl: string): Promise<number | undefined> {
 }
 
 /**
+ * Output variants that all return `value` to us but each hash to a DIFFERENT
+ * txid: attempt 0 is the clean single output, then V is split across a regular
+ * + a sub-dust output to OUR OWN address in varying ratios (k = the sub-dust
+ * part). arkd rebuilds a spend deterministically from (input, leaf, outputs),
+ * so `outputs` is the only lever that re-mints a txid — needed because a failed
+ * submit poisons that txid's event stream forever (mainnet false-refund
+ * 2026-07-17, see collaborativeSpend). maxK keeps the regular part ≥ dust.
+ */
+function freshTxidAttempts(ourAddr: ArkAddress, value: number, dust: number): AtomicOutput[][] {
+  const maxK = Math.min(20, value - dust)
+  const attempts: AtomicOutput[][] = [[{ script: ourAddr.pkScript, amount: BigInt(value) }]]
+  for (let k = 1; k <= maxK; k++) {
+    attempts.push([
+      { script: ourAddr.pkScript, amount: BigInt(value - k) },
+      { script: ourAddr.subdustPkScript, amount: BigInt(k) },
+    ])
+  }
+  return attempts
+}
+
+/**
  * Reclaim the full funding V of a send swap through the refund leaf (CLTV T,
  * F+server — no boltz involvement). Callable from the dashboard and the boot
  * refund executor; rebuilds the 4-leaf script from the swap row alone
@@ -458,14 +507,7 @@ export async function refundAtomicSend(
   // varying ratios (k = the sub-dust part). Same total back to us; only the
   // txid changes. This also self-heals a swap already poisoned by a prior
   // build. maxK is bounded by the regular part staying ≥ dust.
-  const maxK = Math.min(20, coin.value - dust)
-  const attempts: AtomicOutput[][] = [[{ script: ourAddr.pkScript, amount: BigInt(coin.value) }]]
-  for (let k = 1; k <= maxK; k++) {
-    attempts.push([
-      { script: ourAddr.pkScript, amount: BigInt(coin.value - k) },
-      { script: ourAddr.subdustPkScript, amount: BigInt(k) },
-    ])
-  }
+  const attempts = freshTxidAttempts(ourAddr, coin.value, dust)
 
   const registered = async (): Promise<boolean> => {
     for (let i = 0; i < 8; i++) {
@@ -517,6 +559,128 @@ export async function refundAtomicSend(
   return { txid: refundTxid, amount: coin.value }
 }
 
+// ── cooperative cancel (cancel leaf: F+C+server, no timelock) ────────────────
+
+export interface AtomicCancelResult {
+  /** cancel arkTxid */
+  txid: string
+  /** full funding value V returned to the wallet */
+  amount: number
+}
+
+/**
+ * Unwind a failed send NOW instead of at T. F pre-signs a full-value spend of
+ * the shared vtxo back to itself over the cancel leaf and asks boltz to
+ * co-sign + submit.
+ *
+ * This is the atomic path's equivalent of the VHTLC's collaborative refund,
+ * which the SDK already takes for regular submarine swaps the moment a pay
+ * fails. Without it a sub-dust failure locks the WHOLE funding vtxo for the
+ * entire send window (72h on mainnet) — and under consolidate-all that vtxo is
+ * the entire balance.
+ *
+ * Trust is unchanged either way: boltz can only co-sign the exact tx we built
+ * (it rebuilds and compares), and a refusal just leaves us on the T-refund we
+ * already had. Cancel and claim spend the SAME outpoint, so a boltz that pays
+ * after reporting failure loses the race — it cannot take the funding and the
+ * LN amount both.
+ */
+export async function cancelAtomicSend(deps: AtomicSendDeps, swapId: string): Promise<AtomicCancelResult> {
+  const repo = new SqliteAtomicSwapRepository(deps.db)
+  const swap = repo.get(swapId)
+  if (!swap) throw new Error(`unknown swap ${swapId}`)
+  if (swap.direction !== SwapDirection.Send) throw new Error('only send swaps are cancellable from this side')
+  if (!['funded', 'ln_inflight', 'refund_wait'].includes(swap.state)) {
+    throw new Error(`swap is ${swap.state} — nothing to cancel`)
+  }
+  if (!swap.fundingOutpoint) throw new Error('swap has no funding outpoint')
+  if (!swap.peerPubkey || swap.exitDelay === undefined) {
+    throw new Error('swap row predates the script-rebuild metadata (peer_pubkey/exit_delay)')
+  }
+
+  const ark = new RestArkProvider(deps.arkServerUrl)
+  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const info = await ark.getInfo()
+  const serverXOnly = toXOnly(hex.decode(info.signerPubkey))
+  const unroll = serverUnrollScript(info.checkpointTapscript)
+  const userXOnly = toXOnly(await deps.wallet.identity.xOnlyPublicKey())
+  const dust = Number(info.dust)
+
+  const script = new AtomicVtxoScript({
+    funder: userXOnly,
+    claimer: toXOnly(hex.decode(swap.peerPubkey)),
+    server: serverXOnly,
+    paymentHash: hex.decode(swap.paymentHash),
+    refundLocktime: BigInt(swap.refundLocktime),
+    exitDelay: BigInt(swap.exitDelay),
+  })
+
+  const [txid, voutStr] = swap.fundingOutpoint.split(':')
+  if (!txid || voutStr === undefined) throw new Error(`bad funding outpoint ${swap.fundingOutpoint}`)
+  const vout = Number(voutStr)
+  const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(script.pkScript)], spendableOnly: true })
+  const coin = vtxos.find((x) => x.txid === txid && x.vout === vout)
+  if (!coin) {
+    throw new Error('shared vtxo not found or already spent — boltz may have claimed after all; check the swap status')
+  }
+
+  const ourAddr = ArkAddress.decode(await deps.wallet.getAddress())
+  const shared: SharedVtxo = { txid, vout, value: coin.value, script }
+
+  // Same poisoned-txid discipline as the T-refund: boltz submits, so an arkd
+  // ACK-without-registration burns that txid for good and only a different
+  // output split re-mints one.
+  const registered = async (): Promise<boolean> => {
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 1000))
+      const { vtxos: check } = await indexer.getVtxos({
+        scripts: [hex.encode(script.pkScript)],
+        spendableOnly: true,
+      })
+      if (!check.some((x) => x.txid === txid && x.vout === vout)) return true
+    }
+    return false
+  }
+
+  let cancelTxid = ''
+  for (const outputs of freshTxidAttempts(ourAddr, coin.value, dust)) {
+    const presigs = await presignCancel(shared, outputs, unroll, deps.wallet.identity)
+    const res = await boltzFetch<{ status: string; cancelTxid?: string; error?: string }>(
+      `${deps.boltzApiUrl}/v2/subdust/atomic/send/cancel`,
+      {
+        swapId,
+        fundingOutpoint: `${txid}:${vout}`,
+        outputs: outputs.map((o) => ({ script: hex.encode(o.script), amount: Number(o.amount) })),
+        presigs,
+      },
+    )
+    if (res.status !== 'cancelled' || !res.cancelTxid) {
+      // boltz declined (still paying / already claimed / not configured) — the
+      // T-refund is untouched, so surface and let the caller fall back.
+      throw new Error(`boltz refused the cooperative cancel (${res.error || res.status})`)
+    }
+    if (await registered()) {
+      cancelTxid = res.cancelTxid
+      break
+    }
+    console.warn(
+      `atomic cancel ${swapId}: ${res.cancelTxid.slice(0, 12)}… ACKed but not registered (poisoned txid) — re-minting`,
+    )
+  }
+  if (!cancelTxid) {
+    throw new Error('cancel never registered across all txid variants (shared vtxo still spendable) — retrying next pass')
+  }
+
+  repo.transition(swapId, 'cancelled')
+  deps.notify?.(
+    'refund',
+    () =>
+      `send: sub-dust cancelled early — ${coin.value} sats returned without waiting for T (arkTx ${cancelTxid.slice(0, 12)}…) [hash ${swap.paymentHash.slice(0, 8)}]`,
+  )
+  releaseVaultRow(deps.db, txid, vout)
+  return { txid: cancelTxid, amount: coin.value }
+}
+
 /**
  * Crash-window recovery (F15): a send row can be left at 'init' with no
  * fundingOutpoint if the bridge died between fundShared and setFundingOutpoint —
@@ -564,6 +728,8 @@ async function recoverFundingOutpoint(
 export interface AtomicSendResumeResult {
   /** swaps whose full V came back through the refund leaf this pass */
   refunded: string[]
+  /** swaps whose full V came back EARLY through the cancel leaf (boltz co-signed) */
+  cancelled: string[]
   /** swaps reconciled to claimed via boltz status (crash after boltz's claim) */
   claimed: string[]
   /** swaps moved to refund_wait (boltz reports the LN pay failed) */
@@ -595,24 +761,58 @@ async function sendStatusSafe(boltzApiUrl: string, swapId: string): Promise<Send
  *   already spent — reconcile that to claimed instead of a doomed refund.
  *   boltz unreachable → straight to refund (that IS the refund scenario).
  * - pre-T (funded/ln_inflight) → poll boltz: claimed lands the terminal
- *   bookkeeping (+ vault release), failed moves to refund_wait for T.
- * - RefundNotYetError (blocktime lag) counts as waiting, not failure.
+ *   bookkeeping (+ vault release), failed moves to refund_wait and is then
+ *   unwound immediately via the cancel leaf (no wait to T).
+ * - pre-T refund_wait → 'cancel'. This is also what retro-clears rows stranded
+ *   by the pre-cancel builds: nothing about them needs migrating, the action
+ *   simply exists now.
+ * - RefundNotYetError (blocktime lag) counts as waiting, not failure. A boltz
+ *   that won't co-sign a cancel is likewise 'waiting', never a failure — the
+ *   T-refund still owns that swap.
  *
- * `refund` is injectable for unit tests — the real one is e2e-proven
- * (atomic_refund_e2e drill).
+ * `refund` / `cancel` are injectable for unit tests — the real ones are
+ * e2e-proven (atomic_refund_e2e drill).
  */
 export async function resumeAtomicSends(
   deps: AtomicSendDeps,
   refund: (d: Omit<AtomicSendDeps, 'boltzApiUrl'>, id: string) => Promise<AtomicRefundResult> = refundAtomicSend,
   // injectable for unit tests; production binds it to the arkd indexer (F4).
   confirmSpent?: (txid: string, vout: number) => Promise<boolean>,
+  cancel: (d: AtomicSendDeps, id: string) => Promise<AtomicCancelResult> = cancelAtomicSend,
 ): Promise<AtomicSendResumeResult> {
   const repo = new SqliteAtomicSwapRepository(deps.db)
   const indexer = new RestIndexerProvider(deps.arkServerUrl)
   const confirm =
     confirmSpent ?? ((txid: string, vout: number): Promise<boolean> => confirmClaimSpent(indexer, txid, vout))
   const nowSecs = BigInt(Math.floor(Date.now() / 1000))
-  const result: AtomicSendResumeResult = { refunded: [], claimed: [], refundWait: [], waiting: 0, failed: [] }
+  const result: AtomicSendResumeResult = {
+    refunded: [],
+    cancelled: [],
+    refundWait: [],
+    claimed: [],
+    waiting: 0,
+    failed: [],
+  }
+
+  // A cancel that boltz declines (still paying, already claimed, endpoint
+  // absent on an older build) is an expected outcome, not an error: the swap
+  // keeps its T-refund and we just count it as still waiting.
+  const tryCancel = async (swapId: string): Promise<boolean> => {
+    try {
+      const c = await cancel(deps, swapId)
+      console.log(
+        `atomic send ${swapId}: cancelled early, ${c.amount} sats back (arkTx ${c.txid.slice(0, 12)}…)`,
+      )
+      result.cancelled.push(swapId)
+      return true
+    } catch (err) {
+      console.warn(
+        `atomic send ${swapId}: cooperative cancel not available (${err instanceof Error ? err.message : err}) — waiting for T`,
+      )
+      result.waiting++
+      return false
+    }
+  }
 
   // Returns true when the swap was actually terminal-claimed, false when boltz's
   // claim couldn't be confirmed on-chain (caller decides what to do with a
@@ -708,16 +908,20 @@ export async function resumeAtomicSends(
             // Gated on the actual transition so repeat polls stay silent.
             deps.notify?.(
               'send-fail',
-              () =>
-                `send: sub-dust LN pay failed — funding refundable after T [hash ${swap.paymentHash.slice(0, 8)}]`,
+              () => `send: sub-dust LN pay failed — reclaiming the funding [hash ${swap.paymentHash.slice(0, 8)}]`,
             )
           }
           result.refundWait.push(swap.id)
+          // Don't wait for the next tick to classify it as 'cancel' — boltz has
+          // just told us the pay is terminally failed, so unwind in this pass.
+          await tryCancel(swap.id)
         } else {
           result.waiting++
         }
+      } else if (action === 'cancel') {
+        await tryCancel(swap.id)
       } else {
-        // wait_refund / none — T not reached, nothing to execute
+        // none — terminal, nothing to execute
         result.waiting++
       }
     } catch (e) {

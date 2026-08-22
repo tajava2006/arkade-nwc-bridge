@@ -86,7 +86,10 @@ function refundable(s: AtomicSwapRow, nowSec: number): boolean {
 
 function stateBadge(s: AtomicSwapRow): RawHtml {
   const terminal = isTerminal(s.direction, s.state)
-  const good = s.state === 'claimed' || s.state === 'settled' || s.state === 'refunded'
+  // 'cancelled' is a cooperative unwind: the full funding came back early, so
+  // it reads green like a refund — the swap failed, the money did not.
+  const good =
+    s.state === 'claimed' || s.state === 'settled' || s.state === 'refunded' || s.state === 'cancelled'
   const color = terminal ? (good ? '#080' : '#c00') : '#b60'
   return html`<span style="color: ${color}; font-weight: ${terminal ? 'normal' : '600'}">${s.state}</span>`
 }
