@@ -4,13 +4,18 @@
 // check-exit-chains finds chains with missing ancestry; this decides WHY, which
 // is the only thing that picks the fix:
 //
-//   * the ancestor shows up now  -> the vault froze a bad capture. proof_sync
-//     never re-fetches a chain it already has ("ancestry is immutable"), so it
-//     cannot self-heal; a forced re-capture repairs it and capture-time
-//     validation prevents the next one.
-//   * the ancestor is still gone -> the indexer itself cannot produce it (its
-//     walk drops parent VTXOs it fails to resolve without erroring), so
-//     re-capturing changes nothing and the gap is upstream.
+//   * the live chain CLOSES  -> the vault froze a bad capture; the bridge's own
+//     re-fetch (proof_sync) repairs it on the next pass.
+//   * the live chain is ALSO broken -> the indexer's walk cannot produce a
+//     closed chain (it drops parent VTXOs it fails to resolve without
+//     erroring), so re-fetching every pass changes nothing and the vtxo is not
+//     unilaterally exitable at all.
+//
+// The verdict is deliberately about the WHOLE live chain, not about the one
+// parent the stored orphan happens to name: pulling that ancestor in moves the
+// boundary, and the newly included tx has a parent of its own that may be the
+// next thing missing. An earlier version of this script asked the narrow
+// question and reported "NOW SERVED" for a chain that was still broken.
 //
 // Read-only against sqlite AND the indexer — it fetches and compares, it never
 // writes. Repairing is a separate, deliberate step.
@@ -25,6 +30,7 @@ import { RestIndexerProvider, type ChainTx } from '@arkade-os/sdk'
 import { loadConfig } from '../src/config'
 import { resolveServerSet } from '../src/server_config'
 import { listVaultVtxos } from '../src/exit/vault'
+import { danglingEntries } from '../src/exit/chain_order'
 
 const argv = process.argv.slice(2)
 const flag = (name: string): string | undefined => {
@@ -107,12 +113,26 @@ for (const v of listVaultVtxos(db)) {
   for (const o of orphans) {
     const wanted = parentsOf(o)
     const found = wanted.filter((p) => liveIds.has(p))
-    const verdict = found.length > 0 ? 'NOW SERVED' : 'STILL MISSING'
-    if (found.length > 0) repairable++
-    else upstream++
     console.log(
-      `  ${short(o.type).padEnd(10)} ${brief(o.txid)} needs ${wanted.map(brief).join(', ')} -> ${verdict}`,
+      `  stored orphan ${short(o.type).padEnd(10)} ${brief(o.txid)} needs ${wanted.map(brief).join(', ')}` +
+        ` -> ${found.length > 0 ? 'present in the live chain' : 'absent from the live chain too'}`,
     )
+  }
+
+  // THE question, and it is not "is that one parent served". Adding an
+  // ancestor moves the boundary: the newly included tx has its own parent,
+  // which may be the next thing missing. Only a live chain that CLOSES can
+  // repair anything, so ask about the whole chain.
+  const liveDangling = danglingEntries(live)
+  if (liveDangling.length === 0) {
+    repairable++
+    console.log(`  live chain is WHOLE -> re-capture repairs this vtxo`)
+  } else {
+    upstream++
+    console.log(`  live chain is ALSO BROKEN (${liveDangling.length} dangling) -> re-capture cannot fix it`)
+    for (const d of liveDangling) {
+      console.log(`    ${short(d.type).padEnd(10)} ${brief(d.txid)} needs ${parentsOf(d).map(brief).join(', ')}`)
+    }
   }
 
   // A live chain that is larger and a strict superset is the clearest possible
@@ -125,10 +145,15 @@ for (const v of listVaultVtxos(db)) {
 }
 
 console.log('='.repeat(70))
-console.log(`orphan parents now served by the indexer : ${repairable}  <- re-capture repairs these`)
-console.log(`orphan parents still missing            : ${upstream}  <- indexer-side gap, re-capture won't help`)
-if (repairable > 0 && upstream === 0) {
-  console.log(`\nEvery gap is a stale capture. The fix is a forced re-capture of the\noutpoints above plus connectivity validation at capture time.`)
-} else if (upstream > 0) {
-  console.log(`\nAt least one ancestor the indexer itself will not produce. Capture the\nrequest/response for that outpoint before reporting upstream.`)
+console.log(`live chain WHOLE   : ${repairable}  <- re-fetching repairs these`)
+console.log(`live chain BROKEN  : ${upstream}  <- the indexer can't produce a closed chain; re-fetching won't help`)
+if (upstream > 0) {
+  console.log(
+    `\nThe indexer's own walk does not close for the outpoint(s) above, so the\n` +
+      `bridge re-fetching on every pass changes nothing. Those vtxos are not\n` +
+      `unilaterally exitable: move the funds while the ASP still answers (Refresh,\n` +
+      `or an onchain send from the Send tab) and report the walk upstream.`,
+  )
+} else if (repairable > 0) {
+  console.log(`\nEvery gap is a stale capture — a restart (or the next sync pass) repairs it.`)
 }

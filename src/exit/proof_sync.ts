@@ -271,6 +271,21 @@ export async function syncProofs(
       // recomputed from proofs, and the next pass only refetches the gap.
       storeVtxoWithProofs(db, toSnapshot(v, chain), proofs)
 
+      // Say whether the re-fetch actually HEALED it. Logging only the attempt
+      // reads as success and hides the case that matters: the indexer's own
+      // walk doesn't close either, so re-fetching every pass changes nothing
+      // and the vtxo stays unexitable (F22).
+      if (existing && !storedIsWhole) {
+        const stillDangling = danglingEntries(chain)
+        console.warn(
+          stillDangling.length === 0
+            ? `exit vault: ${key} ancestry repaired from the indexer`
+            : `exit vault: ${key} STILL broken after re-fetching — the indexer's chain doesn't ` +
+              `close either (${stillDangling.length} dangling: ${stillDangling.map((c: ChainTx) => c.txid).join(', ')}). ` +
+              `Not unilaterally exitable; move the funds while the ASP answers.`,
+        )
+      }
+
       if (unserved.length > 0) {
         result.failed.push({
           outpoint: key,
