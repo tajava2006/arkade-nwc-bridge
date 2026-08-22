@@ -22,6 +22,7 @@
 //
 // Usage:
 //   bun run recheck-exit-chain [db.sqlite] [--url http://arkd:7070] [--outpoint txid:vout]
+//   bun run recheck-exit-chain [db.sqlite] --repeat 5      # is the walk deterministic?
 import '../src/polyfills'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -58,11 +59,22 @@ const arkUrl = flag('--url') ?? resolveServerSet(db).arkServerUrl
 const only = flag('--outpoint')
 const indexer = new RestIndexerProvider(arkUrl)
 
-// Mirrors proof_sync.fetchChain — same page walk, so a difference here is the
-// indexer's answer changing, not a different way of asking.
+/**
+ * The chain in ONE request, exactly as proof_sync now asks for it: no page
+ * parameters, so arkd runs a single walk and returns all of it.
+ */
+async function fetchChain(txid: string, vout: number): Promise<ChainTx[]> {
+  return (await indexer.getVtxoChain({ txid, vout })).chain
+}
+
+/**
+ * The old paged fetch, kept purely to show what it costs. arkd re-runs the
+ * whole walk per page request and slices it, so this stitches together pieces
+ * of N independent walks.
+ */
 const MAX_PAGES = 50
 const PAGE_SIZE = 100
-async function fetchChain(txid: string, vout: number): Promise<ChainTx[]> {
+async function fetchChainPaged(txid: string, vout: number): Promise<ChainTx[]> {
   const chain: ChainTx[] = []
   let pageIndex = 0
   for (let i = 0; i < MAX_PAGES; i++) {
@@ -72,6 +84,14 @@ async function fetchChain(txid: string, vout: number): Promise<ChainTx[]> {
     pageIndex = res.page.next
   }
   return chain
+}
+
+/** Fingerprint a chain so repeated walks can be compared at a glance. */
+function fingerprint(chain: ChainTx[]): string {
+  const ids = [...new Set(chain.map((c) => c.txid))].sort()
+  let h = 0
+  for (const c of ids.join('')) h = (h * 31 + c.charCodeAt(0)) | 0
+  return `${chain.length}/${ids.length}:${(h >>> 0).toString(16).padStart(8, '0')}`
 }
 
 const brief = (t: string): string => `${t.slice(0, 12)}…`
@@ -84,6 +104,45 @@ const parentsOf = (c: ChainTx): string[] =>
 
 console.log(`indexer: ${arkUrl}`)
 console.log(`sqlite : ${dbPath}\n`)
+
+// --repeat N: ask the indexer for the SAME chain N times and compare. A walk
+// that is deterministic answers identically every time; anything else is an
+// indexer-side bug and this is the reproduction to hand upstream. Also fetches
+// once the old paged way, to show what stitching slices of separate walks did.
+const repeat = Number(flag('--repeat') ?? 0)
+if (repeat > 1) {
+  for (const v of listVaultVtxos(db)) {
+    const key = `${v.txid}:${v.vout}`
+    if (only && only !== key) continue
+    console.log(`${brief(v.txid)}:${v.vout}  ${v.valueSat.toLocaleString()} sats`)
+    const prints = new Set<string>()
+    for (let i = 0; i < repeat; i++) {
+      try {
+        const c = await fetchChain(v.txid, v.vout)
+        const fp = fingerprint(c)
+        prints.add(fp)
+        console.log(`  walk ${i + 1}: ${fp}  dangling=${danglingEntries(c).length}`)
+      } catch (err) {
+        console.log(`  walk ${i + 1}: failed — ${err instanceof Error ? err.message : err}`)
+      }
+    }
+    console.log(
+      prints.size === 1
+        ? `  -> ${repeat} single-request walks AGREE (deterministic)`
+        : `  -> ${prints.size} DIFFERENT answers across ${repeat} identical requests (non-deterministic walk)`,
+    )
+    try {
+      const paged = await fetchChainPaged(v.txid, v.vout)
+      console.log(
+        `  paged fetch (3 walks stitched): ${fingerprint(paged)}  dangling=${danglingEntries(paged).length}`,
+      )
+    } catch (err) {
+      console.log(`  paged fetch failed — ${err instanceof Error ? err.message : err}`)
+    }
+    console.log()
+  }
+  process.exit(0)
+}
 
 let repairable = 0
 let upstream = 0

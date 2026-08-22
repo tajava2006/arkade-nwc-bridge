@@ -98,16 +98,25 @@ export interface ProofSyncResult {
 const MAX_PAGES = 50
 const PAGE_SIZE = 100
 
+/**
+ * The chain in ONE request. Never page this.
+ *
+ * arkd's page-number path re-runs the entire walk per request and slices the
+ * result (indexer.go GetVtxoChain), so asking for pages 1..N stitches together
+ * slices of N INDEPENDENT walks. Any variation between those walks — and the
+ * mainnet walk does vary, see F22 — produces a chain whose parts came from
+ * different graphs and therefore cannot close, no matter how healthy each
+ * individual walk was. We were manufacturing the very breakage the vault then
+ * froze.
+ *
+ * Omitting the page parameters entirely makes arkd return the whole chain from
+ * a single walk (parsePage(nil) -> nil -> the uncapped legacy path), which is
+ * both atomic and cheaper. Paged fetching is kept only for the proof PSBTs
+ * below, where each item is independent and stitching is harmless.
+ */
 async function fetchChain(indexer: ProofSyncIndexer, outpoint: Outpoint): Promise<ChainTx[]> {
-  const chain: ChainTx[] = []
-  let pageIndex = 0
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const res = await indexer.getVtxoChain(outpoint, { pageIndex, pageSize: PAGE_SIZE })
-    chain.push(...res.chain)
-    if (!res.page || res.page.next <= res.page.current) break
-    pageIndex = res.page.next
-  }
-  return chain
+  const res = await indexer.getVtxoChain(outpoint)
+  return res.chain
 }
 
 /**

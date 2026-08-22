@@ -128,7 +128,11 @@ function makeFake(opts: FakeOpts) {
     async getVtxoChain(outpoint, o) {
       chainCalls++
       const chain = opts.chains[`${outpoint.txid}:${outpoint.vout}`] ?? []
-      const { slice, page } = paginate(chain, opts.chainPageSize ?? 100, o?.pageIndex ?? 0)
+      // Mirrors arkd: no page params -> the whole chain from ONE walk
+      // (parsePage(nil) -> nil). Paging it would slice a fresh walk per
+      // request, which is exactly the stitching F22 traced the breakage to.
+      if (!o) return { chain }
+      const { slice, page } = paginate(chain, opts.chainPageSize ?? 100, o.pageIndex ?? 0)
       return { chain: slice, page }
     },
     async getVirtualTxs(txids, o) {
@@ -159,18 +163,20 @@ describe('proof sync', () => {
     temp.cleanup()
   })
 
-  test('new vtxo: paged chain + paged proofs land in the vault, ready', async () => {
+  test('new vtxo: whole chain in one request + paged proofs land in the vault, ready', async () => {
     const fake = makeFake({
       chains: { [`${ark.txid}:0`]: chainOf(ark) },
       txs: allTxs(),
-      chainPageSize: 2, // 4 chain entries → 2 pages
-      txPageSize: 2, // 3 proofs → 2 pages
+      chainPageSize: 2, // would be 2 pages IF the chain were paged — it must not be
+      txPageSize: 2, // 3 proofs → 2 pages; proofs are independent, paging them is fine
     })
     const res = await syncProofs(temp.db, fake.indexer, [vtxoOf(ark)], PUBKEY)
 
     expect(res.synced).toEqual([`${ark.txid}:0`])
     expect(res.failed).toEqual([])
-    expect(fake.chainCalls()).toBe(2)
+    // ONE call: arkd re-walks per page request, so stitching pages glues
+    // slices of different walks together (F22).
+    expect(fake.chainCalls()).toBe(1)
     expect(isVtxoExitReady(temp.db, ark.txid, 0)).toBe(true)
     const stored = getVaultVtxo(temp.db, ark.txid, 0)!
     expect(stored.chain).toHaveLength(4)
