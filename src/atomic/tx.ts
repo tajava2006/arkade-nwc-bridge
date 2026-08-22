@@ -69,18 +69,33 @@ export interface ClaimPair {
 }
 
 /**
- * Build the claim pair (checkpoint + arkTx) that spends the shared vtxo via its
- * claim leaf into the split outputs. Fully determined by (input, outputs,
- * serverUnrollScript), so both F (presigning) and C (claiming) rebuild the
- * byte-identical pair — that determinism is what makes the presig verifiable.
+ * Build the presignable pair (checkpoint + arkTx) that spends the shared vtxo
+ * via `leaf` into `outputs`. Fully determined by (input, leaf, outputs,
+ * serverUnrollScript), so both signers rebuild the byte-identical pair — that
+ * determinism is what makes a presig verifiable.
  */
-export function buildClaimPair(shared: SharedVtxo, outputs: AtomicOutput[], unroll: CSVMultisigTapscript.Type): ClaimPair {
-  const { arkTx, checkpoints } = buildOffchainTx([arkInput(shared, shared.script.claim())], outputs, unroll)
+function buildPair(
+  shared: SharedVtxo,
+  leaf: TapLeafScript,
+  outputs: AtomicOutput[],
+  unroll: CSVMultisigTapscript.Type,
+): ClaimPair {
+  const { arkTx, checkpoints } = buildOffchainTx([arkInput(shared, leaf)], outputs, unroll)
   const [checkpoint] = checkpoints
   if (checkpoints.length !== 1 || !checkpoint) {
-    throw new Error(`atomic claim pair must have exactly 1 checkpoint, got ${checkpoints.length}`)
+    throw new Error(`atomic pair must have exactly 1 checkpoint, got ${checkpoints.length}`)
   }
   return { arkTx, checkpoint }
+}
+
+/** The claim pair: shared vtxo → split outputs via the claim leaf (preimage). */
+export function buildClaimPair(shared: SharedVtxo, outputs: AtomicOutput[], unroll: CSVMultisigTapscript.Type): ClaimPair {
+  return buildPair(shared, shared.script.claim(), outputs, unroll)
+}
+
+/** The cancel pair: shared vtxo → F's outputs via the cancel leaf (no timelock). */
+export function buildCancelPair(shared: SharedVtxo, outputs: AtomicOutput[], unroll: CSVMultisigTapscript.Type): ClaimPair {
+  return buildPair(shared, shared.script.cancel(), outputs, unroll)
 }
 
 // ── presign (funder) ─────────────────────────────────────────────────────────
@@ -90,6 +105,13 @@ export interface AtomicPresig {
   arkTx: string
   /** base64 PSBT of the checkpoint carrying F's tapscript sig. */
   checkpoint: string
+}
+
+async function presignPair(pair: ClaimPair, funder: Identity): Promise<AtomicPresig> {
+  return {
+    arkTx: encodePsbt(await funder.sign(pair.arkTx)),
+    checkpoint: encodePsbt(await funder.sign(pair.checkpoint)),
+  }
 }
 
 /**
@@ -102,11 +124,27 @@ export async function presignClaim(
   unroll: CSVMultisigTapscript.Type,
   funder: Identity,
 ): Promise<AtomicPresig> {
-  const { arkTx, checkpoint } = buildClaimPair(shared, outputs, unroll)
-  return {
-    arkTx: encodePsbt(await funder.sign(arkTx)),
-    checkpoint: encodePsbt(await funder.sign(checkpoint)),
-  }
+  return presignPair(buildClaimPair(shared, outputs, unroll), funder)
+}
+
+/**
+ * Funder pre-signs the COOPERATIVE CANCEL pair — the early-unwind counterpart
+ * of the claim presig. F hands these to C, which co-signs only once its LN
+ * payment has terminally failed, returning the whole funding immediately
+ * instead of after T (the vHTLC's collaborative-refund leaf does the same job
+ * for regular swaps; the 3-day wait was this path being unwired).
+ *
+ * Atomicity is untouched: cancel and claim spend the SAME outpoint, so at most
+ * one can ever land. The entire discipline lives on C's side — never co-sign
+ * while an HTLC could still settle.
+ */
+export async function presignCancel(
+  shared: SharedVtxo,
+  outputs: AtomicOutput[],
+  unroll: CSVMultisigTapscript.Type,
+  funder: Identity,
+): Promise<AtomicPresig> {
+  return presignPair(buildCancelPair(shared, outputs, unroll), funder)
 }
 
 // ── verify-before-act (claimer) ──────────────────────────────────────────────
@@ -130,7 +168,29 @@ export function verifyPresig(
   presig: AtomicPresig,
   funderXOnly: Uint8Array,
 ): VerifiedPresig {
-  const { arkTx, checkpoint } = buildClaimPair(shared, outputs, unroll)
+  return verifyPair(buildClaimPair(shared, outputs, unroll), presig, funderXOnly)
+}
+
+/**
+ * Same verify-before-act on the CANCEL pair. C rebuilds from its own row and
+ * refuses anything that isn't the exact tx it expects — so a funder can't
+ * smuggle a different spend in behind a cancel request.
+ */
+export function verifyCancelPresig(
+  shared: SharedVtxo,
+  outputs: AtomicOutput[],
+  unroll: CSVMultisigTapscript.Type,
+  presig: AtomicPresig,
+  funderXOnly: Uint8Array,
+): VerifiedPresig {
+  return verifyPair(buildCancelPair(shared, outputs, unroll), presig, funderXOnly)
+}
+
+function verifyPair(
+  { arkTx, checkpoint }: ClaimPair,
+  presig: AtomicPresig,
+  funderXOnly: Uint8Array,
+): VerifiedPresig {
   const funderArkTx = decodePsbt(presig.arkTx)
   const funderCheckpoint = decodePsbt(presig.checkpoint)
   if (funderArkTx.id !== arkTx.id) {
@@ -180,10 +240,39 @@ export async function finishClaim(
   ark: ArkProvider,
 ): Promise<string> {
   const v = verifyPresig(shared, outputs, unroll, presig, shared.script.options.funder)
-  const signer = withPreimage(claimer, preimage)
+  return finishPresigned(v, withPreimage(claimer, preimage), ark)
+}
 
-  // arkTx: C signs (sets preimage), then merge F's presig ONTO C's tx so the
-  // ConditionWitness (only on C's copy) survives to submit.
+/**
+ * C completes the COOPERATIVE CANCEL: verify F's cancel presig, add C's sig,
+ * submit + finalize. No preimage — the cancel leaf is a plain F+C+server
+ * multisig — and no split: `outputs` is F's own full-value unwind.
+ *
+ * MUST NOT be called while the LN payment could still settle. Signing here
+ * while an HTLC is live would let C pay AND lose the funding; the caller's
+ * gate (a terminal LND failure) is the whole safety argument.
+ */
+export async function finishCancel(
+  shared: SharedVtxo,
+  outputs: AtomicOutput[],
+  unroll: CSVMultisigTapscript.Type,
+  presig: AtomicPresig,
+  claimer: Identity,
+  ark: ArkProvider,
+): Promise<string> {
+  const v = verifyCancelPresig(shared, outputs, unroll, presig, shared.script.options.funder)
+  return finishPresigned(v, claimer, ark)
+}
+
+/**
+ * Shared completion for a presigned pair: C signs, F's presig is merged on,
+ * the server co-signs the checkpoint at submit, then every sig is re-attached
+ * to C's copy for finalize. Returns the arkTxid.
+ */
+async function finishPresigned(v: VerifiedPresig, signer: Identity, ark: ArkProvider): Promise<string> {
+  // arkTx: C signs (the claim signer also sets the preimage), then merge F's
+  // presig ONTO C's tx so the ConditionWitness (only on C's copy) survives to
+  // submit.
   const arkC = await signer.sign(v.arkTx)
   combineTapscriptSigs(v.funderArkTx, arkC)
 

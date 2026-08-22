@@ -34,8 +34,12 @@ export type AtomicSwapState = SendState | ReceiveState
 const SEND_TRANSITIONS: Record<SendState, readonly SendState[]> = {
   init: ['funded', 'cancelled', 'failed'],
   funded: ['ln_inflight', 'refund_wait', 'cancelled', 'failed'],
-  ln_inflight: ['claimed', 'refund_wait', 'failed'],
-  refund_wait: ['refunded', 'failed'],
+  // `cancelled` is reachable from every pre-claim state, refund_wait included:
+  // a terminally-failed LN pay is exactly when the cooperative unwind applies,
+  // and that verdict usually lands only after the row is already in
+  // refund_wait. Leaving it out was what forced the full wait to T.
+  ln_inflight: ['claimed', 'refund_wait', 'cancelled', 'failed'],
+  refund_wait: ['refunded', 'cancelled', 'failed'],
   claimed: [],
   refunded: [],
   cancelled: [],
@@ -86,7 +90,7 @@ export type ResumeAction =
   | 'none' // terminal — nothing to do
   | 'poll' // keep watching the counterparty for the next transition
   | 'refund' // send: T elapsed → run the refund executor now
-  | 'wait_refund' // send: refund_wait but T not yet reached
+  | 'cancel' // send: LN failed but T not reached → ask C to co-sign the unwind
   | 'retry_claim' // receive: funded but not yet claimed → re-attempt the claim
   | 'retry_settle' // receive: claimed but settle call unconfirmed → re-send it
   | 'wait_settle' // receive: refund_wait → boltz refunds the payer, just observe
@@ -108,7 +112,10 @@ export function classifyResume(input: ResumeInput): ResumeAction {
   if (direction === SwapDirection.Send) {
     switch (state as SendState) {
       case 'refund_wait':
-        return tElapsed ? 'refund' : 'wait_refund'
+        // Pre-T is NOT a dead wait: boltz has already declared the LN pay
+        // terminally failed, so the cancel leaf can unwind the funding now.
+        // The T-refund stays the fallback for when boltz won't co-sign.
+        return tElapsed ? 'refund' : 'cancel'
       case 'funded':
       case 'ln_inflight':
         // If T has already passed with no claim, reclaim; else keep watching.

@@ -35,6 +35,15 @@ describe('state machine — transitions', () => {
     expect(canTransition(SEND, 'funded', 'refund_wait')).toBe(true)
     expect(canTransition(SEND, 'refund_wait', 'refunded')).toBe(true)
   })
+  test('send cancel path is reachable from every pre-claim state', () => {
+    // refund_wait especially: boltz only declares the pay terminally failed
+    // after the row is already there, so a machine that forbade it forced the
+    // full wait to T even though the cancel leaf was sitting right there.
+    for (const s of ['init', 'funded', 'ln_inflight', 'refund_wait'] as const) {
+      expect(canTransition(SEND, s, 'cancelled')).toBe(true)
+    }
+    expect(canTransition(SEND, 'claimed', 'cancelled')).toBe(false) // boltz already took a
+  })
   test('receive happy path invoice_issued→funded→claimed→settled', () => {
     expect(canTransition(RECEIVE, 'invoice_issued', 'funded')).toBe(true)
     expect(canTransition(RECEIVE, 'funded', 'claimed')).toBe(true)
@@ -62,9 +71,11 @@ describe('state machine — transitions', () => {
 describe('boot resume classification', () => {
   const T = 1_000_000n
 
-  test('send: refund_wait refunds once T elapses, waits before', () => {
+  test('send: refund_wait refunds once T elapses, cooperatively cancels before', () => {
     expect(classifyResume({ direction: SEND, state: 'refund_wait', refundLocktime: T, nowSecs: T + 1n })).toBe('refund')
-    expect(classifyResume({ direction: SEND, state: 'refund_wait', refundLocktime: T, nowSecs: T - 1n })).toBe('wait_refund')
+    // Pre-T is the whole point of the cancel leaf: the LN pay already failed,
+    // so there is no reason to sit on the funding until T.
+    expect(classifyResume({ direction: SEND, state: 'refund_wait', refundLocktime: T, nowSecs: T - 1n })).toBe('cancel')
   })
   test('send: funded/ln_inflight poll before T, refund after T', () => {
     expect(classifyResume({ direction: SEND, state: 'funded', refundLocktime: T, nowSecs: T - 1n })).toBe('poll')
