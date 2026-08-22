@@ -39,6 +39,43 @@ export interface ChainGraph {
   edges: ChainEdge[]
 }
 
+/**
+ * Ancestor txids a chain entry names, normalized into the chain's own id
+ * space. THE one place that knows the edge quirks — checkpoints name their
+ * parent as an outpoint, blanks mean "nothing named", self-references are
+ * noise — so the DAG layout and the completeness check can never disagree
+ * about what an edge is.
+ */
+export function parentTxids(tx: ChainTx): string[] {
+  return [
+    ...new Set(
+      (tx.spends ?? [])
+        .filter((s) => s.trim().length > 0)
+        .map((s) => s.split(':')[0]!)
+        .filter((txid) => txid !== tx.txid),
+    ),
+  ]
+}
+
+/**
+ * Entries that name at least one ancestor, none of which is in the chain —
+ * i.e. the ancestry is BROKEN, not merely short. Such a chain cannot be
+ * unrolled: the missing tx has no stored PSBT either (proofs are only fetched
+ * for txs the chain lists), so the spend that needs it can never be
+ * broadcast. A commitment naming nothing is a root, not a dangle.
+ *
+ * Observed on mainnet 2026-08-22 on two of three vault vtxos, both captured
+ * against an older indexer and then frozen by proof_sync's "ancestry is
+ * immutable" short-circuit — see SUBDUST_ATOMIC_SECURITY_REVIEW.md F22.
+ */
+export function danglingEntries(chain: ChainTx[]): ChainTx[] {
+  const present = new Set(chain.map((c) => c.txid))
+  return chain.filter((tx) => {
+    const parents = parentTxids(tx)
+    return parents.length > 0 && !parents.some((p) => present.has(p))
+  })
+}
+
 export function chainGraph(chain: ChainTx[]): ChainGraph {
   const nodes: ChainTx[] = []
   const seen = new Set<string>()
@@ -50,12 +87,10 @@ export function chainGraph(chain: ChainTx[]): ChainGraph {
 
   const parents = new Map<string, string[]>()
   for (const tx of nodes) {
-    const ps = new Set(
-      (tx.spends ?? [])
-        .map((s) => s.split(':')[0]!)
-        .filter((txid) => txid !== tx.txid && seen.has(txid)),
+    parents.set(
+      tx.txid,
+      parentTxids(tx).filter((txid) => seen.has(txid)),
     )
-    parents.set(tx.txid, [...ps])
   }
 
   // Topological pass (Kahn, wave by wave) purely to resolve parents before

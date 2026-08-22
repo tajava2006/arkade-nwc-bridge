@@ -61,6 +61,10 @@ export interface ExitStepper {
   valueSat: number
   op: ExitOp | null
   proofComplete: boolean
+  /** false = the stored chain names an ancestor it doesn't contain (F22) */
+  ancestryComplete: boolean
+  /** the ONLY thing the exit button may gate on: proofs stored AND ancestry whole */
+  exitable: boolean
   /** broadcast DAG, layered: levels[0] = the commitments … last = the vtxo tx */
   levels: BroadcastStep[][]
   /** parent → child spend edges, for drawing the DAG */
@@ -166,6 +170,8 @@ export function buildExitStepper(
     valueSat: vtxo.valueSat,
     op,
     proofComplete: est?.proofComplete ?? false,
+    ancestryComplete: est?.ancestryComplete ?? false,
+    exitable: (est?.proofComplete ?? false) && (est?.ancestryComplete ?? false),
     levels,
     edges: graph.edges,
     wait: waitStep,

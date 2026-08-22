@@ -20,6 +20,8 @@ const baseStepper = (over: Partial<ExitStepper> = {}): ExitStepper => ({
   valueSat: 10_000,
   op: null,
   proofComplete: true,
+  ancestryComplete: true,
+  exitable: true,
   levels: [
     [{ kind: 'broadcast', txid: 'c'.repeat(64), txType: ChainTxType.COMMITMENT, vsize: null, status: 'confirmed' }],
     [{ kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'pending' }],
@@ -49,6 +51,7 @@ const estimate = (over: Partial<ExitEstimate> = {}): ExitEstimate => ({
   feePctOfValue: 7,
   uneconomical: false,
   proofComplete: true,
+  ancestryComplete: true,
   ...over,
 })
 
@@ -92,9 +95,35 @@ describe('exit controls (view)', () => {
   })
 
   test('incomplete proofs disable the Start button', () => {
-    const html = render(baseStepper({ proofComplete: false }), estimate(), 5_000)
+    const html = render(
+      baseStepper({ proofComplete: false, exitable: false }),
+      estimate({ proofComplete: false }),
+      5_000,
+    )
     expect(html).toContain('disabled')
     expect(html).toContain('proofs incomplete')
+  })
+
+  // F22: a chain that names an ancestor it doesn't contain is unexitable no
+  // matter how many PSBTs are stored — proof completeness can only speak about
+  // txs the chain lists, which is exactly how two mainnet vtxos sat broken for
+  // months behind a green button.
+  test('broken ancestry disables the Start button even when every proof is stored', () => {
+    const html = render(
+      baseStepper({ proofComplete: true, ancestryComplete: false, exitable: false }),
+      estimate({ proofComplete: true, ancestryComplete: false }),
+      5_000,
+    )
+    expect(html).toContain('disabled')
+    expect(html).toContain('missing an ancestor')
+    expect(html).toContain('ancestry broken')
+    expect(html).not.toContain('proofs incomplete')
+  })
+
+  test('whole chain + every proof stored leaves the button live', () => {
+    const html = render(baseStepper(), estimate(), 5_000)
+    expect(html).not.toContain('disabled')
+    expect(html).not.toContain('ancestry broken')
   })
 
   test('uneconomical exit carries the loses-money warning', () => {

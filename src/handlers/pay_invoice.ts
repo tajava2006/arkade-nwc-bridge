@@ -5,7 +5,7 @@ import type { Wallet } from '@arkade-os/sdk'
 import { cycleSpentMsat } from '../lib/budget'
 import { NwcError } from '../lib/errors'
 import { recordNwcLn } from '../history'
-import { sendLightning } from '../ln_send'
+import { sendLightning, type LnSendDeps } from '../ln_send'
 import { satsToMsats } from '../lib/msat'
 import type { Connection } from '../nostr/connections'
 import type { NotifyFn } from '../nostr/notifier'
@@ -27,6 +27,8 @@ export interface PayInvoiceDeps {
    * itself never calls it — only the atomic sub-dust path underneath does.
    */
   notify?: NotifyFn
+  /** Forwarded to sendLightning — see LnSendDeps.getArkInfo. */
+  getArkInfo?: LnSendDeps['getArkInfo']
 }
 
 export async function handlePayInvoice(
@@ -117,6 +119,7 @@ export async function handlePayInvoice(
         arkServerUrl: deps.arkServerUrl,
         db: deps.db,
         notify: deps.notify,
+        getArkInfo: deps.getArkInfo,
         // R1: link the ledger row to the swap the instant it's created, so a
         // crash during the long settlement wait still recovers on restart
         // (SwapManager resume → syncSwapToDb) instead of leaving a permanent

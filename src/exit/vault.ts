@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import { ChainTxType, type ChainTx } from '@arkade-os/sdk'
+import { danglingEntries } from './chain_order'
 
 // Offline half of unilateral exit (EXIT_PLAN.md §3). While the ASP is alive,
 // ProofSync mirrors every live vtxo's pre-signed tx chain into the two v10
@@ -247,11 +248,19 @@ export function missingProofTxids(db: Database, chain: ChainTx[]): string[] {
   return wanted.filter((txid) => !stored.has(txid))
 }
 
-/** True when every proof the vtxo's chain needs is stored — i.e. exitable offline right now. */
+/**
+ * True when the vtxo is exitable offline right now: every proof its chain
+ * needs is stored AND the chain's ancestry is unbroken.
+ *
+ * The second half is not redundant. Proof completeness can only speak about
+ * txs the stored chain lists, so a chain captured with a hole passes it while
+ * being unexitable — two of three mainnet vtxos sat like that until 2026-08-22
+ * (F22). Whatever gates an exit has to ask both questions.
+ */
 export function isVtxoExitReady(db: Database, txid: string, vout: number): boolean {
   const vtxo = getVaultVtxo(db, txid, vout)
   if (!vtxo) return false
-  return missingProofTxids(db, vtxo.chain).length === 0
+  return missingProofTxids(db, vtxo.chain).length === 0 && danglingEntries(vtxo.chain).length === 0
 }
 
 /**

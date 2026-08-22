@@ -8,6 +8,7 @@ import {
   type ChainTx,
 } from '@arkade-os/sdk'
 import { getProofPsbts, getVaultVtxo, proofTxidsOf } from './vault'
+import { danglingEntries } from './chain_order'
 
 // Exit cost, computed offline from the vault (EXIT_PLAN #11): the stored
 // PSBTs are finalized in memory with the exact rules Unroll.Session applies,
@@ -48,6 +49,16 @@ export interface ExitEstimate {
   uneconomical: boolean
   /** false = some proofs were never mirrored; the numbers cover only what's stored */
   proofComplete: boolean
+  /**
+   * false = the stored chain names an ancestor it does not contain, so the
+   * ancestry is broken and no amount of stored PSBTs makes it exitable.
+   *
+   * Distinct from proofComplete on purpose: that one can only see txs the
+   * chain already lists, which is exactly why a chain captured with a hole
+   * reported itself complete for months (F22, mainnet 2026-08-22). Anything
+   * that gates an exit must require BOTH.
+   */
+  ancestryComplete: boolean
 }
 
 // Output size depends only on the script shape; a zeroed P2TR script stands
@@ -171,5 +182,6 @@ export function estimateExit(
     feePctOfValue: vtxo.valueSat > 0 ? Math.round((totalFeeSat / vtxo.valueSat) * 100) : Infinity,
     uneconomical: totalFeeSat >= vtxo.valueSat,
     proofComplete,
+    ancestryComplete: danglingEntries(vtxo.chain).length === 0,
   }
 }

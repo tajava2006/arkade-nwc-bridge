@@ -7,6 +7,7 @@ import {
   getVaultVtxo,
   isVtxoExitReady,
   listVaultVtxos,
+  missingProofTxids,
   vaultStats,
 } from '../../src/exit/vault'
 import { captureVtxo, syncProofs, type ProofSyncIndexer } from '../../src/exit/proof_sync'
@@ -193,6 +194,34 @@ describe('proof sync', () => {
     expect(res.skipped).toBe(1) // ark: already complete, zero fetches
     expect(res.synced).toEqual([`${ark2.txid}:0`])
     expect(fake2.virtualTxCalls).toEqual([[ark2.txid]]) // shared branch never refetched
+  })
+
+  // F22: "ancestry is immutable" is true of the ancestry, not of our copy. A
+  // chain captured with a hole used to be frozen forever — proof completeness
+  // can't see a tx the chain never listed, so the skip below fired every pass
+  // and nothing ever re-asked. Two of three mainnet vtxos sat unexitable like
+  // that behind a green Start button.
+  test('a stored chain with broken ancestry is re-fetched, not skipped', async () => {
+    const fake = makeFake({ chains: { [`${ark.txid}:0`]: chainOf(ark) }, txs: allTxs() })
+    await syncProofs(temp.db, fake.indexer, [vtxoOf(ark)], PUBKEY)
+
+    // Amputate the checkpoint the ark tx spends, exactly as the mainnet rows
+    // looked: every remaining tx still has its PSBT, so the old skip condition
+    // (missingProofTxids === 0) was satisfied.
+    const holed = chainOf(ark).filter((c) => c.txid !== checkpoint.txid)
+    temp.db
+      .query('UPDATE exit_vtxos SET chain_json = ? WHERE txid = ? AND vout = 0')
+      .run(JSON.stringify(holed), ark.txid)
+    expect(missingProofTxids(temp.db, holed)).toEqual([])
+    expect(isVtxoExitReady(temp.db, ark.txid, 0)).toBe(false) // no longer a green light
+
+    const fake2 = makeFake({ chains: { [`${ark.txid}:0`]: chainOf(ark) }, txs: allTxs() })
+    const res = await syncProofs(temp.db, fake2.indexer, [vtxoOf(ark)], PUBKEY)
+
+    expect(res.skipped).toBe(0)
+    expect(fake2.chainCalls()).toBe(1) // re-asked
+    expect(getVaultVtxo(temp.db, ark.txid, 0)!.chain.map((c) => c.txid)).toContain(checkpoint.txid)
+    expect(isVtxoExitReady(temp.db, ark.txid, 0)).toBe(true) // healed
   })
 
   test('ready vtxo with drifted status refreshes the snapshot without network', async () => {

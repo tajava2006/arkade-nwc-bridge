@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
-import { RestArkProvider, type Wallet } from '@arkade-os/sdk'
+import { RestArkProvider, type ArkInfo, type Wallet } from '@arkade-os/sdk'
 import { atomicSubdustSend } from './atomic/send'
 import { poolSats, sendSelected, spendablePool } from './wallet_spend'
 import type { NotifyFn } from './nostr/notifier'
@@ -40,6 +40,13 @@ export interface LnSendDeps {
   onSwapCreated?: (swapId: string) => void
   /** Operator DM sink — passed through to the atomic send path. */
   notify?: NotifyFn
+  /**
+   * ASP info the submarine rail needs (dust for the change guard,
+   * deprecatedSigners for the explicit-selection safety valve). Injectable so
+   * a caller that already holds it — or a test — doesn't pay a REST round-trip
+   * per send; defaults to reading the configured ASP.
+   */
+  getArkInfo?: () => Promise<ArkInfo>
 }
 
 export interface LnSendResult {
@@ -133,7 +140,7 @@ async function sendSubmarine(deps: LnSendDeps, invoice: string): Promise<LnSendR
     throw new Error(`Swap ${pending.id}: missing address in submarine swap response`)
   }
 
-  const arkInfo = await new RestArkProvider(deps.arkServerUrl).getInfo()
+  const arkInfo = await (deps.getArkInfo ?? (() => new RestArkProvider(deps.arkServerUrl).getInfo()))()
   // One read of the pool for both the drain sizing and the selection — a
   // re-read between them could size against a balance the selector no longer
   // sees and turn a drain into "does not cover".

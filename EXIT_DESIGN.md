@@ -233,6 +233,46 @@ Rationale + the full operator Q&A: `ATOMIC_SUBDUST_PLAN.md` §8 (2026-07-16).
 the gap can't leave. The tile shows proven/ASP-claimed, last-sync freshness,
 and proof size, with shortfalls, sync gaps and quarantines in red.
 
+## 3b. Ancestry completeness (2026-08-22, F22)
+
+A stored chain is only an exit proof if it **closes**: every non-commitment
+entry's `spends` must resolve to another entry in the same array. If it names
+an ancestor the array doesn't contain, that ancestor has no stored PSBT either
+(proofs are fetched only for txs the chain lists), so the spend that needs it
+can never be broadcast — the vtxo is unexitable.
+
+**This was invisible and permanent.** `proofComplete` / `missingProofTxids` are
+computed *relative to the stored chain*, so a hole hides itself from the very
+check meant to catch it. And `syncProofs` treated "ancestry is immutable" as
+"our copy of it must be right", short-circuiting on proof-completeness and
+never re-asking. Two of three mainnet vtxos (60,863 sats) sat like that behind
+a green Start button until the audit script found them.
+
+What closes it:
+
+- `chain_order.parentTxids` is now the single definition of an edge (strip a
+  checkpoint's `:vout`, ignore blanks and self-references). The DAG layout and
+  the completeness check read the same rule, so they cannot drift apart.
+- `chain_order.danglingEntries` flags entries whose every named ancestor is
+  absent. A commitment names nothing and is a root, not a dangle; an entry with
+  one resolvable parent out of two is fine.
+- **Self-healing**: `syncProofs` re-fetches any stored chain that dangles, and
+  reuses only whole ones. A transient bad capture repairs itself on the next
+  pass — no manual step, no repair tool.
+- **Capture-time**: `captureVtxo` reports `dangling` and refuses to call such a
+  capture complete, so a still-broken answer is logged rather than stored blind.
+- **Honest gating**: `estimateExit` gained `ancestryComplete`, and the exit
+  button gates on `proofComplete && ancestryComplete` with its own message
+  ("missing an ancestor it needs"). `isVtxoExitReady` requires both too, so the
+  /exit list's readiness and the dashboard tile stop over-reporting.
+
+Diagnosis tooling, for when a chain looks wrong on screen:
+`bun run check-exit-chains [db]` classifies each orphan (parent absent /
+present-but-unlinked / spends empty) and prints the top level as rendered;
+`bun run recheck-exit-chain [db] --url <arkd>` diffs the stored chain against
+what the indexer serves now, which is what separates "stale capture" (re-fetch
+repairs it) from "the indexer can't produce it" (upstream gap).
+
 ## 4. Degraded boot
 
 `Wallet.create` awaits `arkProvider.getInfo()` at boot, so before this feature a

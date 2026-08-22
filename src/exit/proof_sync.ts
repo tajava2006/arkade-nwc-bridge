@@ -8,6 +8,7 @@ import {
   type VirtualCoin,
 } from '@arkade-os/sdk'
 import { classifyDisappearance, resolveAbsorbedByConservation } from './evidence'
+import { danglingEntries } from './chain_order'
 import { getExitOp } from './ops'
 import {
   clearQuarantine,
@@ -171,7 +172,7 @@ export async function captureVtxo(
   db: Database,
   indexer: ProofSyncIndexer,
   vtxo: Omit<VaultVtxoSnapshot, 'chain'>,
-): Promise<{ complete: boolean; unserved: string[] }> {
+): Promise<{ complete: boolean; unserved: string[]; dangling: string[] }> {
   const chain = await fetchChain(indexer, { txid: vtxo.txid, vout: vtxo.vout })
   if (chain.length === 0) throw new Error('indexer returned an empty chain')
   const missing = missingProofTxids(db, chain)
@@ -185,7 +186,17 @@ export async function captureVtxo(
     else unserved.push(txid)
   }
   storeVtxoWithProofs(db, { ...vtxo, chain }, proofs)
-  return { complete: unserved.length === 0, unserved }
+  // A chain whose ancestry doesn't close is not a usable exit proof, however
+  // many PSBTs came with it — say so rather than let the caller read
+  // "complete" off the PSBT count alone (F22).
+  const dangling = danglingEntries(chain).map((c: ChainTx) => c.txid)
+  if (dangling.length > 0) {
+    console.warn(
+      `exit vault: captured chain for ${vtxo.txid}:${vtxo.vout} names ${dangling.length} ` +
+        `ancestor(s) it does not contain — stored, but NOT exitable until a later pass repairs it`,
+    )
+  }
+  return { complete: unserved.length === 0 && dangling.length === 0, unserved, dangling }
 }
 
 export async function syncProofs(
@@ -208,8 +219,15 @@ export async function syncProofs(
     const key = outpointKey(v)
     try {
       const existing = getVaultVtxo(db, v.txid, v.vout)
-      if (existing && missingProofTxids(db, existing.chain).length === 0) {
-        // Ancestry is immutable → proof-complete means nothing to fetch.
+      // "Ancestry is immutable" is true of the ancestry — NOT of our copy of
+      // it. A chain captured with a hole (an older indexer's walk, a parent it
+      // failed to resolve) used to be frozen forever: proof-completeness only
+      // asks about txs the stored chain lists, so the hole made itself
+      // invisible and the short-circuit below removed every chance to notice.
+      // Two of three mainnet vtxos sat unexitable like that (F22). A broken
+      // chain is therefore always re-fetched, and only a WHOLE one is reused.
+      const storedIsWhole = existing != null && danglingEntries(existing.chain).length === 0
+      if (existing && storedIsWhole && missingProofTxids(db, existing.chain).length === 0) {
         // Refresh the display snapshot only when it drifted (still no network).
         const snap = toSnapshot(v, existing.chain)
         if (snap.status !== existing.status || snap.expiresAt !== existing.expiresAt) {
@@ -218,10 +236,17 @@ export async function syncProofs(
         result.skipped++
         continue
       }
+      if (existing && !storedIsWhole) {
+        console.warn(
+          `exit vault: ${key} has a broken ancestry (${danglingEntries(existing.chain).length} ` +
+            `dangling entr(ies)) — re-fetching the chain`,
+        )
+      }
 
-      const chain = existing?.chain?.length
-        ? existing.chain
-        : await fetchChain(indexer, { txid: v.txid, vout: v.vout })
+      const chain =
+        existing?.chain?.length && storedIsWhole
+          ? existing.chain
+          : await fetchChain(indexer, { txid: v.txid, vout: v.vout })
       if (chain.length === 0) {
         // an indexer hiccup must not masquerade as a proof-complete vtxo
         result.failed.push({ outpoint: key, error: 'indexer returned an empty chain' })

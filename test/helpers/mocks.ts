@@ -68,8 +68,11 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
     async send(args: { address: string; amount: number }) {
       return opts.sendImpl ? opts.sendImpl(args) : 'arktxid-stub'
     },
-    async sendBitcoin() {
-      return 'arktxid-stub'
+    // Routed through the same recorder as send(): the spend funnel
+    // (wallet_spend.sendSelected) picks inputs itself and calls sendBitcoin,
+    // so a stub that ignored sendImpl would make every send look like a no-op.
+    async sendBitcoin(args: { address: string; amount: number }) {
+      return opts.sendImpl ? opts.sendImpl(args) : 'arktxid-stub'
     },
     async settle() {
       return 'settletxid-stub'

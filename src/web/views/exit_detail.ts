@@ -50,12 +50,15 @@ function actionPanel(
         </div>
         <form method="post" action="/exit/${s.txid}/${s.vout}/start"
             onsubmit="return confirm('Start unilateral exit? This broadcasts the pre-signed chain and CANNOT be undone once the first transaction confirms. If the ASP still responds, an onchain send from the Send tab is far cheaper.');">
-          <button type="submit" class="danger"${s.proofComplete ? raw('') : raw(' disabled')}>
+          <button type="submit" class="danger"${s.exitable ? raw('') : raw(' disabled')}>
             ${op?.state === 'failed' ? 'Retry exit' : 'Start exit'}
           </button>
-          ${s.proofComplete
+          ${s.exitable
             ? html``
-            : html`<span class="muted"> — proofs incomplete, cannot exit yet</span>`}
+            : !s.ancestryComplete
+              ? html`<span class="muted"> — this chain is missing an ancestor it needs; the
+                  vault is re-fetching it, retry after the next sync</span>`
+              : html`<span class="muted"> — proofs incomplete, cannot exit yet</span>`}
         </form>
         ${op?.state === 'failed' && op.error
           ? html`<p class="muted">Last error: ${op.error}</p>`
@@ -295,6 +298,7 @@ export function renderStepperFragment(stepper: ExitStepper): RawHtml {
       ${doneCount}/${all.length} steps complete · state:
       <strong>${stepper.op?.state ?? 'not started'}</strong>
       ${stepper.proofComplete ? html`` : html` · <span class="bad">proofs incomplete</span>`}
+      ${stepper.ancestryComplete ? html`` : html` · <span class="bad">ancestry broken</span>`}
     </p>
     <div class="dag" data-dag>
       <svg class="dag-edges" aria-hidden="true"></svg>

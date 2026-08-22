@@ -28,7 +28,14 @@ afterEach(() => {
 
 // The submarine rail never touches the atomic sub-dust deps; a throwaway db and
 // empty ASP url satisfy the type without being read.
-const noAtomic = { arkServerUrl: '', db: new Database(':memory:') }
+const noAtomic = {
+  arkServerUrl: '',
+  db: new Database(':memory:'),
+  // The submarine rail reads dust (change guard) + deprecatedSigners
+  // (explicit-selection safety valve) before choosing inputs. Injected so
+  // these stay offline unit tests.
+  getArkInfo: async () => ({ dust: 330n, deprecatedSigners: [] }) as never,
+}
 
 describe('sendLightning — submarine rail (≥ dust / amountless)', () => {
   test('near-drain overfunds the lockup instead of stranding change', async () => {
@@ -36,7 +43,7 @@ describe('sendLightning — submarine rail (≥ dust / amountless)', () => {
       createSubmarineSwap: async () => fakeSubmarineSwap({ expectedAmount: 2005 }),
       waitForSwapSettlement: async () => ({ preimage: 'cd'.repeat(32) }),
     })
-    const sends: { address: string; amount: number }[] = []
+    const sends: { address: string; amount: number; selectedVtxos?: { value: number }[] }[] = []
     const wallet = makeWalletStub({
       vtxos: [fakeSpendableVtxo(2006)], // 1 sat over — inside the slack
       sendImpl: async (args) => {
@@ -45,7 +52,11 @@ describe('sendLightning — submarine rail (≥ dust / amountless)', () => {
       },
     })
     const res = await sendLightning({ swaps, wallet, boltzApiUrl: '', ...noAtomic }, INVOICE_2000_SAT)
-    expect(sends[0]).toEqual({ address: 'tark1boltzlockup', amount: 2006 })
+    expect(sends[0]!.address).toBe('tark1boltzlockup')
+    expect(sends[0]!.amount).toBe(2006)
+    // The rail picks inputs itself now (wallet_spend.sendSelected) instead of
+    // letting the SDK's value-descending selector reach for the biggest coin.
+    expect((sends[0] as { selectedVtxos?: { value: number }[] }).selectedVtxos?.map((v) => v.value)).toEqual([2006])
     expect(res).toEqual({ amount: 2006, preimage: 'cd'.repeat(32), txid: 'arktxid-lockup', swapId: 'swap-id-fake' })
   })
 

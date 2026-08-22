@@ -19,6 +19,11 @@ import {
   makeWalletStub,
 } from '../helpers/mocks'
 
+// The submarine rail reads dust (change guard) + deprecatedSigners (the
+// explicit-selection safety valve) before picking inputs; injected so these
+// stay offline.
+const arkInfoStub = async () => ({ dust: 330n, deprecatedSigners: [] }) as never
+
 const CFG = {
   network: 'bitcoin',
   arkServerUrl: '',
@@ -201,7 +206,7 @@ describe('handlers', () => {
       // Well above expectedAmount + drain slack, so the funding stays exact.
       const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
       const r = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet, boltzApiUrl: '', arkServerUrl: '' },
+        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet, boltzApiUrl: '', arkServerUrl: '', getArkInfo: arkInfoStub },
         { invoice: INVOICE_2000_SAT },
       )) as Record<string, unknown>
       expect(r.preimage).toBe('be'.repeat(32))
@@ -251,7 +256,7 @@ describe('handlers', () => {
       })
       const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
       const res = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-window', wallet, boltzApiUrl: '', arkServerUrl: '' },
+        { swaps, db: temp.db, conn, eventId: 'evt-window', wallet, boltzApiUrl: '', arkServerUrl: '', getArkInfo: arkInfoStub },
         { invoice: INVOICE_2000_SAT },
       )) as Record<string, unknown>
       expect(res.preimage).toBe('be'.repeat(32))
