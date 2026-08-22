@@ -1,7 +1,8 @@
 import type { Database } from 'bun:sqlite'
 import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
-import { isSubdust, type Wallet } from '@arkade-os/sdk'
+import { RestArkProvider, type Wallet } from '@arkade-os/sdk'
 import { atomicSubdustSend } from './atomic/send'
+import { poolSats, sendSelected, spendablePool } from './wallet_spend'
 import type { NotifyFn } from './nostr/notifier'
 
 // Below P2TR dust a Boltz submarine swap can't settle: the vHTLC lockup vtxo is
@@ -49,20 +50,6 @@ export interface LnSendResult {
   txid: string
   /** boltz swap id — the ledger link that makes an interrupted send reconcilable */
   swapId: string
-}
-
-/**
- * What an offchain send can actually pull: the wallet.send selection pool
- * (`withRecoverable: false` drops swept/expired) minus fresh sub-dust, which
- * stays in that pool but can only be consumed by a settlement round.
- */
-async function spendableSats(wallet: Wallet): Promise<number> {
-  const vtxos = await wallet.getVtxos({ withRecoverable: false })
-  let sum = 0
-  for (const v of vtxos) {
-    if (!isSubdust(v, BigInt(DUST_SATS))) sum += v.value
-  }
-  return sum
 }
 
 /**
@@ -146,8 +133,13 @@ async function sendSubmarine(deps: LnSendDeps, invoice: string): Promise<LnSendR
     throw new Error(`Swap ${pending.id}: missing address in submarine swap response`)
   }
 
-  const amount = fundingAmount(expectedAmount, await spendableSats(deps.wallet))
-  const txid = await deps.wallet.send({ address, amount })
+  const arkInfo = await new RestArkProvider(deps.arkServerUrl).getInfo()
+  // One read of the pool for both the drain sizing and the selection — a
+  // re-read between them could size against a balance the selector no longer
+  // sees and turn a drain into "does not cover".
+  const pool = await spendablePool(deps.wallet, arkInfo.dust)
+  const amount = fundingAmount(expectedAmount, poolSats(pool))
+  const txid = await sendSelected({ wallet: deps.wallet, db: deps.db, arkInfo }, { address, amount, pool })
   const { preimage } = await deps.swaps.waitForSwapSettlement(pending)
   return { amount, preimage, txid, swapId: pending.id }
 }

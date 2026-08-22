@@ -114,6 +114,7 @@ import {
   markOffboardFailed,
   markOffboardSettled,
 } from '../offboards'
+import { sendSelected, splitHotPocket } from '../wallet_spend'
 
 export interface SwrCaches {
   balance: AsyncCache<WalletBalance>
@@ -1358,7 +1359,10 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             const amount = parseSats(amountRaw)
             if (amount === null) return sendError('ark', 'amount must be a positive integer (sats)')
             try {
-              const txid = await ready.wallet.send({ address: destination, amount })
+              const txid = await sendSelected(
+                { wallet: ready.wallet, db, arkInfo: await ready.arkProvider.getInfo() },
+                { address: destination, amount },
+              )
               recordArkSend(db, { amountSats: amount, destination, txid })
               void ready.caches.balance.refresh()
               void ready.caches.sendData.refresh()
@@ -1484,10 +1488,26 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             void ready.caches.balance.refresh()
             void ready.caches.sendData.refresh()
           }
-          const settled = ready.wallet.settle().then(
-            (txid) => ({ ok: true as const, txid }),
-            (err) => ({ ok: false as const, err }),
-          )
+          const settled = ready.wallet
+            .settle()
+            .then(async (txid) => {
+              // Same post-consolidation split the auto-refresh does — the
+              // manual button must not leave a differently-shaped wallet.
+              try {
+                await splitHotPocket({
+                  wallet: ready.wallet,
+                  db,
+                  arkInfo: await ready.arkProvider.getInfo(),
+                })
+              } catch (err) {
+                console.warn('refresh: hot pocket split failed (wallet is consolidated):', err)
+              }
+              return txid
+            })
+            .then(
+              (txid) => ({ ok: true as const, txid }),
+              (err) => ({ ok: false as const, err }),
+            )
           const raced = await Promise.race([
             settled,
             new Promise<'pending'>((res) => setTimeout(res, 4000, 'pending')),
