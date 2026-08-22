@@ -7,10 +7,11 @@
 > `a4b7096`)를 폐기하고 **단일 펀더** 설계로 전면 교체. 사전서명 12→2, 멀티파티 펀딩 소멸,
 > collateral 소멸, 빈 지갑 받기 성립. v1 대비 차이는 §8 결정 기록.
 >
-> **⚠️ 에픽 이후 진화 (2026-07-18): §10이 현행.** 돈통 단일화(boltz 키 = fulmine 지갑키)·
+> **⚠️ 에픽 이후 진화: §10 + §11 + §12가 현행.** §11(2026-08-22)이 협조적 취소를 배선해 실패 회수
+> 시간을 T → 즉시로 바꿨고, §12는 T 자체를 인보이스별로 재게 했다. §10(2026-07-18)은 돈통 단일화(boltz 키 = fulmine 지갑키)·
 > `boltzScriptDelay`/`feeSats` 프로토콜 필드·보내기 수수료(합산 출력)·오름차순 whole-input
 > 선택·send/receive 창 분리가 §3의 v2 서술 위에 얹혔다. §3·§8은 에픽 당시 기준 그대로 두고
-> 델타는 전부 §10에 기록.
+> 델타는 전부 §10~§12에 기록.
 >
 > 세션 재개 절차: ① 이 문서 통독 → ② §6에서 다음 ⬜ 하위작업 확인 → ③ §8 결정 기록에
 > 선행 스파이크 결과가 채워졌는지 확인 → ④ 워크트리 파서 작업. §2는 재검증 불필요(코드 인용 완비).
@@ -708,6 +709,12 @@ top-up 런북 소멸). 성립 조건 하나: **fulmine(client-lib)은 exit delay
 
 ### 10.4 whole-input 오름차순 펀딩 (양방향 공통)
 
+> ⚠️ **부분 대체 (2026-08-22)**: whole-input은 그대로지만, **bridge 보내기**의 "오름차순
+> 누적" 선택은 exit-cost 기반 **단독-우선** 선택으로 교체됐다 (bridge `src/coin_select.ts`,
+> 근거 = bridge `SEND_DESIGN.md` §8b). 병합이 오프체인에서 탈출체인을 합집합으로 물려주기
+> 때문 — 누적 규칙은 오염된 코인을 매번 끌고 들어간다. boltz **받기** 펀딩은 벤더된
+> `selectFundingInputs` 그대로 (boltz엔 vault/탈출비용 오라클이 없다).
+
 bridge send가 `wallet.sendBitcoin(V)`(지갑 잔돈이 sub-dust로 떨어질 수 있음)를 버리고
 boltz receive와 같은 `fundShared` whole-input으로 통일. 선택 규칙도 하나로: **오름차순으로
 커버될 때까지 누적** ("V 커버하는 최소 단일 우선" 지름길 삭제 — 입력 수 절약보다 작은 조각
@@ -740,3 +747,144 @@ sweep의 조합만으로 펀더의 refund 권리 증발)라서 필수고, 있다
   (1호는 CLAUDE.md footgun의 boltz endpoint).
 - `driveAtomicReceive` 상태 페이징: 실패 후 재시도가 funded→funded 불법 전이로 막히던 것 +
   claimed 후 settle 실패 시 영구 stuck 해소.
+
+
+## 11. 협조적 취소 (2026-08-22) — 실패 회수를 T에서 즉시로
+
+> 보안 대장 항목은 `my-server/SUBDUST_ATOMIC_SECURITY_REVIEW.md` **F21**. 여기엔 프로토콜
+> 델타만 적고, 위협모델·게이트 논증·테스트 목록은 그쪽이 진실.
+
+### 11.1 문제
+
+LN 종말실패 시 펀딩 vtxo가 T(=`subdustSendWindow`, mainnet 72h)까지 잠긴다. 보내기는
+**whole-input** 펀딩(§10.4)이라 잠기는 건 `a`가 아니라 **고른 vtxo 전액**이고, bridge의
+콘솔리데이트-올 리프레시(`src/auto_refresh.ts`)와 겹치면 사실상 **잔고 전체**다.
+
+T는 줄일 수 없다 — LN cltv 예산이 `(sendWindow − payMargin) / blockTime`에서 나오므로(§10.5)
+창을 줄이면 실패율이 오른다. 즉 "성공률 ↔ 잠김시간"이 한 노브에 묶여 있었다.
+
+### 11.2 진단 — 재료는 이미 다 있었다
+
+`cancel` leaf(§3.1의 3번, `Multisig{[F,C,server]}`, 타임락 없음)는 처음부터 스크립트에 있었고
+`cancelSpend`도 양쪽 벤더 사본에 있었다. **프로덕션 호출자만 없었다**(스파이크 #01 전용).
+게다가 상태머신이 `refund_wait`/`ln_inflight` → `cancelled`를 금지하고 있었고, boltz가 종말실패를
+선언하는 시점의 row는 이미 `refund_wait`였다.
+
+대조군: 일반 dust+ submarine swap은 VHTLC의 **협조적 refund**(sender+receiver+server, 타임락
+없음)를 SDK가 실패 즉시 자동으로 탄다. CLTV까지 기다리는 건 boltz가 죽었을 때의 폴백일 뿐.
+**atomic 경로에만 빠져 있던 기능**이지 프로토콜의 필연이 아니었다.
+
+### 11.3 프로토콜 델타
+
+새 트랜잭션 타입은 없다. §3.2의 취소 tx가 실제로 쓰이기 시작한 것뿐.
+
+**새 엔드포인트** `POST /v2/subdust/atomic/send/cancel`
+`{ swapId, fundingOutpoint, outputs[{script,amount}], presigs{arkTx,checkpoint} }`
+→ `{ status: 'cancelled', cancelTxid }` | `{ status: 'refused'|<state>, error }`
+
+역할 분담은 claim과 동일한 모양이다: **F가 만들고 사전서명, C가 재빌드 검증 후 공동서명·제출.**
+
+- F(bridge): row에서 4-leaf 재구성 → 전액을 자기 주소로 보내는 취소쌍 `presignCancel`
+- C(boltz): 자기 row로 **결정적 재빌드** → `verifyCancelPresig`(txid 매칭) → `finishCancel`
+
+출력 검증은 **합계 == V** 하나뿐이다. 어디로 가는지는 F의 돈이라 C의 관심사가 아니고, C가
+포기하는 건 어차피 claim 권리다. 합계만 못 박으면 같은 tx에 다른 지출을 끼워넣을 수 없다.
+
+**상태머신**: `ln_inflight`·`refund_wait` → `cancelled` 개방. `classifyResume`의 pre-T
+`refund_wait`가 `'wait_refund'`(무동작) → `'cancel'`.
+
+### 11.4 안전 논증
+
+- **아토믹성 불변**: cancel과 claim은 **같은 outpoint**를 쓴다. 둘 다 성립 불가. boltz가 실패
+  보고 후 결제해도 경주에서 지는 것.
+- **F의 신뢰가정 불변**: C는 F가 만든 tx만 공동서명 가능(재빌드 비교), 거부하면 원래의 T-refund가
+  그대로. 즉 이 기능은 회수 경로를 **추가**만 하고 제거하지 않는다.
+- **C의 위험은 타이밍 하나**: HTLC가 살아있는 동안 서명하면 boltz가 결제하고 펀딩도 잃는다.
+  그래서 `subdustCancelGate.ts`가 LND 종말실패(FAILED + in-flight 0) 또는 NOT_FOUND일 때만
+  허용하고, **LND 무응답은 거부**한다. 상세·테스트는 F21.
+
+### 11.5 회수 경로 정리 (현행)
+
+| 상황 | 경로 | 소요 | boltz 필요 |
+|---|---|---|---|
+| LN 종말실패, boltz 정상 | **cancel leaf** (§11) | 즉시 | O |
+| boltz 무응답/거부 | refund leaf (CLTV T) | T까지 | X |
+| ASP까지 사망 | uexit leaf (CSV d) | d + 온체인 | X |
+
+**T는 그대로 72h으로 둔다.** 취소가 창 길이와 회수 시간을 분리했으므로, 창은 이제 순수하게
+LN 라우팅 여유만 담당한다 — §11.1의 노브 결합이 해소됐다.
+
+### 11.6 소급 적용
+
+마이그레이션 없음. 기존 `refund_wait` row는 데이터가 이미 자족적이고(boltz `SubdustAtomicSwap`이
+`userPubkey`/`refundLocktime`/`fundingOutpoint`/`paymentHash` 보존), 전이와 액션이 생긴 것만으로
+다음 리컨사일 틱에서 회수된다. 유일한 구멍: boltz는 `exitDelay`를 저장하지 않고 arkd info에서
+재유도하므로, 그 사이 `unilateralExitDelay`가 바뀐 스왑은 재구성이 어긋나 취소가 실패하고
+T-refund로 폴백한다(정상 동작).
+
+### 11.7 잔여
+
+- mainnet 실검증 1건(운영 재빌드 후 실패 스왑에서 즉시 회수) — F21 상태표의 "실검증 대기".
+- 다음 regtest 드릴에 취소 경로 편입(실패 주입 → 즉시 회수 → 잔고 복귀).
+- 미착수(같은 유저 세션에서 합의된 후속): ③ `queryroutes` 기반 동적 T + 무경로 사전 차단,
+  ④ 단독-우선 코인 선택(`n = v − exitCost`) + 리프레시 `[hot, cold]` 2출력.
+
+
+## 12. 인보이스별 동적 T (2026-08-22)
+
+> boltz `lib/api/v2/routers/subdustSendWindow.ts` (순수) + `SubdustAtomicRouter.routeCltvDelta`.
+> 설정 대장 반영 = `my-server/SETTINGS.md`의 `subdustSendWindow` 항목.
+
+### 12.1 왜
+
+T 하나가 두 가지를 동시에 결정한다: (a) 펀더의 최악 잠김 시간, (b) LN cltv 예산
+(`cltvLimit = (T − payMargin) / blockTime`). 그래서 실패율을 낮추려 창을 키우면 잠김도
+같이 커지는 결합이 있었다. §11이 **정상 경로의** 잠김을 없앴지만 T는 여전히:
+
+- boltz가 죽었을 때 CLTV refund까지 기다리는 시간의 상한이고,
+- **펀딩 자격을 깎는다** — 입력 batch가 T + 10분보다 오래 살아야 하므로, 72h 창은 7일
+  배치의 마지막 3일을 못 쓰게 만든다(§10.5).
+
+인보이스마다 필요한 cltv는 실제로 다르다. 가까운 노드는 수십 블록, 먼 다중홉은 200+.
+전부에게 최악값을 물릴 이유가 없다.
+
+### 12.2 어떻게
+
+`/send/init`에서 `queryRoutes(payee, max(a,1), 상한, minFinalCltv, routingHints)`로 경로의
+**상대 CLTV**를 잰다(LND는 `totalTimeLock`을 절대 높이로 주므로 `− blockHeight`). 그 다음:
+
+```
+T = now + clamp((route + 36블록) × blockTime + payMargin,  1h,  subdustSendWindow)
+```
+
+- **36블록 버퍼**: init 때 잰 경로와 fund 때 실제로 타는 경로가 다를 수 있다(미션컨트롤
+  이동, 채널 변화). T가 빡빡하면 그 차이가 곧 못 갚는 `cltvLimit`이 된다.
+- **상한은 설정값 그대로** — 자동창·펀딩 자격이 전부 그 값 기준으로 튜닝돼 있다.
+- **HTLC를 쏘지 않는다.** 로컬 채널 그래프 위 Dijkstra라 네트워크 왕복이 없고, zap 체감
+  시간에 영향이 없다. (프로브 결제는 실제 홉을 타서 수 초 — 채택 안 함.)
+
+### 12.3 실패 시 동작 — 게이트가 아니다
+
+무경로·LND 무응답·예외를 **전부 `undefined`로 접고 상한(=옛 동작)으로 폴백**한다.
+거부하지 않는 이유: 쿼리가 "경로 없음"과 "물어보지 못함"을 구분하지 못한다
+(boltz `TimeoutDeltaProvider.checkRoutability`도 catch에서 같은 `noRoutes` 센티넬을 낸다).
+LND가 딸꾹질했다고 send를 거절하는 건, §11 이후 "빨리 실패하고 즉시 회수"보다 나쁘다.
+
+### 12.4 재사용 대신 직접 호출한 이유
+
+boltz엔 이미 `TimeoutDeltaProvider.checkRoutability`가 있고 MPP 분할·LND절대/CLN상대·
+라우팅힌트를 다 처리한다. 그런데 `Service.timeoutDeltaProvider`가 private이고 그 함수는
+**sidecar용** `DecodedInvoice`(payee/minFinalCltv/amountMsat)를 요구해서, 쓰려면 upstream
+파일 2개를 고쳐야 한다 — 버전 bump마다 리베이스 충돌 면적. 유일한 추가 로직인 MPP 분할은
+sub-dust에선 무의미하다(`ceil(a / maxParts)`가 어차피 1 sat로 바닥침). 그래서 포크 파일
+안에서 `queryRoutes`를 직접 부른다.
+
+### 12.5 부수 효과
+
+- 짧아진 T만큼 **펀딩 자격이 넓어진다** — 배치 수명 끝자락 vtxo도 쓸 수 있다.
+- 자동창 부등식(`창 + payMargin ≤ 자동창`)이 최악 케이스로만 남고, 평시 send 공백이 줄어든다.
+
+### 12.6 잔여
+
+- mainnet 실측 1건: 실제 인보이스에서 T가 상한보다 짧게 잡히는지 로그로 확인
+  (`T sized to …s from the measured route`).

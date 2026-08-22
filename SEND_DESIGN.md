@@ -280,6 +280,120 @@ multi-batch folds).
 - Stuck case unchanged: if total recoverable < dust, no round can form a valid
   output → genuinely stuck (差별화 #2 top-up territory).
 
+## 8b. Coin policy (2026-08-22) — one wear pocket, and never merge offchain
+
+> Code: `src/coin_select.ts` (pure policy), `src/exit/cost_oracle.ts` (pricing),
+> `src/wallet_spend.ts` (the funnel + the split). Tests:
+> `test/unit/coin_select.test.ts`, `wallet_spend.test.ts`, `exit_cost_oracle.test.ts`.
+
+§8 folds everything into ONE VTXO, which is right *inside a round* and wrong the
+rest of the time: with a single coin, every small send chains the entire balance,
+and the whole balance's unilateral-exit cost climbs with it. Measured on mainnet
+(`src/exit/estimate.ts`): **a 53-hop chain is ~32,000 vB of packages.**
+
+### The two facts the policy is built on
+
+1. **Offchain merging is additive and permanent.** A vtxo's exit chain is every
+   Arkade tx from its last batch-leaf ancestor down to it, and arkd's chain is a
+   DAG — so an offchain tx's change output inherits the exit chains of **all**
+   its inputs, unioned. Spend a 53-hop coin together with a pristine one and the
+   pristine value is 53 hops deep too, forever.
+2. **A settlement round resets it to zero**, regardless of how deep the inputs
+   were: the outputs are fresh tree leaves.
+
+⟹ **Merge only inside a round.** Offchain, prefer to spend exactly one coin.
+
+### Which coin — the objective
+
+Value the wallet at what unilateral exit would actually recover:
+`P = Σ max(0, vᵢ − cᵢ)` (v = value, c = exit cost, n := v − c). Spending A from a
+single coin i destroys `ΔP = A+h` when `n_i ≥ A+h`, `n_i` when `0 < n_i < A+h`,
+and **0** when `n_i ≤ 0` — so ascending **n** minimizes it.
+
+Not ascending *cost* (that eats a huge dirty coin whose value is still mostly
+recoverable) and not ascending *value* (that eats a small pristine coin whose
+value is fully recoverable). And merging a written-off coin into a solvent one
+destroys exactly `|n| = c − v` extra, because the pool is forced to pay that
+coin's exit cost to reach its value — hence written-off coins are left OUT of a
+forced merge.
+
+### The rule
+
+1. a single coin that covers the target → the one with the lowest `n = v − c`
+   (ties → the smaller coin, so wear keeps landing in the same pocket)
+2. else merge across **solvent** coins only (`n > 0`), cheapest chain first
+3. else, and only then, merge everything
+
+Plus a sub-dust guard: a total landing strictly inside `(target, target+dust)` is
+not "covered" — that change would be minted as a stranded sub-dust vtxo.
+
+**Why explicit selection at all:** the SDK's own selector sorts (batch expiry
+asc, **value desc**), i.e. it reaches for the biggest coin first. Under a
+hot/cold wallet that means every send dirties the cold coin — exactly backwards.
+`Wallet.sendBitcoin({ selectedVtxos })` is the only explicit-selection surface
+the SDK exposes (`send(...recipients)` always runs its own selector); it is
+`@deprecated` on the method name only — the branch is first-class (tx lock,
+dust-aware change scripts, same `_submitOffchainSpend`).
+
+⚠️ **Safety valve:** `sendBitcoin({selectedVtxos})` skips the
+`pendingRecoveryOutpoints()` filter that `send()` applies. That set is empty
+unless the ASP advertises **deprecated signers**, so when it does,
+`sendSelected` hands coin choice back to the SDK. Correctness beats coin policy.
+
+### Pricing (`cost_oracle.ts`)
+
+`estimateExit` against the **offline proof vault** — no network, works in
+degraded mode — at a fixed `EXIT_REF_RATE_SAT_VB = 5`. Deliberately a constant,
+not `exitEngine.feeRate()`: this is not a fee prediction, it is the policy knob
+"at what assumed exit cost is a coin written off". Unknown ⇒ **0** ("assume
+pristine"), which is the safe direction — the policy then avoids spending a coin
+it can't price, and a single-coin spend contaminates nothing anyway.
+
+### The hot pocket
+
+After each consolidate-all (auto **and** the manual button), `splitHotPocket`
+carves **one** pocket of `HOT_POCKET_SATS = 5,000` back out with a plain
+self-send, leaving `[hot, cold]`.
+
+- **What the number actually sets is the ASP-death write-off.** The pocket is
+  what every small spend chains onto, so its exit cost passes its value quickly
+  and it becomes economically abandoned — by design. Everything else keeps
+  exiting at batch-leaf cost. 5,000 sats is not tuned and doesn't need to be; it
+  only has to be long-lived, and a sub-dust send costs `a + fee`, so it absorbs
+  thousands of 1-sat zaps before dropping under the ~661 sats an atomic funding
+  needs.
+- **No refill machinery, deliberately.** When the pocket is finally too small,
+  the selector just spends the cold coin alone and its change becomes the new
+  working coin. A worn pocket is still ≤ `HOT_POCKET_SATS`, so it never
+  re-triggers a split.
+- **Why a self-send and not two outputs on the settle itself** (which would leave
+  both at batch-leaf depth instead of one hop): reproducing no-arg
+  `wallet.settle()` means reimplementing its private internals — boarding-UTXO
+  gathering, per-input fee filtering, `MAX_VTXOS_PER_SETTLEMENT`, the dust check
+  — against SDK helpers that aren't exported (`byValueDescending`,
+  `toOffchainInputFeeParams`), i.e. code that breaks silently on an SDK bump.
+  **Losing boarding absorption on a refresh is far worse than one extra hop**,
+  and that hop is a FIXED cost paid once per refresh cycle, not an accumulating
+  one.
+- Best-effort: a failed split leaves a perfectly good consolidated wallet, so it
+  is logged and swallowed. Selection then degrades to "spend the one coin" —
+  exactly the old behaviour.
+
+### Honest trade-off
+
+In a world with no sends, splitting *costs* a little: N clean leaves are dearer
+to exit than one (each needs its own branch). The win only appears once the hot
+coin is dirty and the cold one isn't — which is after a handful of transactions,
+not hundreds.
+
+### Related fix
+
+`estimateExit` counted a chain's **shared ancestors twice** — arkd's BFS
+re-emits them per branch (`chain_order.ts` documents it; `stepper.ts` already
+deduped). Diamonds are exactly what multi-input spends create, so the oracle
+would have over-priced precisely the coins this policy reasons about. Fixed by
+de-duping `wanted`.
+
 ## 9. CLINK noffer send (pay a noffer)
 
 The receive side ships a CLINK noffer ([RECEIVE_DESIGN.md](RECEIVE_DESIGN.md));
