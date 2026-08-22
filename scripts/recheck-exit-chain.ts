@@ -86,12 +86,25 @@ async function fetchChainPaged(txid: string, vout: number): Promise<ChainTx[]> {
   return chain
 }
 
-/** Fingerprint a chain so repeated walks can be compared at a glance. */
-function fingerprint(chain: ChainTx[]): string {
-  const ids = [...new Set(chain.map((c) => c.txid))].sort()
+const hash = (s: string): string => {
   let h = 0
-  for (const c of ids.join('')) h = (h * 31 + c.charCodeAt(0)) | 0
-  return `${chain.length}/${ids.length}:${(h >>> 0).toString(16).padStart(8, '0')}`
+  for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+
+/**
+ * Two fingerprints, because they answer different questions and only one of
+ * them can see the failure that actually bit us:
+ *   set   — same entries, order ignored
+ *   order — same entries IN THE SAME SEQUENCE
+ * Page slicing is by index, so a walk that returns a stable set in an unstable
+ * order still makes page 1 of walk A and page 2 of walk B overlap and gap. A
+ * set-only fingerprint reports "identical" throughout that.
+ */
+function fingerprint(chain: ChainTx[]): string {
+  const ids = chain.map((c) => c.txid)
+  const unique = [...new Set(ids)].sort()
+  return `${chain.length}/${unique.length} set:${hash(unique.join(''))} order:${hash(ids.join(''))}`
 }
 
 const brief = (t: string): string => `${t.slice(0, 12)}…`
@@ -128,8 +141,9 @@ if (repeat > 1) {
     }
     console.log(
       prints.size === 1
-        ? `  -> ${repeat} single-request walks AGREE (deterministic)`
-        : `  -> ${prints.size} DIFFERENT answers across ${repeat} identical requests (non-deterministic walk)`,
+        ? `  -> ${repeat} single-request walks AGREE, order included (fully deterministic)`
+        : `  -> ${prints.size} DIFFERENT answers across ${repeat} identical requests` +
+          ` (if only order: differs, page slicing across walks cannot be safe)`,
     )
     try {
       const paged = await fetchChainPaged(v.txid, v.vout)

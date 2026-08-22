@@ -241,15 +241,29 @@ an ancestor the array doesn't contain, that ancestor has no stored PSBT either
 (proofs are fetched only for txs the chain lists), so the spend that needs it
 can never be broadcast — the vtxo is unexitable.
 
-**This was invisible and permanent.** `proofComplete` / `missingProofTxids` are
-computed *relative to the stored chain*, so a hole hides itself from the very
-check meant to catch it. And `syncProofs` treated "ancestry is immutable" as
-"our copy of it must be right", short-circuiting on proof-completeness and
+**Root cause: we made the hole ourselves, by paging.** arkd's page-number path
+re-runs the whole walk per request and slices the result, so fetching pages
+1..N stitched together slices of N independent walks. The walk returns a stable
+SET of entries but not a stable ORDER, and slicing is by index — so page 1 of
+walk A and page 2 of walk B overlap in places and gap in others. The gaps are
+the missing ancestors. Measured on mainnet: one outpoint returned
+`271 entries / 239 unique, dangling=0` on five consecutive single requests, and
+`271 / 235, dangling=3` the moment the same chain was fetched as three pages.
+Only chains long enough to page (>100 entries) were ever affected.
+
+**And it was invisible and permanent.** `proofComplete` / `missingProofTxids`
+are computed *relative to the stored chain*, so a hole hides itself from the
+very check meant to catch it. And `syncProofs` treated "ancestry is immutable"
+as "our copy of it must be right", short-circuiting on proof-completeness and
 never re-asking. Two of three mainnet vtxos (60,863 sats) sat like that behind
 a green Start button until the audit script found them.
 
 What closes it:
 
+- **Never page the chain.** `fetchChain` omits the page parameters entirely, so
+  arkd answers from a single walk (`parsePage(nil) -> nil` -> the uncapped
+  legacy path). Atomic, and a third of the round trips. Proof PSBTs keep their
+  paged fetch — those items are independent, so stitching them is harmless.
 - `chain_order.parentTxids` is now the single definition of an edge (strip a
   checkpoint's `:vout`, ignore blanks and self-references). The DAG layout and
   the completeness check read the same rule, so they cannot drift apart.
