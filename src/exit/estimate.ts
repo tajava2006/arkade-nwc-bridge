@@ -123,7 +123,12 @@ export function estimateExit(
   const vtxo = getVaultVtxo(db, txid, vout)
   if (!vtxo) return null
 
-  const wanted = proofTxidsOf(vtxo.chain)
+  // De-duped: arkd's chain is a BFS DAG, and a shared ancestor reached through
+  // two branches is re-emitted at each depth (chain_order.ts documents the same
+  // quirk; stepper.ts already dedupes). Broadcasting only ever needs each tx
+  // once, so counting a diamond's shared ancestor twice inflates both the vB
+  // and the package count. Diamonds are exactly what multi-input spends create.
+  const wanted = [...new Set(proofTxidsOf(vtxo.chain))]
   const psbts = getProofPsbts(db, wanted)
   const typeOf = new Map(vtxo.chain.map((c: ChainTx) => [c.txid, c.type]))
 
