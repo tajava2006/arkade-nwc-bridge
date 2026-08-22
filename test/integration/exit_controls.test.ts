@@ -23,10 +23,11 @@ const baseStepper = (over: Partial<ExitStepper> = {}): ExitStepper => ({
   ancestryComplete: true,
   exitable: true,
   levels: [
-    [{ kind: 'broadcast', txid: 'c'.repeat(64), txType: ChainTxType.COMMITMENT, vsize: null, status: 'confirmed' }],
-    [{ kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'pending' }],
+    [{ kind: 'broadcast', txid: 'c'.repeat(64), txType: ChainTxType.COMMITMENT, vsize: null, status: 'confirmed', lane: 0 }],
+    [{ kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'pending', lane: 0 }],
   ],
   edges: [{ parent: 'c'.repeat(64), child: 'a'.repeat(64) }],
+  width: 1,
   wait: { kind: 'wait', status: 'pending', need: 0, have: 0, unit: 'blocks' },
   sweep: { kind: 'sweep', status: 'pending', destAddress: null, sweepTxid: null },
   probe: ['a'.repeat(64)],
@@ -140,7 +141,7 @@ describe('exit controls (view)', () => {
     const stepper = baseStepper({
       op: op('sweepable'),
       levels: [
-        [{ kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'confirmed' }],
+        [{ kind: 'broadcast', txid: 'a'.repeat(64), txType: ChainTxType.ARK, vsize: 154, status: 'confirmed', lane: 0 }],
       ],
       wait: { kind: 'wait', status: 'sweepable', need: 10, have: 10, unit: 'blocks' },
       sweep: { kind: 'sweep', status: 'sweepable', destAddress: null, sweepTxid: null },

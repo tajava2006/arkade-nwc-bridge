@@ -195,6 +195,9 @@ function boostForm(action: string, confirmMsg: string, projectedFeeSat: number |
 // node cards; wait/sweep stay list items below the graph.
 export function stepLine(step: ExitStep, boost?: StepBoostView | null): RawHtml {
   if (step.kind === 'broadcast') {
+    // Lane -> grid column: a branch keeps one vertical run across rows, so a
+    // slanted edge means a real merge rather than a row that re-centred.
+    const laneStyle = raw(`grid-column: ${step.lane + 1};`)
     const vsize = step.vsize !== null ? html` · <span class="muted">${step.vsize} vB</span>` : html``
     const state =
       step.status === 'confirmed'
@@ -221,7 +224,7 @@ export function stepLine(step: ExitStep, boost?: StepBoostView | null): RawHtml 
           ? html`<br /><span class="ok">fee is competitive — should confirm soon</span>`
           : html``
       : html``
-    return html`<div class="dag-node" data-step="${step.txid}">
+    return html`<div class="dag-node" data-step="${step.txid}" style="${laneStyle}">
       ${icon(step.status)} <strong>${TYPE_LABEL[step.txType] ?? 'tx'}</strong>
       <code>${step.txid}</code>${vsize}<br />
       <span class="muted">${state}</span>${feeCtx}${boostUi}
@@ -303,7 +306,9 @@ export function renderStepperFragment(stepper: ExitStepper): RawHtml {
     <div class="dag" data-dag>
       <svg class="dag-edges" aria-hidden="true"></svg>
       ${stepper.levels.map(
-        (level) => html`<div class="dag-row">${level.map((s) => stepLine(s))}</div>`,
+        (level) => html`<div class="dag-row" style="grid-template-columns: repeat(${Math.max(1, stepper.width)}, minmax(0, 1fr))">${level.map(
+          (s) => stepLine(s),
+        )}</div>`,
       )}
     </div>
     <ol style="list-style:none; padding-left:0; line-height:2;">

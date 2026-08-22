@@ -91,3 +91,44 @@ describe('chainGraph', () => {
     expect(g.edges).toEqual([{ parent: 'c', child: 'v' }])
   })
 })
+
+// Lanes: two commitments a vtxo descends from are independent work, so they
+// belong side by side, not flattened into one column that re-centres every
+// row (which made the edges zig-zag and the whole thing read as a single
+// line).
+describe('chainGraph lanes', () => {
+  test('independent roots get their own lane, and each branch runs straight down', () => {
+    const g = chainGraph(arkdBfsFixture())
+    expect(g.width).toBe(2)
+    // the two roots split
+    expect(g.lane.get('C1')).not.toBe(g.lane.get('C2'))
+    // and each branch keeps its root's lane the whole way down
+    for (const txid of ['T0', 'T1', 'k1']) expect(g.lane.get(txid)).toBe(g.lane.get('C1')!)
+    for (const txid of ['T2', 'k3', 'B2', 'k2']) expect(g.lane.get(txid)).toBe(g.lane.get('C2')!)
+  })
+
+  test('a merge sits under its leftmost parent, keeping the trunk in lane 0', () => {
+    const g = chainGraph(arkdBfsFixture())
+    expect(g.lane.get('L')).toBe(Math.min(g.lane.get('k1')!, g.lane.get('k2')!))
+  })
+
+  test('a single-branch chain stays one lane wide', () => {
+    const g = chainGraph([
+      mk('A', ChainTxType.ARK, ['k']),
+      mk('k', ChainTxType.CHECKPOINT, ['T:0']),
+      mk('T', ChainTxType.TREE, ['C']),
+      mk('C', ChainTxType.COMMITMENT),
+    ])
+    expect(g.width).toBe(1)
+    expect([...g.lane.values()].every((l) => l === 0)).toBe(true)
+  })
+
+  test('every lane is a real integer column, and no two nodes share one per level', () => {
+    const g = chainGraph(arkdBfsFixture())
+    for (const level of g.levels) {
+      const lanes = level.map((tx) => g.lane.get(tx.txid)!)
+      expect(lanes.every((l) => Number.isInteger(l) && l >= 0 && l < g.width)).toBe(true)
+      expect(new Set(lanes).size).toBe(lanes.length)
+    }
+  })
+})

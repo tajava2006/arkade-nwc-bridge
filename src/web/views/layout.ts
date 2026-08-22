@@ -65,7 +65,9 @@ const STYLES = `
   .dag { position: relative; margin: 1em 0; }
   .dag-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .dag-edges line { stroke: #ccc; stroke-width: 1.5; }
-  .dag-row { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 0.8em; margin-bottom: 1.4em; }
+  /* Grid, not flex: each node sits in its own lane (chain_order assigns them),
+     so a branch runs straight down instead of being re-centred every row. */
+  .dag-row { position: relative; display: grid; justify-items: center; align-items: start; gap: 0.8em; margin-bottom: 1.4em; }
   .dag-row:last-child { margin-bottom: 0; }
   /* Exit detail shows full txids (no truncation — the graph is already tall, and
      full ids are worth the height). Let the id wrap within the card instead of

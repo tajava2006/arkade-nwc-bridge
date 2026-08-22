@@ -19,7 +19,9 @@ import type { ChainTx } from '@arkade-os/sdk'
 // land mid-array. This module recovers the picture from the proof's real
 // structure — the `spends` DAG — for rendering: commitments all on the top
 // level, every spend edge pointing strictly downward, the vtxo's own tx at
-// the bottom. Quirks the edge parsing absorbs (values pass through the SDK
+// the bottom, and each independent branch in its own vertical LANE so a
+// diagonal edge means a real merge rather than a row that re-centred itself.
+// Quirks the edge parsing absorbs (values pass through the SDK
 // and the grpc handlers untouched):
 //   - checkpoint entries name their parent as an OUTPOINT ("txid:vout"),
 //     everything else as a bare txid → strip the index.
@@ -37,6 +39,51 @@ export interface ChainGraph {
   levels: ChainTx[][]
   /** parent → child spend edges between entries of the chain */
   edges: ChainEdge[]
+  /**
+   * txid → lane. Independent branches — two commitments a vtxo descends from
+   * owe each other nothing — get their own vertical lane instead of being
+   * re-centred row by row, which is what made a two-root chain read as one
+   * long line with zig-zagging edges. A merge pulls its child toward the mean
+   * of its parents' lanes, so a diagonal edge means an actual dependency.
+   */
+  lane: Map<string, number>
+  /** lane count, i.e. how many columns the layout needs */
+  width: number
+}
+
+/**
+ * Assign each node a lane, level by level, so a branch keeps a straight
+ * vertical run. Roots take lanes left to right in the order arkd emitted them;
+ * everything else wants the mean of its parents' lanes and takes the first
+ * free slot at or right of it — nearest-free-to-the-right keeps siblings from
+ * colliding while leaving a linear stretch directly under its parent.
+ */
+function assignLanes(levels: ChainTx[][], parents: Map<string, string[]>): Map<string, number> {
+  const lane = new Map<string, number>()
+  levels.forEach((level, depth) => {
+    const want = level.map((tx, i) => {
+      if (depth === 0) return i // roots: stable left-to-right
+      const ps = parents.get(tx.txid)!.filter((p) => lane.has(p))
+      if (ps.length === 0) return i
+      return ps.reduce((sum, p) => sum + lane.get(p)!, 0) / ps.length
+    })
+    const taken = new Set<number>()
+    level
+      .map((tx, i) => ({ tx, want: want[i]!, i }))
+      // leftmost preference first so an earlier branch can't be pushed right
+      // by a later one that happens to share its slot
+      .sort((a, b) => a.want - b.want || a.i - b.i)
+      .forEach(({ tx, want: w }) => {
+        // floor, not round: a two-parent merge sits under its LEFTMOST parent,
+        // which keeps the trunk in lane 0 and throws the diagonal to the branch
+        // joining it, rather than drifting the whole chain rightwards.
+        let col = Math.max(0, Math.floor(w))
+        while (taken.has(col)) col++
+        taken.add(col)
+        lane.set(tx.txid, col)
+      })
+  })
+  return lane
 }
 
 /**
@@ -143,5 +190,8 @@ export function chainGraph(chain: ChainTx[]): ChainGraph {
     }
   }
 
-  return { levels, edges }
+  const lane = assignLanes(levels, parents)
+  const width = lane.size === 0 ? 0 : Math.max(...lane.values()) + 1
+
+  return { levels, edges, lane, width }
 }

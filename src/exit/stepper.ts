@@ -35,6 +35,8 @@ export interface BroadcastStep {
   txType: ChainTxType
   vsize: number | null
   status: StepStatus
+  /** layout lane (chain_order.assignLanes) — independent branches get their own */
+  lane: number
 }
 
 export interface WaitStep {
@@ -69,6 +71,8 @@ export interface ExitStepper {
   levels: BroadcastStep[][]
   /** parent → child spend edges, for drawing the DAG */
   edges: ChainEdge[]
+  /** lane count the DAG needs — 1 means a plain single-branch chain */
+  width: number
   wait: WaitStep
   sweep: SweepStep
   /** txids for the client to probe in unroll order, stopping at the first non-confirmed */
@@ -138,8 +142,9 @@ export function buildExitStepper(
   const graph = chainGraph(vtxo.chain)
 
   const toStep = (c: ChainTx): BroadcastStep => {
+    const lane = graph.lane.get(c.txid) ?? 0
     if (c.type === ChainTxType.COMMITMENT) {
-      return { kind: 'broadcast', txid: c.txid, txType: c.type, vsize: null, status: 'confirmed' }
+      return { kind: 'broadcast', txid: c.txid, txType: c.type, vsize: null, status: 'confirmed', lane }
     }
     return {
       kind: 'broadcast',
@@ -147,6 +152,7 @@ export function buildExitStepper(
       txType: c.type,
       vsize: vsizeOf.get(c.txid) ?? null,
       status: unrolled && c.type !== ChainTxType.UNSPECIFIED ? 'confirmed' : 'pending',
+      lane,
     }
   }
   const levels = graph.levels.map((level) => level.map(toStep))
@@ -174,6 +180,7 @@ export function buildExitStepper(
     exitable: (est?.proofComplete ?? false) && (est?.ancestryComplete ?? false),
     levels,
     edges: graph.edges,
+    width: graph.width,
     wait: waitStep,
     sweep: buildSweepStep(op, waitStep.status),
     probe,
@@ -255,6 +262,9 @@ export async function probeExitStep(
       txType: entry.type,
       vsize: storedTxVsize(deps.db, stepTxid, entry.type),
       status,
+      // Same lane the initial render used — an SSE-swapped node must not jump
+      // columns just because its status text changed.
+      lane: chainGraph(vtxo.chain).lane.get(stepTxid) ?? 0,
     },
   }
 

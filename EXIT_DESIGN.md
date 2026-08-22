@@ -451,6 +451,17 @@ detail or the list page — each reload re-arms the probe loop, which stops at
 the frontier, so reloads stay cheap even mid-unroll (same strategy as
 `mode-change`).
 
+### DAG lanes
+
+The chain renders as layers (`chain_order.chainGraph`): depth = longest path
+from a root, so commitments share the top row. Within a row each node sits in
+its own **lane** — roots left to right, everything else under the mean of its
+parents' lanes, floored so a merge stays under its leftmost parent and the
+trunk keeps lane 0. Rows are a CSS grid over `width` lanes rather than a
+centred flex row; without that, every row re-centred independently and two
+independent settlements read as one long zig-zagging line instead of two
+parallel branches. Edges are only ever drawn between real `spends` pairs.
+
 ## 7. Scope-outs
 
 - **Offchain receives the ASP didn't tell us about.** Detection rides
