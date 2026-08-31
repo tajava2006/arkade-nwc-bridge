@@ -273,6 +273,10 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
       // Boltz rejected — usually amount outside reverse-swap limits. (Range
       // is a SHOULD; populating min/max from Boltz limits is a refinement.)
       const msg = (err.errorData as { error?: string } | undefined)?.error ?? err.message
+      // Log it too: the payer only ever sees their wallet's own rendering of
+      // the error (Zeus turns any failure into "could not connect to the CLINK
+      // relay"), so without this line a boltz-side outage is invisible here.
+      console.error(`clink: boltz rejected the ${amount}-sat invoice: ${msg}`)
       await respond(ctx, event, { error: `Invalid Amount: ${msg}`, code: ERR_INVALID_AMOUNT })
       return
     }

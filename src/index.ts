@@ -380,10 +380,17 @@ async function main(): Promise<void> {
         // status. Blocktime lag counts as waiting — the next tick retries.
         const sends = resumeAtomicSends(atomicDeps)
           .then((r) => {
-            if (r.refunded.length || r.cancelled.length || r.claimed.length || r.refundWait.length || r.failed.length) {
+            if (
+              r.refunded.length ||
+              r.cancelled.length ||
+              r.unfunded.length ||
+              r.claimed.length ||
+              r.refundWait.length ||
+              r.failed.length
+            ) {
               console.log(
                 `atomic send resume: refunded=${r.refunded.length} cancelled=${r.cancelled.length} ` +
-                  `claimed=${r.claimed.length} ` +
+                  `unfunded=${r.unfunded.length} claimed=${r.claimed.length} ` +
                   `refund_wait=${r.refundWait.length} waiting=${r.waiting} failed=${r.failed.length}`,
               )
               for (const f of r.failed) console.error(`atomic send resume ${f.id}:`, f.error)

@@ -10,6 +10,7 @@
     "show-btc-key": "bun run scripts/show-btc-key.ts",
     "check-exit-chains": "bun run scripts/check-exit-chains.ts",
     "recheck-exit-chain": "bun run scripts/recheck-exit-chain.ts",
+    "try-invoice": "bun run scripts/try-invoice.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test test/unit test/nostr test/integration",
     "test:live": "RUN_LIVE_TESTS=1 bun test test/live",

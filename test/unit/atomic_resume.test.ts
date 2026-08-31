@@ -8,6 +8,8 @@ import {
   type AtomicSendDeps,
 } from '../../src/atomic/send'
 import type { Wallet } from '@arkade-os/sdk'
+import { hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
 
 // resumeAtomicSends touches the network in three places: boltz's /send/status
 // (global fetch — stubbed per test), the refund executor (injected), and the
@@ -378,5 +380,97 @@ describe('resumeAtomicSends', () => {
     // Still refund_wait pre-T on the next poll — the state gate keeps quiet.
     await resumeAtomicSends(deps, noRefund, spent, noCancel)
     expect(calls.length).toBe(1)
+  })
+
+  // A send whose funding spend was REJECTED (concurrent send took the same
+  // vtxo — no input lock yet) leaves an 'init' row with no outpoint. Nothing
+  // was created, so there is no shared vtxo, no proof and nothing to refund;
+  // classifyResume maps 'init' to 'poll' regardless of T, so it used to sit in
+  // the dashboard's in-flight list forever behind a meaningless "refund T … ago".
+  describe('unfunded init rows', () => {
+    // classifyUnfundedInit rebuilds the 4-leaf taproot script, so unlike the
+    // other suites these need REAL curve points, not filler bytes.
+    const key = (seed: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(seed))
+    const withIdentity = (): AtomicSendDeps => ({
+      ...makeDeps(),
+      wallet: { identity: { xOnlyPublicKey: async () => key(9) } } as never,
+    })
+
+    let hashSeq = 0
+    const plantInit = (id: string, createdAt: number): void => {
+      repo.create({
+        id,
+        direction: SwapDirection.Send,
+        // must be real hex: classifyUnfundedInit decodes it to rebuild the script
+        paymentHash: (hashSeq++).toString(16).padStart(2, '0').repeat(32),
+        state: 'init',
+        amount: 21,
+        refundLocktime: NOW + 3600,
+        peerPubkey: hex.encode(key(11)),
+        exitDelay: 512,
+      })
+      db.query('UPDATE atomic_swaps SET created_at = ? WHERE id = ?').run(createdAt, id)
+    }
+
+    /** Indexer that reports nothing at any script — i.e. funding never landed. */
+    const stubEmptyIndexer = (): void => {
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        const u = String(url)
+        if (u.includes('/v1/info')) {
+          return new Response(
+            JSON.stringify({
+              signerPubkey: hex.encode(key(13)),
+              dust: '330',
+              vtxoMinAmount: '1',
+              unilateralExitDelay: '512',
+              checkpointTapscript: '',
+              network: 'regtest',
+            }),
+            { status: 200 },
+          )
+        }
+        if (u.includes('/vtxos')) return new Response(JSON.stringify({ vtxos: [] }), { status: 200 })
+        throw new Error('connection refused')
+      }) as unknown as typeof fetch
+    }
+
+    test('past the grace with no coin ever at its script → failed, out of in-flight', async () => {
+      plantInit('s-never-funded', NOW - 4 * 3600)
+      stubEmptyIndexer()
+      const r = await resumeAtomicSends(withIdentity(), noRefund, spent, noCancel)
+      expect(r.unfunded).toEqual(['s-never-funded'])
+      expect(repo.get('s-never-funded')?.state).toBe('failed')
+      // terminal ⇒ listResumable drops it, so the next pass is silent
+      expect((await resumeAtomicSends(makeDeps(), noRefund, spent, noCancel)).unfunded).toEqual([])
+    })
+
+    test('inside the grace it is left alone — the indexer may just be lagging its own write', async () => {
+      plantInit('s-fresh', NOW - 30)
+      stubEmptyIndexer()
+      const r = await resumeAtomicSends(withIdentity(), noRefund, spent, noCancel)
+      expect(r.unfunded).toEqual([])
+      expect(repo.get('s-fresh')?.state).toBe('init')
+    })
+
+    test('a live send is never touched, however old the row', async () => {
+      plantInit('s-live-init', NOW - 4 * 3600)
+      inflightSends.add('s-live-init')
+      try {
+        stubEmptyIndexer()
+        const r = await resumeAtomicSends(withIdentity(), noRefund, spent, noCancel)
+        expect(r.unfunded).toEqual([])
+        expect(repo.get('s-live-init')?.state).toBe('init')
+      } finally {
+        inflightSends.delete('s-live-init')
+      }
+    })
+
+    test('an indexer that cannot answer never terminalizes a row', async () => {
+      plantInit('s-blind', NOW - 4 * 3600)
+      stubStatus({}) // every endpoint down
+      const r = await resumeAtomicSends(withIdentity(), noRefund, spent, noCancel)
+      expect(r.unfunded).toEqual([])
+      expect(repo.get('s-blind')?.state).toBe('init')
+    })
   })
 })

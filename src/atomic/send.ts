@@ -232,13 +232,26 @@ export async function atomicSubdustSend(
       tapTree: userScript.encode(),
     }))
     const Vp = funding.reduce((n, f) => n + f.value, 0)
-    const outpoint = await fundShared(
-      funderInputs,
-      [{ script: script.pkScript, amount: BigInt(Vp) }],
-      unroll,
-      deps.wallet.identity,
-      ark,
-    )
+    let outpoint: { txid: string; vout: number }
+    try {
+      outpoint = await fundShared(
+        funderInputs,
+        [{ script: script.pkScript, amount: BigInt(Vp) }],
+        unroll,
+        deps.wallet.identity,
+        ark,
+      )
+    } catch (err) {
+      // The funding spend was rejected (most often: a concurrent send already
+      // took one of these vtxos — there is no input lock yet, SEND_DESIGN §8b).
+      // Nothing was created, so there is no shared vtxo, no proof to mirror and
+      // nothing to refund or cancel: terminalize now rather than leave an
+      // 'init' row the reconciler polls forever behind a meaningless T.
+      // Verified against the indexer, never assumed — a submit that landed and
+      // only lost its response must stay recoverable (F15).
+      await failIfUnfunded(deps, repo, init.swapId, err instanceof Error ? err.message : String(err))
+      throw err
+    }
     const txid = outpoint.txid
 
     const { shared, coin } = await locateFunding(indexer, script, Vp, txid)
@@ -682,24 +695,50 @@ export async function cancelAtomicSend(deps: AtomicSendDeps, swapId: string): Pr
 }
 
 /**
- * Crash-window recovery (F15): a send row can be left at 'init' with no
- * fundingOutpoint if the bridge died between fundShared and setFundingOutpoint —
- * the shared vtxo is on-chain but unrecorded, so classifyResume never refunds it
- * and V stays locked. Rebuild the 4-leaf script from the row, look for the
- * shared vtxo at that address, and if it's there record the outpoint + advance
- * to 'funded' so the normal refund path reclaims it after T. Returns true if
- * recovered. Needs peerPubkey + exitDelay (rows predating that metadata are left
- * alone — nothing to rebuild the script from). boltz never got presigs in this
- * window, so the vtxo can't have been claimed: a spendable coin at the script is
- * ours.
+ * How long an unfunded 'init' row is given before it is declared dead. Covers
+ * the only benign reasons a just-created row has no coin yet: the indexer
+ * lagging its own write, or a crash between submit and bookkeeping. A live
+ * send is already protected by inflightSends, so this only ever sees remnants.
  */
-async function recoverFundingOutpoint(
+const UNFUNDED_GRACE_SECS = 600
+
+/** What an 'init' row's shared script says about whether funding ever happened. */
+type FundingVerdict =
+  /** a spendable coin is there — outpoint recorded, row advanced to 'funded' */
+  | 'recovered'
+  /** nothing was ever created at that script: the funding tx never landed */
+  | 'unfunded'
+  /** can't tell (missing metadata, indexer down, or only spent coins) — leave it alone */
+  | 'unknown'
+
+/**
+ * Crash-window recovery (F15) + unfunded detection.
+ *
+ * A send row sits at 'init' with no fundingOutpoint in two very different
+ * situations, and they need opposite handling:
+ *
+ *  - the bridge died between fundShared and setFundingOutpoint. The shared
+ *    vtxo IS on-chain but unrecorded, so nothing would ever reclaim V. Record
+ *    the outpoint and advance to 'funded' so the refund path picks it up.
+ *  - fundShared itself failed — arkd rejected the spend (a concurrent send
+ *    took the same vtxo first: no input lock yet, see SEND_DESIGN §8b), the
+ *    wallet couldn't cover it, whatever. Nothing was created, so there is no
+ *    vtxo, no proof to mirror and nothing to refund or cancel. The row is
+ *    simply dead — but classifyResume maps 'init' to 'poll' regardless of T,
+ *    so it used to sit in the dashboard's in-flight list forever, showing a
+ *    meaningless "refund T … ago" for a T that never guarded anything.
+ *
+ * The indexer tells them apart: query the shared script WITHOUT spendableOnly,
+ * because "no coin at all, ever" is the only safe basis for declaring a swap
+ * unfunded. A spent-only result means something did happen and stays 'unknown'.
+ */
+async function classifyUnfundedInit(
   deps: AtomicSendDeps,
   repo: SqliteAtomicSwapRepository,
   swap: AtomicSwapRow,
-): Promise<boolean> {
+): Promise<FundingVerdict> {
   if (swap.fundingOutpoint || swap.state !== 'init' || !swap.peerPubkey || swap.exitDelay === undefined) {
-    return false
+    return 'unknown'
   }
   const ark = new RestArkProvider(deps.arkServerUrl)
   const indexer = new RestIndexerProvider(deps.arkServerUrl)
@@ -714,12 +753,51 @@ async function recoverFundingOutpoint(
     refundLocktime: BigInt(swap.refundLocktime),
     exitDelay: BigInt(swap.exitDelay),
   })
-  const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(script.pkScript)], spendableOnly: true })
-  const coin = vtxos[0]
-  if (!coin) return false
-  repo.setFundingOutpoint(swap.id, `${coin.txid}:${coin.vout}`)
+  // No spendableOnly: a spent coin still proves funding happened, and treating
+  // that as "never funded" would terminalize a swap whose V is real.
+  const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(script.pkScript)] })
+  if (vtxos.length === 0) return 'unfunded'
+
+  const spendable = vtxos.find((v) => !v.spentBy && !v.isSpent)
+  if (!spendable) {
+    console.warn(
+      `atomic send ${swap.id}: shared script holds only spent coin(s) while the row is still 'init' — leaving it alone`,
+    )
+    return 'unknown'
+  }
+  // boltz never got presigs in this window, so the vtxo can't have been
+  // claimed: a spendable coin at the script is ours.
+  repo.setFundingOutpoint(swap.id, `${spendable.txid}:${spendable.vout}`)
   repo.transition(swap.id, 'funded')
-  console.log(`atomic send ${swap.id}: recovered funding ${coin.txid}:${coin.vout} lost to a crash before bookkeeping (F15)`)
+  console.log(
+    `atomic send ${swap.id}: recovered funding ${spendable.txid}:${spendable.vout} lost to a crash before bookkeeping (F15)`,
+  )
+  return 'recovered'
+}
+
+/**
+ * Terminalize a send whose funding demonstrably never landed. Called both from
+ * the live path (fundShared threw) and the reconciler (remnants). Returns true
+ * when the row was failed.
+ */
+async function failIfUnfunded(
+  deps: AtomicSendDeps,
+  repo: SqliteAtomicSwapRepository,
+  swapId: string,
+  reason: string,
+): Promise<boolean> {
+  const swap = repo.get(swapId)
+  if (!swap || swap.state !== 'init' || swap.fundingOutpoint) return false
+  let verdict: FundingVerdict
+  try {
+    verdict = await classifyUnfundedInit(deps, repo, swap)
+  } catch (err) {
+    console.warn(`atomic send ${swapId}: could not verify whether funding landed: ${err instanceof Error ? err.message : err}`)
+    return false
+  }
+  if (verdict !== 'unfunded') return false
+  repo.transition(swapId, 'failed')
+  console.warn(`atomic send ${swapId}: funding never landed (${reason}) — marked failed, nothing to refund`)
   return true
 }
 
@@ -730,6 +808,8 @@ export interface AtomicSendResumeResult {
   refunded: string[]
   /** swaps whose full V came back EARLY through the cancel leaf (boltz co-signed) */
   cancelled: string[]
+  /** 'init' swaps terminalized because their funding tx never landed (nothing to reclaim) */
+  unfunded: string[]
   /** swaps reconciled to claimed via boltz status (crash after boltz's claim) */
   claimed: string[]
   /** swaps moved to refund_wait (boltz reports the LN pay failed) */
@@ -788,6 +868,7 @@ export async function resumeAtomicSends(
   const result: AtomicSendResumeResult = {
     refunded: [],
     cancelled: [],
+    unfunded: [],
     refundWait: [],
     claimed: [],
     waiting: 0,
@@ -850,14 +931,25 @@ export async function resumeAtomicSends(
     return true
   }
 
-  // Crash-window recovery pre-pass (F15): promote any 'init' send whose funding
-  // is already on-chain but unrecorded to 'funded', so the loop below refunds it
-  // after T instead of polling boltz forever with V stranded in the shared vtxo.
+  // 'init' pre-pass. Two opposite outcomes from the same shape (see
+  // classifyUnfundedInit): funding that landed but wasn't recorded is promoted
+  // to 'funded' so the loop below can reclaim it (F15), while funding that
+  // demonstrably never landed is terminalized instead of being polled forever.
+  // The grace only lets the indexer catch up with its own write.
+  const nowSecNum = Number(nowSecs)
   for (const swap of repo.listResumable()) {
     if (inflightSends.has(swap.id)) continue // a live send owns this row (F19)
     if (swap.direction === SwapDirection.Send && !swap.fundingOutpoint && swap.state === 'init') {
       try {
-        await recoverFundingOutpoint(deps, repo, swap)
+        const verdict = await classifyUnfundedInit(deps, repo, swap)
+        if (verdict === 'unfunded' && nowSecNum - swap.createdAt > UNFUNDED_GRACE_SECS) {
+          repo.transition(swap.id, 'failed')
+          result.unfunded.push(swap.id)
+          console.warn(
+            `atomic send ${swap.id}: no coin ever appeared at its shared script and it is ` +
+              `${Math.round((nowSecNum - swap.createdAt) / 60)} min old — funding never landed, marking failed`,
+          )
+        }
       } catch (e) {
         result.failed.push({ id: swap.id, error: e instanceof Error ? e.message : String(e) })
       }
