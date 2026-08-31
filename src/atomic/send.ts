@@ -699,8 +699,13 @@ export async function cancelAtomicSend(deps: AtomicSendDeps, swapId: string): Pr
  * the only benign reasons a just-created row has no coin yet: the indexer
  * lagging its own write, or a crash between submit and bookkeeping. A live
  * send is already protected by inflightSends, so this only ever sees remnants.
+ *
+ * MILLISECONDS, because that is what the row stores: repository.create writes
+ * Date.now() into created_at while refundLocktime next to it is unix seconds.
+ * Comparing the two units silently disables the sweep (the age comes out
+ * hugely negative and never clears the grace) without failing anything.
  */
-const UNFUNDED_GRACE_SECS = 600
+const UNFUNDED_GRACE_MS = 600_000
 
 /** What an 'init' row's shared script says about whether funding ever happened. */
 type FundingVerdict =
@@ -936,18 +941,19 @@ export async function resumeAtomicSends(
   // to 'funded' so the loop below can reclaim it (F15), while funding that
   // demonstrably never landed is terminalized instead of being polled forever.
   // The grace only lets the indexer catch up with its own write.
-  const nowSecNum = Number(nowSecs)
+  const nowMs = Date.now()
   for (const swap of repo.listResumable()) {
     if (inflightSends.has(swap.id)) continue // a live send owns this row (F19)
     if (swap.direction === SwapDirection.Send && !swap.fundingOutpoint && swap.state === 'init') {
       try {
         const verdict = await classifyUnfundedInit(deps, repo, swap)
-        if (verdict === 'unfunded' && nowSecNum - swap.createdAt > UNFUNDED_GRACE_SECS) {
+        const ageMs = nowMs - swap.createdAt
+        if (verdict === 'unfunded' && ageMs > UNFUNDED_GRACE_MS) {
           repo.transition(swap.id, 'failed')
           result.unfunded.push(swap.id)
           console.warn(
             `atomic send ${swap.id}: no coin ever appeared at its shared script and it is ` +
-              `${Math.round((nowSecNum - swap.createdAt) / 60)} min old — funding never landed, marking failed`,
+              `${Math.round(ageMs / 60_000)} min old — funding never landed, marking failed`,
           )
         }
       } catch (e) {

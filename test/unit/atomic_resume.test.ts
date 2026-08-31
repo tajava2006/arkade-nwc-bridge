@@ -397,7 +397,9 @@ describe('resumeAtomicSends', () => {
     })
 
     let hashSeq = 0
-    const plantInit = (id: string, createdAt: number): void => {
+    /** `ageMinutes` ago. created_at is unix MILLISECONDS — the unit the row
+     * really stores; a fixture in seconds silently "passes" a broken sweep. */
+    const plantInit = (id: string, ageMinutes: number): void => {
       repo.create({
         id,
         direction: SwapDirection.Send,
@@ -409,7 +411,13 @@ describe('resumeAtomicSends', () => {
         peerPubkey: hex.encode(key(11)),
         exitDelay: 512,
       })
-      db.query('UPDATE atomic_swaps SET created_at = ? WHERE id = ?').run(createdAt, id)
+      db.query('UPDATE atomic_swaps SET created_at = ? WHERE id = ?').run(
+        Date.now() - ageMinutes * 60_000,
+        id,
+      )
+      // guard the fixture's own premise: this must be the same magnitude
+      // repository.create writes, or the test proves nothing
+      expect(repo.get(id)!.createdAt).toBeGreaterThan(1e12)
     }
 
     /** Indexer that reports nothing at any script — i.e. funding never landed. */
@@ -435,7 +443,7 @@ describe('resumeAtomicSends', () => {
     }
 
     test('past the grace with no coin ever at its script → failed, out of in-flight', async () => {
-      plantInit('s-never-funded', NOW - 4 * 3600)
+      plantInit('s-never-funded', 240)
       stubEmptyIndexer()
       const r = await resumeAtomicSends(withIdentity(), noRefund, spent, noCancel)
       expect(r.unfunded).toEqual(['s-never-funded'])
@@ -445,7 +453,7 @@ describe('resumeAtomicSends', () => {
     })
 
     test('inside the grace it is left alone — the indexer may just be lagging its own write', async () => {
-      plantInit('s-fresh', NOW - 30)
+      plantInit('s-fresh', 0.5)
       stubEmptyIndexer()
       const r = await resumeAtomicSends(withIdentity(), noRefund, spent, noCancel)
       expect(r.unfunded).toEqual([])
@@ -453,7 +461,7 @@ describe('resumeAtomicSends', () => {
     })
 
     test('a live send is never touched, however old the row', async () => {
-      plantInit('s-live-init', NOW - 4 * 3600)
+      plantInit('s-live-init', 240)
       inflightSends.add('s-live-init')
       try {
         stubEmptyIndexer()
@@ -466,7 +474,7 @@ describe('resumeAtomicSends', () => {
     })
 
     test('an indexer that cannot answer never terminalizes a row', async () => {
-      plantInit('s-blind', NOW - 4 * 3600)
+      plantInit('s-blind', 240)
       stubStatus({}) // every endpoint down
       const r = await resumeAtomicSends(withIdentity(), noRefund, spent, noCancel)
       expect(r.unfunded).toEqual([])

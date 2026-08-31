@@ -46,6 +46,7 @@ export interface AtomicSwapRow {
   peerPubkey?: string
   /** unilateral exit delay d at swap creation (script rebuild input) */
   exitDelay?: number
+  /** unix MILLISECONDS (create() writes Date.now()) — not seconds like refundLocktime */
   createdAt: number
   updatedAt: number
 }
