@@ -4,8 +4,9 @@ import type { ExtendedVirtualCoin, Wallet } from '@arkade-os/sdk'
 import { openTempDb, type TempDb } from '../helpers/db'
 import { fakeTxid } from '../helpers/evidence'
 import {
+  HOT_POCKET_COUNT,
   HOT_POCKET_SATS,
-  needsHotPocket,
+  hotPocketsNeeded,
   sendSelected,
   splitHotPocket,
 } from '../../src/wallet_spend'
@@ -47,8 +48,9 @@ function stubWallet(pool: ExtendedVirtualCoin[]): { wallet: Wallet; calls: Calls
       })
       return 'tx-explicit'
     },
-    send: async (p: { address: string; amount: number }) => {
-      calls.send.push({ address: p.address, amount: p.amount })
+    // multi-recipient: splitHotPocket carves every lane in one call
+    send: async (...recipients: { address: string; amount: number }[]) => {
+      for (const r of recipients) calls.send.push({ address: r.address, amount: r.amount })
       return 'tx-sdk'
     },
   } as unknown as Wallet
@@ -113,39 +115,56 @@ describe('sendSelected', () => {
   })
 })
 
-describe('needsHotPocket', () => {
-  test('a freshly consolidated single VTXO wants a pocket carved out', () => {
-    expect(needsHotPocket([vtxo(500_000)], Number(DUST))).toBe(true)
+describe('hotPocketsNeeded', () => {
+  const D = Number(DUST)
+
+  test('a freshly consolidated single VTXO wants the full set carved out', () => {
+    expect(hotPocketsNeeded([vtxo(500_000)], D)).toBe(HOT_POCKET_COUNT)
   })
 
-  test('a wallet that already has a small coin does not', () => {
-    // Including a WORN pocket: it is still ≤ HOT_POCKET_SATS, and re-splitting
-    // would just add another hop to cold for no benefit.
-    expect(needsHotPocket([vtxo(500_000), vtxo(400)], Number(DUST))).toBe(false)
-    expect(needsHotPocket([vtxo(500_000), vtxo(HOT_POCKET_SATS)], Number(DUST))).toBe(false)
+  test('existing small coins count as pockets — only the shortfall is carved', () => {
+    // Including WORN ones: they are still ≤ HOT_POCKET_SATS and still usable as
+    // a lane, so a wallet that has merely been spending down never re-splits.
+    expect(hotPocketsNeeded([vtxo(500_000), vtxo(400)], D)).toBe(HOT_POCKET_COUNT - 1)
+    expect(hotPocketsNeeded([vtxo(500_000), vtxo(HOT_POCKET_SATS)], D)).toBe(HOT_POCKET_COUNT - 1)
   })
 
-  test('too poor to leave a cold coin above dust → no split', () => {
-    expect(needsHotPocket([vtxo(HOT_POCKET_SATS + Number(DUST) - 1)], Number(DUST))).toBe(false)
-    expect(needsHotPocket([vtxo(HOT_POCKET_SATS + Number(DUST))], Number(DUST))).toBe(true)
+  test('a full set of lanes wants nothing', () => {
+    const pool = [vtxo(500_000), ...Array.from({ length: HOT_POCKET_COUNT }, () => vtxo(1_000))]
+    expect(hotPocketsNeeded(pool, D)).toBe(0)
+  })
+
+  test('capped by what the biggest coin can spare above dust', () => {
+    // room for exactly one pocket plus a cold coin ≥ dust
+    expect(hotPocketsNeeded([vtxo(HOT_POCKET_SATS + D)], D)).toBe(1)
+    expect(hotPocketsNeeded([vtxo(HOT_POCKET_SATS + D - 1)], D)).toBe(0)
+    expect(hotPocketsNeeded([vtxo(2 * HOT_POCKET_SATS + D)], D)).toBe(2)
   })
 
   test('an empty wallet is not a candidate', () => {
-    expect(needsHotPocket([], Number(DUST))).toBe(false)
+    expect(hotPocketsNeeded([], D)).toBe(0)
   })
 })
 
 describe('splitHotPocket', () => {
-  test('carves exactly one pocket via a plain self-send (SDK picks the big coin)', async () => {
+  test('carves the whole set in ONE self-send — N lanes cost the same one hop', async () => {
     const { wallet, calls } = stubWallet([vtxo(500_000)])
     const txid = await splitHotPocket({ wallet, db, arkInfo: arkInfo() })
     expect(txid).toBe('tx-sdk')
-    expect(calls.send).toEqual([{ address: ARK_ADDR, amount: HOT_POCKET_SATS }])
-    expect(calls.sendBitcoin).toEqual([]) // NOT the explicit path
+    expect(calls.send).toHaveLength(HOT_POCKET_COUNT)
+    expect(calls.send.every((c) => c.address === ARK_ADDR && c.amount === HOT_POCKET_SATS)).toBe(true)
+    expect(calls.sendBitcoin).toEqual([]) // NOT the explicit-selection path
   })
 
-  test('no-ops when a pocket already exists', async () => {
+  test('tops up only the missing lanes', async () => {
     const { wallet, calls } = stubWallet([vtxo(500_000), vtxo(4_000)])
+    await splitHotPocket({ wallet, db, arkInfo: arkInfo() })
+    expect(calls.send).toHaveLength(HOT_POCKET_COUNT - 1)
+  })
+
+  test('no-ops when every lane already exists', async () => {
+    const pool = [vtxo(500_000), ...Array.from({ length: HOT_POCKET_COUNT }, () => vtxo(4_000))]
+    const { wallet, calls } = stubWallet(pool)
     expect(await splitHotPocket({ wallet, db, arkInfo: arkInfo() })).toBeUndefined()
     expect(calls.send).toEqual([])
   })

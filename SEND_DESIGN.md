@@ -352,8 +352,20 @@ it can't price, and a single-coin spend contaminates nothing anyway.
 ### The hot pocket
 
 After each consolidate-all (auto **and** the manual button), `splitHotPocket`
-carves **one** pocket of `HOT_POCKET_SATS = 5,000` back out with a plain
-self-send, leaving `[hot, cold]`.
+carves **`HOT_POCKET_COUNT = 3`** pockets of `HOT_POCKET_SATS = 5,000` back out
+in a single multi-recipient self-send, leaving `[hot × 3, cold]`.
+
+**Why three and not one.** A sub-dust send spends its coin WHOLE, and the
+change only returns after boltz has paid the invoice and run the claim split —
+so for the length of an external LN payment the wallet holds *no* hot coin, and
+a second zap fired in that window (Amethyst zaps several people in one tap) had
+nothing but cold to pick. Serializing instead would hold a lock across that LN
+payment, and across a stuck swap until the cooperative cancel or T — i.e. up to
+the whole send window, for a saving of one hop. Extra lanes are nearly free:
+the pockets are written off in exit terms almost immediately whether there is
+one or three, so `P` is unchanged, and the write-off ceiling is per-pocket by
+design. Past three concurrent sends it degrades gently to cold (one hop, reset
+at the next refresh) rather than waiting or failing.
 
 - **What the number actually sets is the ASP-death write-off.** The pocket is
   what every small spend chains onto, so its exit cost passes its value quickly
@@ -362,10 +374,10 @@ self-send, leaving `[hot, cold]`.
   only has to be long-lived, and a sub-dust send costs `a + fee`, so it absorbs
   thousands of 1-sat zaps before dropping under the ~661 sats an atomic funding
   needs.
-- **No refill machinery, deliberately.** When the pocket is finally too small,
-  the selector just spends the cold coin alone and its change becomes the new
-  working coin. A worn pocket is still ≤ `HOT_POCKET_SATS`, so it never
-  re-triggers a split.
+- **No refill machinery, deliberately.** When the pockets are finally too
+  small, the selector just spends the cold coin alone and its change becomes the
+  new working coin. A worn pocket is still ≤ `HOT_POCKET_SATS`, so it counts as
+  a lane and never re-triggers a split; only a genuinely missing lane is carved.
 - **Why a self-send and not two outputs on the settle itself** (which would leave
   both at batch-leaf depth instead of one hop): reproducing no-arg
   `wallet.settle()` means reimplementing its private internals — boarding-UTXO

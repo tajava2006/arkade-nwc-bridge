@@ -28,6 +28,23 @@ import { makeExitCostOracle } from './exit/cost_oracle'
  */
 export const HOT_POCKET_SATS = 5_000
 
+/**
+ * How many pockets to keep. One was not enough: a sub-dust send spends its
+ * coin WHOLE, and our change only comes back after boltz has paid the invoice
+ * and run the claim split — so for the length of an external LN payment the
+ * wallet holds no hot coin at all, and a second zap fired in that window
+ * (Amethyst zaps several people in one tap) had nothing left but cold.
+ *
+ * Serializing instead would mean holding a lock across that LN payment, and
+ * across a stuck swap until the cooperative cancel or T — up to the whole send
+ * window. Extra lanes cost nothing by comparison: the pockets are written off
+ * in exit terms almost immediately whether there is one or three, so the
+ * portfolio value is the same, and the write-off ceiling is per-pocket by
+ * design. Beyond N concurrent sends it degrades gently to cold rather than
+ * failing or waiting.
+ */
+export const HOT_POCKET_COUNT = 3
+
 export interface SpendDeps {
   wallet: Wallet
   db: Database
@@ -108,47 +125,59 @@ export async function sendSelected(
 }
 
 /**
- * Whether a wear pocket needs carving out of `pool`. True only when no coin is
- * already small enough to serve as one AND the wallet can spare it while
- * leaving a cold coin above dust.
+ * How many pockets are missing from `pool`, capped by what the wallet can
+ * actually spare while leaving a cold coin above dust.
  *
- * One threshold, no second magic number: a coin at or under HOT_POCKET_SATS
- * IS the pocket. A worn-down pocket therefore never triggers a re-split — that
- * is intended, see HOT_POCKET_SATS.
+ * One threshold, no second magic number: a coin at or under HOT_POCKET_SATS IS
+ * a pocket. Worn pockets therefore still count, so a wallet that has simply
+ * been spending down never re-splits — that is intended, see HOT_POCKET_SATS.
  */
-export function needsHotPocket(pool: ExtendedVirtualCoin[], dust: number): boolean {
-  if (pool.some((v) => v.value <= HOT_POCKET_SATS)) return false
-  return pool.some((v) => v.value >= HOT_POCKET_SATS + dust)
+export function hotPocketsNeeded(pool: ExtendedVirtualCoin[], dust: number): number {
+  const missing = HOT_POCKET_COUNT - pool.filter((v) => v.value <= HOT_POCKET_SATS).length
+  if (missing <= 0) return 0
+  const biggest = pool.reduce((n, v) => Math.max(n, v.value), 0)
+  const affordable = Math.floor((biggest - dust) / HOT_POCKET_SATS)
+  return Math.max(0, Math.min(missing, affordable))
 }
 
 /**
- * Carve one wear pocket out of the consolidated wallet: a self-send that leaves
- * `[hot, cold]` instead of a single coin.
+ * Carve the wear pockets out of the consolidated wallet: one self-send that
+ * leaves `[hot × N, cold]` instead of a single coin. Multiple recipients in a
+ * single tx, so N pockets cost exactly the same one hop as one did.
  *
- * Why not two outputs on the settle itself (which would leave both at batch-leaf
- * depth instead of one hop): reproducing what no-arg `wallet.settle()` does
- * would mean reimplementing its private internals — boarding-UTXO gathering,
- * per-input fee filtering, MAX_VTXOS_PER_SETTLEMENT, the dust check — against
- * SDK-internal helpers that aren't exported. Losing boarding absorption on a
- * refresh is a far worse failure than one extra hop, and that hop is a FIXED
- * cost paid once per refresh cycle, not an accumulating one.
+ * Why not N outputs on the settle itself (which would leave everything at
+ * batch-leaf depth instead of one hop, and keep cold `settled` rather than
+ * preconfirmed): reproducing no-arg `wallet.settle()` means reimplementing its
+ * private internals — boarding-UTXO gathering, per-input fee filtering,
+ * MAX_VTXOS_PER_SETTLEMENT, the dust check — against SDK helpers that aren't
+ * exported (`byValueDescending`, `toOffchainInputFeeParams`), i.e. code that
+ * breaks silently on an SDK bump. Losing boarding absorption on a refresh is a
+ * correctness failure; the hop is a FIXED cost paid once per refresh cycle and
+ * reset by the next one. If the SDK ever exports enough to gather inputs
+ * safely, this is the thing to revisit.
  *
- * Best-effort by construction: a failure here leaves a perfectly good
- * consolidated wallet, so it is logged and swallowed by callers.
+ * Best-effort: a failed split leaves a perfectly good consolidated wallet, so
+ * it is logged and swallowed by callers.
  */
 export async function splitHotPocket(deps: SpendDeps): Promise<string | undefined> {
   const dust = Number(deps.arkInfo.dust)
   const pool = await spendablePool(deps.wallet, deps.arkInfo.dust)
-  if (!needsHotPocket(pool, dust)) return undefined
+  const n = hotPocketsNeeded(pool, dust)
+  if (n === 0) return undefined
 
   // Plain wallet.send on purpose: its selector takes the largest coin, which
-  // right after a consolidate-all is the one we want to split.
-  const txid = await deps.wallet.send({
-    address: await deps.wallet.getAddress(),
-    amount: HOT_POCKET_SATS,
-  })
+  // right after a consolidate-all is the one we want to split. Change is the
+  // cold remainder.
+  const own = await deps.wallet.getAddress()
+  const txid = await deps.wallet.send(
+    ...(Array.from({ length: n }, () => ({ address: own, amount: HOT_POCKET_SATS })) as [
+      { address: string; amount: number },
+      ...{ address: string; amount: number }[],
+    ]),
+  )
   console.log(
-    `hot pocket: carved ${HOT_POCKET_SATS} sats off the consolidated VTXO (arkTxid ${txid}) — wear now concentrates there`,
+    `hot pocket: carved ${n} × ${HOT_POCKET_SATS} sats off the consolidated VTXO ` +
+      `(arkTxid ${txid}) — concurrent sends now have ${n} lanes before falling back to cold`,
   )
   return txid
 }
