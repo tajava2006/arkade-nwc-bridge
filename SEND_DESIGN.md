@@ -379,6 +379,41 @@ self-send, leaving `[hot, cold]`.
   is logged and swallowed. Selection then degrades to "spend the one coin" —
   exactly the old behaviour.
 
+### Concurrency: serialize, don't reserve
+
+Two zaps fired at once (Amethyst zaps several people in one tap) used to race:
+both selected coins, both submitted, one lost with `VTXO_ALREADY_SPENT`.
+
+The SDK already solves this for its own spends and we simply weren't using it:
+
+- `Wallet._withTxLock` is a FIFO promise chain — `send`, `sendBitcoin` and
+  `settle` all pass through it, so they queue rather than collide. It *is* the
+  queue; there was never a reason to build a second one.
+- `_addPendingSpends` hides an in-flight spend's inputs from concurrent
+  `getVtxos()` until it is persisted, which covers the window where the
+  indexer still reports a just-spent coin as spendable.
+
+The atomic sub-dust send bypassed **both**: it read coins straight off
+`RestIndexerProvider` and submitted through its own `fundShared`. It now
+selects from `wallet.getVtxos()` and funds via
+`wallet.sendBitcoin({ address: <shared script as an Ark address>, amount: <the
+selected total>, selectedVtxos })` — whole-input is just "amount equals the
+total", which leaves no change and keeps the shared output at vout 0, the same
+contract `fundShared` had. `fundShared` itself stays in the vendored core
+because boltz still funds that way on the receive leg.
+
+**Why not per-VTXO reservation.** It looks like more concurrency and is
+actively wrong here: the hot-pocket policy makes concurrent zaps pick the SAME
+coin by design, so reserving it would push the second zap onto **cold** — the
+contamination §8b exists to prevent. Serialized, the second zap instead spends
+the first one's change, which is still the hot coin. Wear stays concentrated.
+The cost is that zaps queue behind each other; a sub-dust send is one offchain
+tx plus boltz's LN pay, so that is the right trade.
+
+Note this also closes a race the two-locks approach could not: an atomic send
+and the auto-refresh `settle()` are now on the same lock, where a bridge-local
+mutex would have left them on separate ones.
+
 ### Honest trade-off
 
 In a world with no sends, splitting *costs* a little: N clean leaves are dearer

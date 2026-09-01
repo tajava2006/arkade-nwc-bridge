@@ -5,7 +5,6 @@ import {
   DefaultVtxo,
   RestArkProvider,
   RestIndexerProvider,
-  type ArkTxInput,
   type VirtualCoin,
   type Wallet,
 } from '@arkade-os/sdk'
@@ -14,7 +13,6 @@ import {
   AtomicVtxoScript,
   classifyResume,
   computeClaimSplit,
-  fundShared,
   isEligibleFundingInput,
   presignCancel,
   presignClaim,
@@ -100,7 +98,7 @@ const FUNDING_MARGIN_SECS = 600
 /**
  * Swap ids a live atomicSubdustSend call is currently driving (F19). The
  * reconciler must skip these: the F15 pre-pass cannot tell a crash remnant
- * from a send inside its fundShared→setFundingOutpoint window (both read as
+ * from a send inside its funding→setFundingOutpoint window (both read as
  * 'init' + no outpoint + coin on-chain), and markClaimed would race the live
  * flow's own 'claimed' transition — either steal makes the send throw
  * `illegal transition` mid-flight (mainnet 2026-07-29, boltz-ws poke landing
@@ -174,15 +172,12 @@ export async function atomicSubdustSend(
   // funding change ⇒ the wallet can never be left with a sub-dust remainder
   // here; the claim split returns V′ − a − fee (≥ dust ⇒ regular).
   // V′ ≥ a + fee + dust; net cost stays a + fee.
-  const userScript = new DefaultVtxo.Script({
-    pubKey: userXOnly,
-    serverPubKey: serverXOnly,
-    csvTimelock: { type: timelockType(BigInt(info.unilateralExitDelay)), value: BigInt(info.unilateralExitDelay) },
-  })
-  const { vtxos: ownVtxos } = await indexer.getVtxos({
-    scripts: [hex.encode(userScript.pkScript)],
-    spendableOnly: true,
-  })
+  // Coin source is the WALLET, not a raw indexer read. wallet.getVtxos is where
+  // the SDK masks inputs a concurrent spend has already claimed
+  // (_addPendingSpends, held until that spend is persisted) and where the
+  // bridge's unrolled filter lives. Reading the indexer directly opted out of
+  // both, so two zaps fired at once each saw the same coin as free.
+  const ownVtxos = await deps.wallet.getVtxos({ withRecoverable: false })
   // Eligibility (regular / spendable / outlasts T) is the vendored rule boltz
   // shares; WHICH eligible coin to burn is a bridge-only policy, so the
   // ascending-by-value accumulation is replaced by the exit-cost-aware selector
@@ -224,27 +219,28 @@ export async function atomicSubdustSend(
       exitDelay: Number(d),
     })
 
-    const funderInputs: ArkTxInput[] = funding.map((f) => ({
-      txid: f.txid,
-      vout: f.vout,
-      value: f.value,
-      tapLeafScript: userScript.forfeit(),
-      tapTree: userScript.encode(),
-    }))
     const Vp = funding.reduce((n, f) => n + f.value, 0)
-    let outpoint: { txid: string; vout: number }
+    // Fund THROUGH THE WALLET rather than submitting the spend ourselves. The
+    // shared script is a VtxoScript, so it encodes to an ordinary Ark address
+    // and needs no special submit path; spending the selected coins WHOLE is
+    // just amount === their total, which leaves no change and therefore makes
+    // the shared output the only output (vout 0) — the same contract fundShared
+    // had. What we gain is everything the SDK already does for a spend and we
+    // were bypassing: the FIFO transaction lock (so concurrent zaps queue
+    // instead of racing) and the pending-spend hold (so the loser of that race
+    // doesn't re-pick a coin the winner already committed, which the indexer
+    // still reports as spendable for a moment). Per-input forfeit/tapTree also
+    // now come from each coin instead of one assumed script.
+    let txid: string
     try {
-      outpoint = await fundShared(
-        funderInputs,
-        [{ script: script.pkScript, amount: BigInt(Vp) }],
-        unroll,
-        deps.wallet.identity,
-        ark,
-      )
+      txid = await deps.wallet.sendBitcoin({
+        address: script.address(hrp(info.network), serverXOnly).encode(),
+        amount: Vp,
+        selectedVtxos: funding,
+      })
     } catch (err) {
-      // The funding spend was rejected (most often: a concurrent send already
-      // took one of these vtxos — there is no input lock yet, SEND_DESIGN §8b).
-      // Nothing was created, so there is no shared vtxo, no proof to mirror and
+      // The funding spend was rejected. Nothing was created, so there is no
+      // shared vtxo, no proof to mirror and
       // nothing to refund or cancel: terminalize now rather than leave an
       // 'init' row the reconciler polls forever behind a meaningless T.
       // Verified against the indexer, never assumed — a submit that landed and
@@ -252,7 +248,6 @@ export async function atomicSubdustSend(
       await failIfUnfunded(deps, repo, init.swapId, err instanceof Error ? err.message : String(err))
       throw err
     }
-    const txid = outpoint.txid
 
     const { shared, coin } = await locateFunding(indexer, script, Vp, txid)
     repo.setFundingOutpoint(init.swapId, `${shared.txid}:${shared.vout}`)
@@ -722,12 +717,11 @@ type FundingVerdict =
  * A send row sits at 'init' with no fundingOutpoint in two very different
  * situations, and they need opposite handling:
  *
- *  - the bridge died between fundShared and setFundingOutpoint. The shared
+ *  - the bridge died between the funding spend and setFundingOutpoint. The shared
  *    vtxo IS on-chain but unrecorded, so nothing would ever reclaim V. Record
  *    the outpoint and advance to 'funded' so the refund path picks it up.
- *  - fundShared itself failed — arkd rejected the spend (a concurrent send
- *    took the same vtxo first: no input lock yet, see SEND_DESIGN §8b), the
- *    wallet couldn't cover it, whatever. Nothing was created, so there is no
+ *  - the funding spend itself failed — arkd rejected it, the wallet couldn't
+ *    cover it, whatever. Nothing was created, so there is no
  *    vtxo, no proof to mirror and nothing to refund or cancel. The row is
  *    simply dead — but classifyResume maps 'init' to 'poll' regardless of T,
  *    so it used to sit in the dashboard's in-flight list forever, showing a
@@ -782,7 +776,7 @@ async function classifyUnfundedInit(
 
 /**
  * Terminalize a send whose funding demonstrably never landed. Called both from
- * the live path (fundShared threw) and the reconciler (remnants). Returns true
+ * the live path (the funding spend threw) and the reconciler (remnants). Returns true
  * when the row was failed.
  */
 async function failIfUnfunded(
@@ -965,7 +959,7 @@ export async function resumeAtomicSends(
   for (const swap of repo.listResumable()) {
     if (swap.direction !== SwapDirection.Send) continue
     if (inflightSends.has(swap.id)) {
-      // The live send is somewhere between fundShared and its own terminal
+      // The live send is somewhere between its funding spend and its own terminal
       // bookkeeping — any transition landed here would collide with the one
       // it performs next (F19: illegal funded→funded / claimed→claimed).
       result.waiting++
