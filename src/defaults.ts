@@ -78,7 +78,7 @@ export const NWC_RELAYS_FALLBACK: readonly string[] = [
 // without code edits. The bootstrap set is "well-known indexer relays"
 // — any one of them succeeding is enough.
 export const OUTBOX_FALLBACK_PUBKEY =
-  '658988350649280e43ebcdf83c20dd21273aeb4eeaa8eda7864b0fa9b57cb7a5'
+  'f1f3300a45164b562a82b86a9dcc0ee0e5f6c5b833a92e41cbf95b28b03ba848'
 export const OUTBOX_BOOTSTRAP_RELAYS: readonly string[] = [
   'wss://purplepag.es',
   'wss://nostr.land',
