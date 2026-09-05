@@ -24,6 +24,28 @@ export interface ArkContext {
 // Invariant: this < AUTO_REFRESH_THRESHOLD_SECONDS (tested).
 export const VTXO_RENEW_THRESHOLD_SECONDS = 3600
 
+// The largest checkpoint exit delay that a 24h setting can actually survive
+// the wire as. arkd's default is 86400s (`defaultCheckpointExitDelay`, 24h)
+// but the value reaches us inside a BIP-68 relative timelock, which encodes
+// time in 512-second units: 86400 / 512 = 168.75, so the script carries 168
+// units and decodes back as 86016s. SDK 0.4.62 started enforcing a mainnet
+// floor of exactly 86400s against that decoded number, which no arkd running
+// the stock 24h setting can ever clear — the SDK itself already met this on
+// signet and hardcoded 86016 as that network's floor rather than fixing the
+// comparison. We restate the floor at the same value: the largest multiple of
+// 512 that is ≤ 24h.
+//
+// Deliberately a constant, NOT read from the server. The floor exists to
+// reject an ASP that advertises a SHORTER exit delay than we're willing to
+// accept (a short checkpoint delay shrinks the window to react during a
+// unilateral exit); deriving it from what the server advertises would delete
+// the check it is. 384 seconds below arkd's nominal 24h is the encoding's
+// rounding, not a policy concession.
+//
+// Regtest is exempt: the drill's arkd runs deliberately short delays and the
+// SDK's own regtest floor (1200s) already accommodates them.
+export const MIN_CHECKPOINT_EXIT_DELAY_SECONDS = 86016n
+
 /**
  * The default-filter semantics `getVtxos` documents but does not deliver:
  * `withUnrolled: false` is consulted only after `hasTerminalSpend`, and an
@@ -85,6 +107,12 @@ export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promis
     // deprecatedSignerMigration fall back to their defaults (the SDK reads each
     // field with `?? DEFAULT_SETTLEMENT_CONFIG.*`). Seconds, not ms.
     settlementConfig: { vtxoThreshold: VTXO_RENEW_THRESHOLD_SECONDS },
+    // See MIN_CHECKPOINT_EXIT_DELAY_SECONDS: the SDK's mainnet floor is a
+    // value the encoding cannot represent, so a stock arkd is rejected out of
+    // the box. Regtest keeps the SDK's own (lower) floor.
+    ...(cfg.network === 'regtest'
+      ? {}
+      : { minCheckpointExitDelaySeconds: MIN_CHECKPOINT_EXIT_DELAY_SECONDS }),
   })
   installUnrolledVtxoFilter(wallet)
 
