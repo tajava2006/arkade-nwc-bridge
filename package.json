@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test test/unit test/nostr test/integration",
     "test:live": "RUN_LIVE_TESTS=1 bun test test/live",
-    "upgrade": "bun update @arkade-os/sdk @arkade-os/boltz-swap nostr-tools light-bolt11-decoder qr eventsource --latest && bun run typecheck && bun run test"
+    "upgrade": "./update-deps.sh"
   },
   "devDependencies": {
     "@types/bun": "latest"
