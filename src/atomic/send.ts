@@ -820,6 +820,20 @@ export interface AtomicSendResumeResult {
 
 type SendStatus = { state: string; preimage?: string }
 
+/**
+ * How long a send may sit in funded/ln_inflight before we stop believing the
+ * counterparty's status row and just ask for the cancel.
+ *
+ * boltz caps an LN payment attempt at 300s (LndClient.paymentTimeout), after
+ * which LND itself marks it failed — so anything past 2× that is not a payment
+ * in progress. What it usually is: boltz's status row stuck at ln_inflight
+ * because its own LND went unreachable mid-payment (or it restarted), leaving
+ * our poll with nothing to act on. Asking anyway is safe because /send/cancel
+ * does NOT trust that row — it re-checks boltz's LND directly and refuses
+ * while any HTLC could still settle (F21).
+ */
+const LN_INFLIGHT_STUCK_MS = 600_000
+
 /** boltz being unreachable is an expected input here, not an error. */
 async function sendStatusSafe(boltzApiUrl: string, swapId: string): Promise<SendStatus | undefined> {
   try {
@@ -1006,6 +1020,19 @@ export async function resumeAtomicSends(
           result.refundWait.push(swap.id)
           // Don't wait for the next tick to classify it as 'cancel' — boltz has
           // just told us the pay is terminally failed, so unwind in this pass.
+          await tryCancel(swap.id)
+        } else if (Date.now() - swap.updatedAt > LN_INFLIGHT_STUCK_MS) {
+          // boltz's status is neither success nor failure and the row has
+          // outlived any payment it could still be making — its LND went away
+          // mid-flight, so the row it would have written never got written.
+          // Ask for the cancel regardless: /send/cancel gates on boltz's LND,
+          // not on the status we just failed to get a verdict from, so a
+          // genuinely live payment is still refused. Without this the swap sat
+          // until T even though the funding was recoverable the whole time.
+          console.warn(
+            `atomic send ${swap.id}: boltz status stuck at '${st?.state ?? 'unreachable'}' for ` +
+              `${Math.round((Date.now() - swap.updatedAt) / 60_000)} min — asking for the cancel anyway`,
+          )
           await tryCancel(swap.id)
         } else {
           result.waiting++

@@ -382,6 +382,61 @@ describe('resumeAtomicSends', () => {
     expect(calls.length).toBe(1)
   })
 
+  // The counterparty's status row is not the only evidence. When boltz's own
+  // LND disappears mid-payment (an internet outage took bitcoind's peers and
+  // LND with it, mainnet 2026-09-01) boltz never writes 'failed', so our poll
+  // has nothing to act on and the swap used to sit until T — even though
+  // /send/cancel would have co-signed the moment its LND could answer.
+  describe('boltz status stuck in flight', () => {
+    /** Plant a send whose state was last touched `ageMinutes` ago. */
+    const plantStale = (id: string, state: 'funded' | 'ln_inflight', ageMinutes: number): void => {
+      plantSend(id, state, NOW + 3600) // pre-T, so classifyResume says 'poll'
+      db.query('UPDATE atomic_swaps SET updated_at = ? WHERE id = ?').run(
+        Date.now() - ageMinutes * 60_000,
+        id,
+      )
+    }
+
+    test('past the stuck window, the cancel is attempted even without a failed status', async () => {
+      plantStale('s-stuck', 'ln_inflight', 30)
+      stubStatus({ 's-stuck': { state: 'ln_inflight' } }) // boltz still says in-flight
+      const seen: string[] = []
+      const r = await resumeAtomicSends(makeDeps(), noRefund, spent, okCancel(seen))
+      expect(seen).toEqual(['s-stuck'])
+      expect(r.cancelled).toEqual(['s-stuck'])
+      expect(repo.get('s-stuck')?.state).toBe('cancelled')
+    })
+
+    test('an unreachable boltz is treated the same — its LND is what decides', async () => {
+      plantStale('s-gone', 'ln_inflight', 30)
+      stubStatus({}) // status endpoint down
+      const seen: string[] = []
+      await resumeAtomicSends(makeDeps(), noRefund, spent, okCancel(seen))
+      expect(seen).toEqual(['s-gone'])
+    })
+
+    test('a payment that could still be in flight is left alone', async () => {
+      // boltz caps an attempt at 300s; inside that window the status row being
+      // 'ln_inflight' is just the truth, not a stuck row.
+      plantStale('s-paying', 'ln_inflight', 2)
+      stubStatus({ 's-paying': { state: 'ln_inflight' } })
+      const seen: string[] = []
+      const r = await resumeAtomicSends(makeDeps(), noRefund, spent, okCancel(seen))
+      expect(seen).toEqual([])
+      expect(r.waiting).toBe(1)
+      expect(repo.get('s-paying')?.state).toBe('ln_inflight')
+    })
+
+    test('a stuck row boltz refuses to cancel keeps its T-refund', async () => {
+      plantStale('s-refused', 'funded', 30)
+      stubStatus({ 's-refused': { state: 'ln_inflight' } })
+      const r = await resumeAtomicSends(makeDeps(), noRefund, spent, noCancel)
+      expect(r.cancelled).toEqual([])
+      expect(r.waiting).toBe(1)
+      expect(repo.get('s-refused')?.state).toBe('funded') // still recoverable at T
+    })
+  })
+
   // A send whose funding spend was REJECTED (concurrent send took the same
   // vtxo — no input lock yet) leaves an 'init' row with no outpoint. Nothing
   // was created, so there is no shared vtxo, no proof and nothing to refund;

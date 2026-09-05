@@ -803,11 +803,33 @@ T는 줄일 수 없다 — LN cltv 예산이 `(sendWindow − payMargin) / block
   그래서 `subdustCancelGate.ts`가 LND 종말실패(FAILED + in-flight 0) 또는 NOT_FOUND일 때만
   허용하고, **LND 무응답은 거부**한다. 상세·테스트는 F21.
 
+### 11.4b 상대 상태창을 믿지 않는다 (2026-09-01)
+
+취소를 배선했는데도 `ln_inflight`에서 안 풀리는 사례가 나왔다. 인터넷이 죽어 bitcoind
+피어가 끊기고 LND가 같이 맛이 간 상황:
+
+1. 우리는 `/send/fund` **직전에** `ln_inflight`로 전이한다. 그 POST가 네트워크로 인해
+   throw하면 그 행을 옮기는 코드가 없다 → `ln_inflight` 고정.
+2. boltz도 같은 이유로 `failed`를 못 쓴다. `sendPayment`가 해소되지 않았거나
+   프로세스가 중간에 죽었으면 pg의 행은 `ln_inflight` 그대로.
+3. 우리 리컨사일러의 `poll`은 boltz 상태가 `claimed`/`failed`/`refund_wait`일 때만
+   행동한다. `ln_inflight`면 `waiting++` → **T까지 대기.** §11이 배선한 취소가 발화하지 못함.
+
+**교정**: 상대의 **상태창**이 아니라 상대의 **LND**가 진실이다. `/send/cancel`은 이미
+`lnPaymentIsDead`로 boltz의 LND를 직접 물어보고 HTLC가 살아있으면 거부한다(F21). 그러니
+상태창이 답을 못 줘도 **그냥 취소를 요청하면 된다** — 판정은 게이트가 한다.
+
+`funded`/`ln_inflight`가 `LN_INFLIGHT_STUCK_MS = 10분`(boltz `paymentTimeout` 300s의 2배)을
+넘기면 상태와 무관하게 취소를 시도한다. 진행 중인 결제는 게이트가 거부하고, boltz가 아예
+불통이면 던져서 T-refund 폴백이 그대로 남는다. **회수 경로를 더하기만 하고 빼지 않는다**는
+§11.4의 원칙 그대로.
+
 ### 11.5 회수 경로 정리 (현행)
 
 | 상황 | 경로 | 소요 | boltz 필요 |
 |---|---|---|---|
 | LN 종말실패, boltz 정상 | **cancel leaf** (§11) | 즉시 | O |
+| boltz 상태창이 in-flight로 굳음 (LND 유실) | **cancel leaf** (§11.4b, 10분 후 무조건 시도) | 즉시 | O (LND만 살아나면) |
 | boltz 무응답/거부 | refund leaf (CLTV T) | T까지 | X |
 | ASP까지 사망 | uexit leaf (CSV d) | d + 온체인 | X |
 
