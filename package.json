@@ -17,20 +17,26 @@
     "upgrade": "./update-deps.sh"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "^1.4.1"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "@arkade-os/sdk": "0.4.62",
+    "@noble/curves": "2.0.1",
+    "@scure/base": "2.0.0",
+    "@scure/btc-signer": "2.0.1"
   },
   "dependencies": {
-    "@arkade-os/boltz-swap": "^0.3.58",
-    "@arkade-os/sdk": "^0.4.53",
+    "@arkade-os/boltz-swap": "^0.3.67",
+    "@arkade-os/sdk": "0.4.62",
     "@noble/curves": "2.0.1",
-    "@scure/base": "^2.0.0",
+    "@scure/base": "2.0.0",
     "@scure/btc-signer": "2.0.1",
-    "eventsource": "^4.1.0",
+    "eventsource": "^5.1.1",
     "light-bolt11-decoder": "^3.2.0",
-    "nostr-tools": "^2.24.1",
-    "qr": "^0.6.0"
+    "nostr-tools": "^2.25.2",
+    "qr": "^0.7.0"
   }
 }

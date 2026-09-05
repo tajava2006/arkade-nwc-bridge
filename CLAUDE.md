@@ -276,6 +276,17 @@ row exists. Logs go to stdout; when running in background pipe to
   Don't link to them from anything that gets committed — public links
   will 404. External URLs are in [DESIGN.md §10](DESIGN.md). Refresh
   them via the workspace's `update-refs.sh`, not a bridge npm script.
+- **The ark dependency chain must stay a single instance.**
+  `@arkade-os/boltz-swap` pins `@arkade-os/sdk` to an *exact* version,
+  and that SDK in turn pins `@noble/curves` / `@scure/base` /
+  `@scure/btc-signer` exactly. Running ahead of those pins puts two
+  copies of the same library in the tree: `tsc` rejects it outright
+  (`Wallet` vs `IWallet`, "separate declarations of a private property"),
+  and the failure mode where it *doesn't* is worse — two `Transaction`
+  classes on a money path. The `overrides` block in package.json is what
+  holds the line; `./update-deps.sh` prints boltz-swap's required SDK
+  next to the override so a drift is visible. Bump those four by hand
+  only when boltz-swap bumps its own pin.
 - **Boltz endpoint is *not* `api.ark.boltz.exchange`.** The d.ts
   docstring lies; the real SDK default is `api.boltz.exchange` and
   that's what the production wallet uses. Don't pass `swapProvider`

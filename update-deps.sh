@@ -10,6 +10,16 @@ cd "$(dirname "$0")"
 echo "== JS 의존성 (전부 latest) =="
 bun update --latest
 
+# package.json의 `overrides`가 ark 커플링을 지킨다: @arkade-os/boltz-swap은 @arkade-os/sdk를
+# 정확한 버전으로 핀하고, 그 sdk는 다시 @noble/curves·@scure/*를 정확한 버전으로 핀한다.
+# 우리가 그보다 앞서 나가면 트리에 같은 라이브러리가 두 벌 생기고, 타입 정체성이 갈려
+# 컴파일이 깨진다(운 나쁘면 런타임에 조용히 갈린다). --latest는 dependencies는 밀지만
+# overrides는 안 건드리므로 해소는 유지된다.
+# boltz-swap이 sdk 핀을 올렸을 때만 overrides 네 줄을 손으로 올릴 것:
+echo "-- ark 커플링 확인 (아래 두 줄이 같아야 함)"
+echo "   boltz-swap이 요구하는 sdk: $(node -e "console.log(require('./node_modules/@arkade-os/boltz-swap/package.json').dependencies['@arkade-os/sdk'])")"
+echo "   overrides가 강제하는 sdk : $(node -e "console.log(require('./package.json').overrides['@arkade-os/sdk'])")"
+
 echo "== 타입체크 =="
 bun run typecheck
 
