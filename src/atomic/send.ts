@@ -31,6 +31,7 @@ import { makeExitCostOracle } from '../exit/cost_oracle'
 import { gcOrphanProofs, removeVtxo } from '../exit/vault'
 import { selectSpendInputs } from '../coin_select'
 import type { NotifyFn } from '../nostr/notifier'
+import { WholeSetIndexerProvider } from '../indexer'
 
 // Bridge side of the atomic sub-dust SEND (ARK -> LN). The bridge is the funder
 // (F): it funds a 4-leaf shared vtxo, pre-signs the claim split, and hands the
@@ -125,7 +126,7 @@ export async function atomicSubdustSend(
   invoiceSats: number,
 ): Promise<AtomicSendResult> {
   const ark = new RestArkProvider(deps.arkServerUrl)
-  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const indexer = new WholeSetIndexerProvider(deps.arkServerUrl)
   const repo = new SqliteAtomicSwapRepository(deps.db)
 
   const paymentHash = decodeInvoice(invoice).paymentHash
@@ -480,7 +481,7 @@ export async function refundAtomicSend(
   }
 
   const ark = new RestArkProvider(deps.arkServerUrl)
-  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const indexer = new WholeSetIndexerProvider(deps.arkServerUrl)
   const info = await ark.getInfo()
   const serverXOnly = toXOnly(hex.decode(info.signerPubkey))
   const unroll = serverUnrollScript(info.checkpointTapscript)
@@ -607,7 +608,7 @@ export async function cancelAtomicSend(deps: AtomicSendDeps, swapId: string): Pr
   }
 
   const ark = new RestArkProvider(deps.arkServerUrl)
-  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const indexer = new WholeSetIndexerProvider(deps.arkServerUrl)
   const info = await ark.getInfo()
   const serverXOnly = toXOnly(hex.decode(info.signerPubkey))
   const unroll = serverUnrollScript(info.checkpointTapscript)
@@ -740,7 +741,7 @@ async function classifyUnfundedInit(
     return 'unknown'
   }
   const ark = new RestArkProvider(deps.arkServerUrl)
-  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const indexer = new WholeSetIndexerProvider(deps.arkServerUrl)
   const info = await ark.getInfo()
   const serverXOnly = toXOnly(hex.decode(info.signerPubkey))
   const userXOnly = toXOnly(await deps.wallet.identity.xOnlyPublicKey())
@@ -874,7 +875,7 @@ export async function resumeAtomicSends(
   cancel: (d: AtomicSendDeps, id: string) => Promise<AtomicCancelResult> = cancelAtomicSend,
 ): Promise<AtomicSendResumeResult> {
   const repo = new SqliteAtomicSwapRepository(deps.db)
-  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const indexer = new WholeSetIndexerProvider(deps.arkServerUrl)
   const confirm =
     confirmSpent ?? ((txid: string, vout: number): Promise<boolean> => confirmClaimSpent(indexer, txid, vout))
   const nowSecs = BigInt(Math.floor(Date.now() / 1000))

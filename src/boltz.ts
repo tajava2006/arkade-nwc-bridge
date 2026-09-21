@@ -18,6 +18,7 @@ import { SqliteSwapRepository } from './boltz_repository'
 import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
 import type { Config } from './config'
 import type { NotifyFn } from './nostr/notifier'
+import { WholeSetIndexerProvider } from './indexer'
 
 export interface BoltzContext {
   swaps: ArkadeSwaps
@@ -185,7 +186,7 @@ export async function initBoltz(deps: {
 }): Promise<BoltzContext> {
   // M3's landing verification reads the arkd indexer directly — the same
   // server the wallet trusts, never boltz.
-  const indexer = new RestIndexerProvider(deps.cfg.arkServerUrl)
+  const indexer = new WholeSetIndexerProvider(deps.cfg.arkServerUrl)
   const swaps = await ArkadeSwaps.create({
     wallet: deps.wallet,
     swapProvider: new BoltzSwapProvider({

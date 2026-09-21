@@ -6,7 +6,6 @@ import {
   ArkAddress,
   DefaultVtxo,
   RestArkProvider,
-  RestIndexerProvider,
   type Identity,
 } from '@arkade-os/sdk'
 import {
@@ -25,6 +24,7 @@ import {
 import { boltzFetch, boltzGet } from './boltz_http'
 import { confirmSpent, hrp, timelockType, toXOnly } from './ark_util'
 import type { NotifyFn } from '../nostr/notifier'
+import { WholeSetIndexerProvider } from '../indexer'
 
 // Bridge side of the atomic sub-dust RECEIVE (LN→ARK). The bridge is the CLAIMER
 // (C): it generates the preimage, gets a HOLD invoice from boltz, and once boltz
@@ -199,7 +199,7 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   }
 
   const ark = new RestArkProvider(deps.arkServerUrl)
-  const indexer = new RestIndexerProvider(deps.arkServerUrl)
+  const indexer = new WholeSetIndexerProvider(deps.arkServerUrl)
   const info = await ark.getInfo()
   const server = toXOnly(hex.decode(info.signerPubkey))
   const d = info.unilateralExitDelay
