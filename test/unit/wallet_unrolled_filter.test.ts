@@ -34,21 +34,54 @@ describe('withoutUnrolled', () => {
   })
 })
 
+/** A wallet stub shaped like the SDK's: both boundaries present. */
+function fakeWallet(rows: ExtendedVirtualCoin[] = [GHOST, LIVE]) {
+  const seen: (GetVtxosFilter | undefined)[] = []
+  const wallet = {
+    seen,
+    async getVtxos(filter?: GetVtxosFilter): Promise<ExtendedVirtualCoin[]> {
+      seen.push(filter)
+      return rows
+    },
+    async contractSnapshot(): Promise<{ contract: { script: string }; vtxos: ExtendedVirtualCoin[] }[]> {
+      return [{ contract: { script: 'aa' }, vtxos: rows }]
+    },
+  }
+  return wallet
+}
+
 describe('installUnrolledVtxoFilter', () => {
   test('patches getVtxos in place and forwards the original filter', async () => {
-    const seen: (GetVtxosFilter | undefined)[] = []
-    const wallet = {
-      async getVtxos(filter?: GetVtxosFilter): Promise<ExtendedVirtualCoin[]> {
-        seen.push(filter)
-        return [GHOST, LIVE]
-      },
-    }
+    const wallet = fakeWallet()
     installUnrolledVtxoFilter(wallet)
 
     expect(await wallet.getVtxos()).toEqual([LIVE])
     expect(await wallet.getVtxos({ withRecoverable: true })).toEqual([LIVE])
     expect(await wallet.getVtxos({ withUnrolled: true })).toEqual([GHOST, LIVE])
     // the SDK still receives exactly what the caller asked for
-    expect(seen).toEqual([undefined, { withRecoverable: true }, { withUnrolled: true }])
+    expect(wallet.seen).toEqual([undefined, { withRecoverable: true }, { withUnrolled: true }])
+  })
+
+  // SDK 0.4.62 moved getBalance and settle()'s input selection off getVtxos and
+  // onto contractSnapshot / getSpendableVtxos, which both read the snapshot —
+  // so the snapshot is the boundary that actually covers every reader.
+  test('filters the contract snapshot, which is what getBalance and settle read', async () => {
+    const wallet = fakeWallet()
+    installUnrolledVtxoFilter(wallet)
+
+    const snap = await wallet.contractSnapshot()
+    expect(snap).toHaveLength(1)
+    expect(snap[0]!.vtxos).toEqual([LIVE])
+    // the rest of the entry survives untouched
+    expect(snap[0]!.contract).toEqual({ script: 'aa' })
+  })
+
+  test('throws rather than silently losing the filter if the SDK moves the boundary', () => {
+    const noSnapshot = {
+      async getVtxos(): Promise<ExtendedVirtualCoin[]> {
+        return [GHOST, LIVE]
+      },
+    }
+    expect(() => installUnrolledVtxoFilter(noSnapshot)).toThrow(/contractSnapshot is missing/)
   })
 })

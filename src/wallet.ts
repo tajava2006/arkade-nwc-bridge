@@ -3,6 +3,7 @@ import {
   InMemoryWalletRepository,
   SingleKey,
   Wallet,
+  type ContractWithVtxos,
   type ExtendedVirtualCoin,
   type GetVtxosFilter,
 } from '@arkade-os/sdk'
@@ -66,11 +67,35 @@ export function withoutUnrolled(
   return filter?.withUnrolled ? vtxos : vtxos.filter((v) => !v.isUnrolled)
 }
 
+/** The snapshot every SDK vtxo reader funnels through (`protected` in the d.ts). */
+type SnapshotReader = { contractSnapshot(): Promise<ContractWithVtxos[]> }
+
 /**
- * Wrap `wallet.getVtxos` with {@link withoutUnrolled}. Instance-level on
- * purpose: getBalance / settle / the SDK's backstop renew all read vtxos via
- * `this.getVtxos(...)`, so one boundary catches every consumer — bridge code
- * AND the SDK's own selection paths — without forking the SDK.
+ * Install {@link withoutUnrolled} at the wallet boundary, instance-level, so
+ * the SDK's own selection paths are covered too — no fork.
+ *
+ * Patching `getVtxos` alone USED to be enough: in SDK 0.4.53 `getBalance` and
+ * `settle`'s input selection both went through `this.getVtxos(...)`. 0.4.62
+ * moved both off it — `getBalance` reads `contractSnapshot()` +
+ * `filterSnapshotVtxos` directly, and `settle` switched to
+ * `getSpendableVtxos` — so the patch silently stopped covering them and an
+ * exited vtxo came back into the balance (mainnet 2026-09-21, surfaced once
+ * the paging fix in src/indexer.ts stopped truncating the old rows away).
+ * Worse than the cosmetic half: an unrolled input back in `settle`'s set makes
+ * arkd reject the whole consolidate-all intent (VTXO_ALREADY_UNROLLED —
+ * the 2026-08-01 incident).
+ *
+ * So the real boundary is `contractSnapshot` — `getBalance`,
+ * `getVtxos`, `getSpendableVtxos` and the pending-recovery scan all take their
+ * rows from it. Filtering there covers present and future readers alike.
+ * It is `protected`, hence the cast; if the SDK ever renames it this THROWS at
+ * boot rather than quietly losing the filter again, which is exactly how this
+ * bug got in.
+ *
+ * Note the consequence: `getVtxos({ withUnrolled: true })` no longer resurrects
+ * anything on a real wallet — the rows are gone before the filter sees them.
+ * Nothing needs them from here; the exit path reads unrolled vtxos from the
+ * indexer (`exit/evidence.ts`) and the vault, never from the wallet.
  */
 export function installUnrolledVtxoFilter(wallet: {
   getVtxos(filter?: GetVtxosFilter): Promise<ExtendedVirtualCoin[]>
@@ -78,6 +103,23 @@ export function installUnrolledVtxoFilter(wallet: {
   const sdkGetVtxos = wallet.getVtxos.bind(wallet)
   wallet.getVtxos = async (filter?: GetVtxosFilter) =>
     withoutUnrolled(await sdkGetVtxos(filter), filter)
+
+  const holder = wallet as unknown as Partial<SnapshotReader>
+  const sdkSnapshot = holder.contractSnapshot
+  if (typeof sdkSnapshot !== 'function') {
+    throw new Error(
+      'installUnrolledVtxoFilter: wallet.contractSnapshot is missing — the SDK moved the ' +
+        'boundary every vtxo reader funnels through. Re-point this filter at the new one ' +
+        'before running: without it an already-exited vtxo re-enters the balance and, worse, ' +
+        "settle()'s input set, which arkd rejects wholesale (VTXO_ALREADY_UNROLLED).",
+    )
+  }
+  const sdkSnapshotBound = sdkSnapshot.bind(wallet)
+  ;(holder as SnapshotReader).contractSnapshot = async () =>
+    (await sdkSnapshotBound()).map((entry) => ({
+      ...entry,
+      vtxos: entry.vtxos.filter((v) => !v.isUnrolled),
+    }))
 }
 
 export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promise<ArkContext> {
