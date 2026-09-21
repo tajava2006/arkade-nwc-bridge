@@ -1,25 +1,24 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "arkade-nwc-bridge",
       "dependencies": {
-        "@arkade-os/boltz-swap": "latest",
-        "@arkade-os/sdk": "latest",
-        "@noble/curves": "latest",
-        "@scure/base": "latest",
-        "@scure/btc-signer": "latest",
-        "eventsource": "latest",
-        "light-bolt11-decoder": "latest",
-        "nostr-tools": "latest",
-        "qr": "latest",
+        "@arkade-os/boltz-swap": "^0.3.67",
+        "@arkade-os/sdk": "0.4.62",
+        "@noble/curves": "2.0.1",
+        "@scure/base": "2.0.0",
+        "@scure/btc-signer": "2.0.1",
+        "eventsource": "^5.1.1",
+        "light-bolt11-decoder": "^3.2.0",
+        "nostr-tools": "^2.25.2",
+        "qr": "^0.7.0",
       },
       "devDependencies": {
-        "@types/bun": "latest",
+        "@types/bun": "^1.4.1",
       },
       "peerDependencies": {
-        "typescript": "latest",
+        "typescript": "^7.0.2",
       },
     },
   },
