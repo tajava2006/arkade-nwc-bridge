@@ -28,6 +28,7 @@ import { autoRefreshPass } from './auto_refresh'
 import { resumeAtomicSends } from './atomic/send'
 import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from './atomic/boltz_ws'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
+import { createRelayGate } from './nostr/relay_gate'
 import { startNotifier, type Notifier, type NotifyFn } from './nostr/notifier'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
@@ -76,18 +77,26 @@ async function main(): Promise<void> {
   // can't disagree on a relay's state because they're reading the same
   // socket.
   //
-  // enableReconnect handles "relay was up, dropped briefly" with an
-  // internal backoff. But if a reconnect attempt *also* fails (relay
-  // still down), nostr-tools sets skipReconnection=true, permanently
-  // closes every subscription on that socket, and drops the relay
-  // from the pool entirely — after that, it never tries again until
-  // something explicitly ensureRelay's the URL. The watchdog below
-  // resurrects the *socket*; re-issuing the REQs on the fresh socket
-  // is persistent_sub.ts's job (the watchdog can't — a resurrected
-  // AbstractRelay starts with zero subscriptions). enablePing keeps
-  // healthy sockets from going stale behind NAT/idle timeouts; in Bun
-  // it takes the dummy-REQ fallback (no ws.once), which works fine.
-  const pool = new SimplePool({ enableReconnect: true, enablePing: true })
+  // enableReconnect stays OFF. nostr-tools' internal reconnect loop and
+  // our own recovery both call relay.connect(); when an attempt made
+  // through the pool fails while the internal loop is mid-backoff, the
+  // pool forgets the relay object but the object keeps reconnecting on
+  // its own — and the next ensureRelay builds a second one. Every outage
+  // leaked one live socket that way (reproduced: 3 outages → 4 sockets
+  // to one relay). With it off a dropped socket closes its subs and
+  // leaves the pool, and there is exactly one way back: persistent_sub
+  // re-issues the REQ, and whether that may open a socket is decided by
+  // the relay gate (exponential backoff per relay — relay_gate.ts).
+  // enablePing keeps healthy sockets from going stale behind NAT/idle
+  // timeouts; in Bun it takes the dummy-REQ fallback (no ws.once), which
+  // works fine.
+  const pool = new SimplePool({ enablePing: true })
+  const relayGate = createRelayGate({ pool })
+  pool.allowConnectingToRelay = (url) => relayGate.allow(url)
+  // Re-pointed below once the UI dispatch exists; until then the gate
+  // still has to hear about the outbox watcher's boot-time attempts.
+  pool.onRelayConnectionSuccess = (url) => relayGate.succeeded(url)
+  pool.onRelayConnectionFailure = (url) => relayGate.failed(url)
 
   // Resolve the outbox before the wallet/nostr bring-up so the
   // resolved relay list is available the first time the operator
@@ -96,6 +105,7 @@ async function main(): Promise<void> {
   // existing connections.
   const outbox = await startOutboxWatcher({
     pool,
+    connect: (url) => relayGate.ensure(url),
     fallbackPubkey: OUTBOX_FALLBACK_PUBKEY,
     bootstrapRelays: OUTBOX_BOOTSTRAP_RELAYS,
     fallback: NWC_RELAYS_FALLBACK,
@@ -138,18 +148,23 @@ async function main(): Promise<void> {
       )
     }
   }
-  pool.onRelayConnectionSuccess = dispatchRelayChange
-  pool.onRelayConnectionFailure = dispatchRelayChange
+  pool.onRelayConnectionSuccess = (url) => {
+    relayGate.succeeded(url)
+    dispatchRelayChange(url)
+  }
+  pool.onRelayConnectionFailure = (url) => {
+    relayGate.failed(url)
+    dispatchRelayChange(url)
+  }
   outbox.onOutboxChange(() => broadcastOutboxPanel())
 
-  // Watchdog: every few seconds, re-ensureRelay every URL the bridge
-  // currently cares about. ensureRelay is a no-op when the socket is
-  // already connected, but resurrects relays that the pool gave up on
-  // — see the long comment on `new SimplePool` above. Without this, a
-  // relay that goes down for longer than the internal backoff
-  // permanently stays "offline" in our UI even after it comes back.
-  // This loop is socket-level only; subscription recovery on those
-  // resurrected sockets is handled by persistent_sub.ts.
+  // Watchdog: every few seconds, make sure there is a socket to every
+  // URL the bridge currently cares about. Relays with a live sub come
+  // back through persistent_sub on their own; this covers the ones we
+  // only show status for (or only publish to), and pushes the status
+  // edge to the UI since a bare ensureRelay fires no pool callback.
+  // Goes through the gate, so a relay that keeps refusing us is asked
+  // on its backoff schedule, not every tick.
   const RELAY_WATCHDOG_INTERVAL_MS = 5000
   const knownRelayUrls = (): Set<string> => {
     const urls = new Set<string>()
@@ -161,11 +176,11 @@ async function main(): Promise<void> {
     return urls
   }
   const watchdog = setInterval(() => {
+    const live = pool.listConnectionStatus()
     for (const url of knownRelayUrls()) {
-      pool.ensureRelay(url).catch(() => {
-        // ensureRelay rejects on connect failure. The pool also fires
-        // onRelayConnectionFailure separately, which is the path our
-        // UI updates flow through — nothing for us to do here.
+      if (live.get(url) === true) continue
+      void relayGate.ensure(url).then((connected) => {
+        if (connected) dispatchRelayChange(url)
       })
     }
   }, RELAY_WATCHDOG_INTERVAL_MS)

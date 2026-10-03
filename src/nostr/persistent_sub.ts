@@ -4,17 +4,20 @@ import type { NostrEvent } from 'nostr-tools/pure'
 
 type SubCloser = ReturnType<SimplePool['subscribeMany']>
 
-// Why this exists: nostr-tools' enableReconnect only survives drops
-// where its *first* retry succeeds. If that retry also fails (relay
-// reboot longer than the 10s backoff, network blip), AbstractRelay
-// sets skipReconnection=true, permanently closes every Subscription on
-// the socket, and the pool forgets the relay. The index.ts watchdog
-// resurrects the *socket*, but the fresh AbstractRelay starts with
-// zero subscriptions — nothing re-issues the REQ, so the bridge sits
-// "connected" but deaf. This wrapper owns one sub per relay and
-// re-subscribes after that permanent-death path. (The quick-reconnect
-// path needs no help: subs stay in openSubs and re-fire on reconnect.)
+// Why this exists: the shared pool runs without nostr-tools'
+// enableReconnect (see index.ts — its internal reconnect loop leaked a
+// socket per outage when mixed with our own recovery). So when a socket
+// goes away — relay restart, network blip, ping timeout, or a relay
+// that was down at first attach — AbstractRelay closes every
+// Subscription on it and the pool forgets the relay. This wrapper owns
+// one sub per relay and re-issues the REQ; it is the only way a
+// long-lived subscription comes back. Each attempt asks the pool to
+// connect, and the pool's allowConnectingToRelay hook (relay_gate.ts)
+// refuses while the relay is backing off — a refused attach just lands
+// in onclose and is tried again next tick, without touching the network.
 
+// Tick for re-attaching dead subs. Not the reconnect rate — the relay
+// gate decides whether a tick may actually open a socket.
 const RETRY_INTERVAL_MS = 5000
 // Resume skew covers the zombie window before enablePing notices a
 // dead socket (pingFrequency 29s + pingTimeout 20s): requests stored

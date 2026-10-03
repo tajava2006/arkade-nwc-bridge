@@ -41,6 +41,13 @@ export interface OutboxConfig {
    */
   pool: SimplePool
   /**
+   * Opens a socket to a relay without subscribing (status visibility).
+   * index.ts passes the relay gate's ensure() so these attempts obey
+   * the same backoff as everything else; defaults to a bare
+   * pool.ensureRelay. Must not reject.
+   */
+  connect?: (url: string) => Promise<unknown>
+  /**
    * Operator identity. Subscribed at boot; its 10002 is the baseline
    * relay set until/unless the account key publishes its own (see
    * setPrimaryPubkey). Named "fallback" because the user's own list,
@@ -133,15 +140,16 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
     firstResolve = r
   })
 
-  const ensureConnections = (urls: readonly string[]): void => {
-    // Open a connection per relay without subscribing — purely for
-    // status visibility. ensureRelay throws on bad URLs; swallow per
-    // relay so one malformed entry doesn't poison the whole set.
-    for (const url of urls) {
+  const connect =
+    cfg.connect ??
+    ((url: string) =>
       pool.ensureRelay(url).catch((err) => {
         console.warn(`outbox: ensureRelay(${url}) failed:`, err)
-      })
-    }
+      }))
+  const ensureConnections = (urls: readonly string[]): void => {
+    // Open a connection per relay without subscribing — purely for
+    // status visibility.
+    for (const url of urls) void connect(url)
   }
 
   // Recompute the active set from the per-author state under precedence

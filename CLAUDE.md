@@ -82,7 +82,7 @@ src/
                                (bun async-ESM require trap) + EventSource shim
   index.ts                   — three-mode boot (setup / ready / degraded);
                                owns the shared SimplePool + relay-status
-                               dispatch + 5s ensureRelay watchdog + the exit
+                               dispatch + gated relay watchdog + the exit
                                engine + proof-sync; SIGINT/SIGTERM teardown
   nostr/
     connections.ts           — connections table CRUD + URI builder;
@@ -112,12 +112,16 @@ src/
                                stable `notify` forwarder from index.ts
     publish.ts               — shared best-effort publishToRelays (allSettled,
                                per-relay warn, never throws)
+    relay_gate.ts            — the one place that decides whether a NEW
+                               socket to a relay may be opened: per-relay
+                               exponential backoff (5s → 5min, jittered).
+                               Installed as pool.allowConnectingToRelay;
+                               direct callers use gate.ensure()
     persistent_sub.ts        — self-healing subscription wrapper: one
-                               sub per relay, re-issues the REQ when
-                               nostr-tools permanently kills a socket's
-                               subs (initial-connect failure; mid-outage
-                               reconnects are healed upstream since
-                               nostr-tools 2.23.9, our #538 fix);
+                               sub per relay, re-issues the REQ whenever
+                               the socket goes away (the only recovery
+                               path — the pool runs without
+                               enableReconnect);
                                cross-relay event dedupe via alreadyHaveEvent
     service.ts               — takes the shared SimplePool, one SubCloser
                                per connection over conn.relays;
@@ -215,7 +219,7 @@ row exists. Logs go to stdout; when running in background pipe to
   its narrow interface. Don't reach into pool/handler internals
   from web code.
 - **Shared SimplePool.** `index.ts` constructs `new SimplePool({
-  enableReconnect: true, enablePing: true })` and hands it to both
+  enablePing: true })` and hands it to both
   the outbox watcher and the nostr service. Don't construct a
   second pool in a subsystem — `listConnectionStatus` must stay the
   single source of truth, otherwise the outbox panel and
@@ -325,23 +329,26 @@ row exists. Logs go to stdout; when running in background pipe to
   no race. Outbox updates affect *new* connections only — existing
   ones keep their relays for life, even if the operator's NIP-65
   list changes underneath. `cfg.nwcRelays` doesn't exist.
-- **`enableReconnect` still gives up on the *initial* connect — and
-  takes the subs with it.** Since nostr-tools 2.23.9 (our upstream
-  fix, nbd-wtf/nostr-tools#538) a failed *retry* no longer sets
-  `skipReconnection=true`: mid-outage reconnects keep backing off
-  (last backoff entry repeats) and every sub re-REQs when the relay
-  returns. What still permanently closes a socket's subs is a failure
-  on the first connection attempt (`reconnectAttempts === 0`) — e.g.
-  the relay is down when a sub is first attached, including right
-  after the 5s `ensureRelay` watchdog in `index.ts` resurrects a
-  relay that nostr-tools dropped from the pool (a resurrected relay
-  starts with zero subscriptions, so the socket alone is deaf).
-  Recovery for that path is
-  [`src/nostr/persistent_sub.ts`](src/nostr/persistent_sub.ts)'s
-  job: one sub per (connection, relay), `onclose` marks it dead, a
-  5s retry re-issues the REQ (`since` resumed from the death time,
-  capped). Long-lived subs still MUST go through `openPersistentSub`,
-  never raw `pool.subscribeMany`.
+- **Never open a relay socket around the gate, and keep
+  `enableReconnect` off.** Reconnects used to run on fixed 5s timers
+  (one per persistent sub + the watchdog) with no backoff: ~175k
+  handshakes/day against a relay that refuses us, which got the
+  operating IP blocked by nos.lol / nostr.mom / relay.damus.io
+  (2026-10). On top of that, nostr-tools' internal reconnect loop
+  raced our own recovery and leaked one live socket per outage (the
+  pool forgets a relay object that keeps reconnecting by itself).
+  Now: the pool has no `enableReconnect`, so a lost socket closes its
+  subs and leaves the pool; [`persistent_sub.ts`](src/nostr/persistent_sub.ts)
+  re-issues the REQ on a 5s tick; and
+  [`relay_gate.ts`](src/nostr/relay_gate.ts) — installed as
+  `pool.allowConnectingToRelay` — decides whether that tick may touch
+  the network (5s doubling to a 5min cap; a connection must hold 60s
+  before the count resets, so connect-then-kick relays keep
+  escalating). Subscribes and publishes are covered by the hook;
+  anything calling `pool.ensureRelay` directly must use
+  `relayGate.ensure()` instead. Long-lived subs still MUST go through
+  `openPersistentSub`, never raw `pool.subscribeMany` — a raw sub dies
+  with its socket and nothing brings it back.
 - **URL canonicalization.** `SimplePool` parses relay URLs via
   WHATWG URL (`wss://nos.lol` → `wss://nos.lol/`), and pool
   callbacks emit the canonical form. Use `normalizeRelayUrl` from

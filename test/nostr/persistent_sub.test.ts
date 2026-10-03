@@ -3,6 +3,7 @@ import { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure'
 
 import { openPersistentSub } from '../../src/nostr/persistent_sub'
+import { createRelayGate } from '../../src/nostr/relay_gate'
 
 // Minimal NIP-01 relay: REQ → EOSE, tracks subids, broadcast() pushes an
 // EVENT to every open subscription. Filter matching is left to the
@@ -41,6 +42,9 @@ function startMockRelay(port: number) {
         }
       }
     },
+    socketCount() {
+      return subs.size
+    },
     reqCount() {
       let n = 0
       for (const ids of subs.values()) n += ids.size
@@ -59,84 +63,110 @@ const makeEvent = (content: string) =>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 describe('openPersistentSub', () => {
+  // Production wiring (index.ts): no enableReconnect, the relay gate as
+  // the pool's connect hook, and a watchdog calling gate.ensure.
+  const productionPool = () => {
+    const pool = new SimplePool({ enablePing: true })
+    const gate = createRelayGate({ pool, baseDelayMs: 100, stableAfterMs: 0, log: () => {} })
+    pool.allowConnectingToRelay = (url) => gate.allow(url)
+    pool.onRelayConnectionSuccess = (url) => gate.succeeded(url)
+    pool.onRelayConnectionFailure = (url) => gate.failed(url)
+    return { pool, gate }
+  }
+
   test(
-    'a failed reconnect no longer kills subs (upstream #538): both subs re-attach on relay return',
+    're-attaches after an outage and resumes delivery',
     async () => {
       const PORT = 48911
       const URL = `ws://127.0.0.1:${PORT}`
       let relay = startMockRelay(PORT)
-      const pool = new SimplePool({ enableReconnect: true, enablePing: true })
+      const { pool } = productionPool()
 
-      const persistentGot: string[] = []
-      const rawGot: string[] = []
-
+      const got: string[] = []
       const psub = openPersistentSub({
         pool,
         relays: [URL],
         label: 'test',
         filter: { kinds: [1] },
         resumeSince: true,
-        retryIntervalMs: 300,
-        onevent: (e) => persistentGot.push(e.content),
+        retryIntervalMs: 100,
+        onevent: (e) => got.push(e.content),
       })
-      const rawSub = pool.subscribeMany(
-        [URL],
-        { kinds: [1], since: Math.floor(Date.now() / 1000) },
-        { onevent: (e) => rawGot.push(e.content) },
-      )
 
-      // Shrink nostr-tools' internal reconnect backoff (default 10s; the
-      // last entry repeats forever) so the failed-reconnect path triggers
-      // fast enough for a test.
-      const abstractRelay = await pool.ensureRelay(URL)
-      ;(abstractRelay as unknown as { resubscribeBackoff: number[] }).resubscribeBackoff = [50]
-
-      await sleep(500)
-      expect(relay.reqCount()).toBe(2) // persistent + raw
-
+      await sleep(400)
+      expect(relay.reqCount()).toBe(1)
       relay.broadcast(makeEvent('A'))
-      await sleep(300)
-      expect(persistentGot).toEqual(['A'])
-      expect(rawGot).toEqual(['A'])
+      await sleep(200)
+      expect(got).toEqual(['A'])
 
-      // Drop the relay; the 50ms reconnect attempts hit a closed port.
-      // nostr-tools < 2.23.9 set skipReconnection=true on the first failed
-      // retry and permanently closed every sub on the socket — the bug that
-      // motivated persistent_sub. Upstream nbd-wtf/nostr-tools#538 (our
-      // fix, shipped in 2.23.9) gates that on the initial connection only,
-      // so mid-outage retries keep backing off and every sub re-REQs when
-      // the relay returns; the persistent wrapper never even sees an
-      // onclose here. If reqCount drops back to 1, upstream has regressed
-      // and persistent_sub is load-bearing for outages again. What #538
-      // does NOT fix — and persistent_sub still owns — is a relay that is
-      // down at first attach (initial connect failure still kills the
-      // socket's subs), plus the capped `since` resume.
       relay.stop()
       await sleep(600)
-
       relay = startMockRelay(PORT)
-      await sleep(1000)
+      await sleep(1500)
 
-      expect(relay.reqCount()).toBe(2) // both re-attached by upstream
-
+      expect(relay.reqCount()).toBe(1)
       relay.broadcast(makeEvent('B'))
-      await sleep(300)
-      expect(persistentGot).toEqual(['A', 'B'])
-      expect(rawGot).toEqual(['A', 'B'])
+      await sleep(200)
+      expect(got).toEqual(['A', 'B'])
 
       psub.close()
-      rawSub.close()
       pool.close([URL])
       relay.stop()
     },
     10_000,
   )
 
+  test(
+    'repeated outages never leave more than one socket to the relay',
+    async () => {
+      // Regression: with enableReconnect on, nostr-tools' internal
+      // reconnect loop and a pool-level connect attempt raced during an
+      // outage — the pool dropped the relay object, the object kept
+      // reconnecting by itself, and the next ensureRelay built another.
+      // One extra live socket per outage, forever.
+      const PORT = 48914
+      const URL = `ws://127.0.0.1:${PORT}`
+      let relay = startMockRelay(PORT)
+      const { pool, gate } = productionPool()
+
+      const psubs = [0, 1, 2].map((i) =>
+        openPersistentSub({
+          pool,
+          relays: [URL],
+          label: `leak-${i}`,
+          filter: { kinds: [1] },
+          resumeSince: true,
+          retryIntervalMs: 100,
+          onevent: () => {},
+        }),
+      )
+      const watchdog = setInterval(() => void gate.ensure(URL), 100)
+
+      await sleep(400)
+      expect(relay.socketCount()).toBe(1)
+
+      for (let cycle = 0; cycle < 3; cycle++) {
+        relay.stop()
+        await sleep(500)
+        relay = startMockRelay(PORT)
+        await sleep(1500)
+        expect(relay.socketCount()).toBe(1)
+        expect(relay.reqCount()).toBe(3)
+      }
+
+      clearInterval(watchdog)
+      for (const p of psubs) p.close()
+      pool.close([URL])
+      relay.stop()
+    },
+    15_000,
+  )
+
   test('dedupes the same event arriving from multiple relays', async () => {
     const URLS = ['ws://127.0.0.1:48912', 'ws://127.0.0.1:48913']
     const r1 = startMockRelay(48912)
     const r2 = startMockRelay(48913)
-    const pool = new SimplePool({ enableReconnect: true, enablePing: true })
+    const pool = new SimplePool({ enablePing: true })
 
     let count = 0
     const psub = openPersistentSub({

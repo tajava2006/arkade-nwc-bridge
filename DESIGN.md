@@ -114,10 +114,10 @@ into:
   connection relay badge / detail table for each connection whose
   relays include the changed URL
 
-It also runs a 5-second `ensureRelay` watchdog over the union of
-bootstrap + current outbox + every active connection's relays, to
-work around nostr-tools' habit of dropping relays from the pool
-once `enableReconnect`'s backoff gives up (see §9).
+It also runs a 5-second watchdog over the union of bootstrap +
+current outbox + every active connection's relays, so relays we only
+show status for (or only publish to) get a socket too. Every attempt
+goes through the relay gate's backoff (see §9).
 
 ## 4. SQLite schema
 
@@ -471,22 +471,25 @@ skips wallet/boltz/nostr disposal (nothing to dispose yet).
   not — even on restart. If a customer's connection stops working
   because every relay it baked in died, the operator has to
   revoke + reissue. No auto-migration.
-- **nostr-tools `enableReconnect` gives up on the initial connect**:
-  since 2.23.9 (our upstream fix, nbd-wtf/nostr-tools#538) a retry
-  that fails mid-outage no longer sets `skipReconnection=true` — the
-  backoff (10s, 10s, 10s, 20s, 20s, 30s, 60s, last value repeating)
-  keeps running and every sub re-REQs when the relay returns. A
-  failure on the *first* connection attempt still sets it, closes
-  the socket's subs and drops the relay from `pool.relays`, after
-  which `listConnectionStatus` no longer reports the URL at all. The
-  5-second `ensureRelay` watchdog in [`src/index.ts`](src/index.ts)
-  exists to resurrect these — it iterates the bridge's
-  bootstrap ∪ current outbox ∪ active-connection relays union and
-  calls `pool.ensureRelay(url)` on each. ensureRelay is a free
-  no-op for connected relays; for removed ones it re-adds and
-  retries. A resurrected relay starts with zero subscriptions, which
-  is why long-lived subs go through `persistent_sub.ts` (re-REQ +
-  capped `since` resume) rather than raw `pool.subscribeMany`.
+- **Relay reconnects: one path, behind a backoff gate.** Two things
+  went wrong with the original design (found 2026-10, after nos.lol /
+  nostr.mom / relay.damus.io blocked the operating IP). (1) Retries
+  ran on fixed 5s timers — one per persistent sub plus the watchdog —
+  with no memory: measured ~120 handshakes/minute against a relay that
+  refuses the connection. (2) The pool ran with `enableReconnect`, and
+  nostr-tools' internal reconnect loop raced ours: an `ensureRelay`
+  that fails while the loop is mid-backoff makes the pool forget the
+  relay object, which keeps reconnecting on its own while the next
+  `ensureRelay` builds a second one — one leaked live socket per
+  outage. Now the pool has no `enableReconnect`: a lost socket closes
+  its subs and leaves the pool, `persistent_sub.ts` re-issues the REQ
+  (capped `since` resume), and [`src/nostr/relay_gate.ts`](src/nostr/relay_gate.ts)
+  — the pool's `allowConnectingToRelay` hook — decides whether an
+  attempt may open a socket: 5s doubling to a 5-minute cap, ±20%
+  jitter, and the count only resets after a connection has held 60s.
+  Cost: after a long outage a relay can take up to ~5 minutes to come
+  back, and requests older than `MAX_RESUME_LOOKBACK_SEC` are not
+  replayed (already the rule).
 - **Relay URL canonicalization**: `SimplePool` parses URLs through
   WHATWG URL (`wss://nos.lol` → `wss://nos.lol/`) and pool
   callbacks emit the canonical form. Constants in
