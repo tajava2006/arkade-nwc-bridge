@@ -58,7 +58,7 @@ export const ESPLORA_URLS: readonly string[] = [
 // relays each connection's URI baked in at creation.
 export const NWC_RELAYS_FALLBACK: readonly string[] = [
   'wss://relay.getalby.com/v1',
-  'wss://relay.damus.io',
+  'wss://relay.primal.net',
 ]
 
 // Outbox-style relay discovery (NIP-65). Two-tier, both fetched via the
@@ -79,10 +79,13 @@ export const NWC_RELAYS_FALLBACK: readonly string[] = [
 // — any one of them succeeding is enough.
 export const OUTBOX_FALLBACK_PUBKEY =
   'f1f3300a45164b562a82b86a9dcc0ee0e5f6c5b833a92e41cbf95b28b03ba848'
+// Indexer relays only (they exist to serve kind 0/3/10002 lookups), not
+// general-purpose ones: the bridge holds a long-lived sub here and a
+// general relay has no reason to tolerate that from a non-user.
 export const OUTBOX_BOOTSTRAP_RELAYS: readonly string[] = [
   'wss://purplepag.es',
-  'wss://nostr.land',
-  'wss://nos.lol',
+  'wss://indexer.coracle.social',
+  'wss://user.kindpag.es',
 ]
 export const OUTBOX_INITIAL_TIMEOUT_MS = 10_000
 
