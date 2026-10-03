@@ -10,10 +10,12 @@ function harness(opts: { ensure?: () => Promise<void> } = {}) {
   let clock = 1_000_000
   const connected = new Set<string>()
   let attempts = 0
+  let lastParams: { connectionTimeout?: number } | undefined
   const pool = {
     listConnectionStatus: () => new Map([...connected].map((u) => [u, true] as const)),
-    ensureRelay: async () => {
+    ensureRelay: async (_url: string, params?: { connectionTimeout?: number }) => {
       attempts++
+      lastParams = params
       await (opts.ensure ?? (async () => {}))()
     },
   } as unknown as SimplePool
@@ -25,6 +27,7 @@ function harness(opts: { ensure?: () => Promise<void> } = {}) {
       clock += ms
     },
     attempts: () => attempts,
+    lastParams: () => lastParams,
   }
 }
 
@@ -113,5 +116,14 @@ describe('relay gate', () => {
     expect(await h.gate.ensure(URL)).toBe(false)
     expect(h.attempts()).toBe(2)
     expect(h.gate.retryInMs(URL)).toBe(10_000)
+  })
+
+  test('ensure() always connects with a timeout', async () => {
+    // The first caller's timeout is the only one a shared connection
+    // promise ever gets — a bare ensureRelay here once left publishes
+    // hanging for minutes behind a relay that drops SYNs, and boot with it.
+    const h = harness()
+    await h.gate.ensure(URL)
+    expect(h.lastParams()?.connectionTimeout).toBeGreaterThan(0)
   })
 })

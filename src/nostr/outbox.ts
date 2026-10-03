@@ -143,7 +143,7 @@ export async function startOutboxWatcher(cfg: OutboxConfig): Promise<OutboxWatch
   const connect =
     cfg.connect ??
     ((url: string) =>
-      pool.ensureRelay(url).catch((err) => {
+      pool.ensureRelay(url, { connectionTimeout: 3_000 }).catch((err) => {
         console.warn(`outbox: ensureRelay(${url}) failed:`, err)
       }))
   const ensureConnections = (urls: readonly string[]): void => {

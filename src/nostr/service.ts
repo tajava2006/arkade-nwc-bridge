@@ -138,8 +138,14 @@ export async function startNostrService(deps: NostrServiceDeps): Promise<NostrSe
       console.warn(`nostr: conn #${conn.id} has no relays — skipping`)
       continue
     }
-    await publishInfoEvent(pool, conn.relays, conn)
+    // Listen first, announce in the background. The info event is a
+    // replaceable the relays already hold from earlier boots; waiting on
+    // it here put every dead relay's connect timeout — once per
+    // connection, in sequence — between the operator and the web UI,
+    // which is exactly where they go to revoke a connection whose relays
+    // died. publishToRelays never rejects.
     subscribeOne(conn)
+    void publishInfoEvent(pool, conn.relays, conn)
   }
   console.log(
     `nostr: ${connections.length} active connection${connections.length === 1 ? '' : 's'}`,

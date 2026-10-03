@@ -346,7 +346,12 @@ row exists. Logs go to stdout; when running in background pipe to
   before the count resets, so connect-then-kick relays keep
   escalating). Subscribes and publishes are covered by the hook;
   anything calling `pool.ensureRelay` directly must use
-  `relayGate.ensure()` instead. Long-lived subs still MUST go through
+  `relayGate.ensure()` instead — which also supplies the connect
+  timeout: nostr-tools shares one connection promise per relay and
+  only its creator sets a timeout, so one bare `ensureRelay` against a
+  relay that drops SYNs hangs every publish/subscribe that joins it.
+  For the same reason boot never awaits a relay: `startNostrService`
+  subscribes and publishes info events in the background. Long-lived subs still MUST go through
   `openPersistentSub`, never raw `pool.subscribeMany` — a raw sub dies
   with its socket and nothing brings it back.
 - **URL canonicalization.** `SimplePool` parses relay URLs via

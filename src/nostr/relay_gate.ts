@@ -18,6 +18,8 @@ import { normalizeURL } from 'nostr-tools/utils'
 const BASE_DELAY_MS = 5_000
 const MAX_DELAY_MS = 5 * 60_000
 const JITTER = 0.2
+// Same budget the pool gives its own subscribe/publish connects.
+const CONNECT_TIMEOUT_MS = 3_000
 // A connection has to survive this long before its relay is trusted
 // again. Without it a relay that accepts the socket and drops it a
 // second later ("connect, then kick" — how some relays rate-limit)
@@ -137,7 +139,12 @@ export function createRelayGate(opts: RelayGateOptions): RelayGate {
       const url = normalize(rawUrl)
       if (!allow(url)) return false
       try {
-        await pool.ensureRelay(url)
+        // The timeout is not optional. nostr-tools shares one connection
+        // promise per relay and only the caller that created it gets to
+        // set a timeout; without one here, a relay that swallows the SYN
+        // leaves a promise that hangs for minutes, and every publish and
+        // subscribe that joins it hangs too (their own 3s is ignored).
+        await pool.ensureRelay(url, { connectionTimeout: CONNECT_TIMEOUT_MS })
         succeeded(url)
         return true
       } catch {
