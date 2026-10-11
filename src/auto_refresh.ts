@@ -15,18 +15,24 @@ import {
 // EVERYTHING into one fresh VTXO — fewer rounds for the server, one
 // defragmented VTXO and a full expiry reset for the wallet.
 //
-// THE renewal knob. 3 days is not arbitrary — it matches two neighbors:
-//  - arkd's SETTLEMENT_MIN_EXPIRY_GAP (3d): a settle attempted earlier than
+// THE renewal knob. 4 days is not arbitrary — it is pinned by two neighbors:
+//  - arkd's SETTLEMENT_MIN_EXPIRY_GAP (4d): a settle attempted earlier than
 //    this is deferred, so a larger window would just spam rejected intents;
-//  - the atomic sub-dust send gate (funding VTXO must have > 72h10m left):
-//    refreshing at 3d-before-expiry means no VTXO ever lingers below that
-//    bar, closing the send dead zone to the ~10-min poll granularity.
-// Must stay well below the tree expiry (30d+ post-reset) — a window ≥ the
+//  - the atomic sub-dust send gate. A funding VTXO must outlive the swap's T
+//    by 10 min, and T is capped by boltz's subdustSendWindow (90h). Refreshing
+//    at 4d-before-expiry keeps every VTXO above 90h10m with ~6h to spare (the
+//    10-min poll and the round itself eat a little of it), so no invoice —
+//    however long its route — can land in a window where nothing may fund it.
+//    The cap was 72h with a 3d window until 2026-10: invoices behind an LSP
+//    (final delta 144 + a private hop of 144, e.g. rizful.com via Megalithic)
+//    measured 435 blocks against a 431 budget and failed NO_ROUTE every time.
+// Move all three together (operator workspace SETTINGS.md §1 / §7).
+// Must stay well below the tree expiry (~31.7d) — a window ≥ the
 // VTXO lifetime means every fresh VTXO is instantly "expiring" and rounds
 // loop forever; the wiring's post-success cooldown bounds that failure mode
 // but does not make it sane. The SDK renewal (wallet.ts, fixed 1h) stays on
 // as the backstop and is deliberately NOT scaled with this knob — see there.
-export const AUTO_REFRESH_THRESHOLD_SECONDS = 259_200
+export const AUTO_REFRESH_THRESHOLD_SECONDS = 345_600
 
 /**
  * True when some VTXO that can anchor a settlement round — spendable, dust+,

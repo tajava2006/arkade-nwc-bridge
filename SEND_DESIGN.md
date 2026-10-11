@@ -238,14 +238,16 @@ money without going onchain.
 
 **Automatic trigger (2026-07-25):** the same consolidate-all is also the
 *automatic* renewal path — `src/auto_refresh.ts` polls every 10 min and runs
-the no-args `wallet.settle()` once any dust+ spendable VTXO is within **3d**
+the no-args `wallet.settle()` once any dust+ spendable VTXO is within **4d**
 of expiry (sub-dust/swept can't trigger on their own: post-anchor-rule arkd
 defers rounds anchored only by them). Rationale = the same win-win as the
-button: one wholesale round instead of several partial renewals. The 3d
+button: one wholesale round instead of several partial renewals. The 4d
 window is pinned by its neighbors: = arkd's expiry gap (larger just spams
-deferred intents) and ≥ the atomic sub-dust send gate 72h10m (closes the
-send dead zone to poll granularity, per the operator workspace's coupling
-analysis). The SDK's `settlementConfig` renewal underneath stays a **fixed
+deferred intents) and > the atomic sub-dust send gate at its ceiling, 90h10m
+(boltz `subdustSendWindow` 90h + 10 min margin), with ~6h to spare — so no
+send, however long its LN route, meets a stretch where no VTXO may fund it.
+It was 3d against a 72h ceiling until 2026-10, when invoices behind an LSP
+hop (rizful.com: 435 blocks vs a 431 budget) turned out to be unroutable. The SDK's `settlementConfig` renewal underneath stays a **fixed
 1h backstop**, deliberately NOT scaled with the window — the SDK's renewal
 guard is a 30s cooldown, so a backstop ≥ the tree expiry would loop a round
 per minute (the pre-reset 1d-expiry seed is exactly such a config). Guards

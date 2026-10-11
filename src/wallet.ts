@@ -148,7 +148,7 @@ export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promis
       contractRepository: new InMemoryContractRepository(),
     },
     // BACKSTOP renewal only. The primary path is the bridge's own
-    // consolidate-all auto-refresh (src/auto_refresh.ts, window 3d) —
+    // consolidate-all auto-refresh (src/auto_refresh.ts, window 4d) —
     // this SDK renewal sits far inside it, so it fires only if that loop
     // failed repeatedly, and then saves just the expiring VTXO (partial
     // renew, sub-dust/swept riders included).

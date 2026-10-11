@@ -526,7 +526,7 @@ async function main(): Promise<void> {
       caches.balance.seed(balance)
 
       // Consolidate-all auto-refresh: once any dust+ VTXO is within the
-      // 3d window of expiry, run the manual button's wallet.settle() —
+      // 4d window of expiry, run the manual button's wallet.settle() —
       // everything folds into one fresh VTXO (auto_refresh.ts has the
       // policy rationale). The SDK's 1h partial renew stays on as the
       // backstop if this keeps failing. A settle rides a settlement round
