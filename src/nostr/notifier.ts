@@ -131,7 +131,11 @@ export function startNotifier(deps: NotifierDeps): Notifier {
           // throwaway key (NIP-59), so nothing public links messages to
           // each other or to the account key.
           const wrap = wrapEvent(deps.secretKey, { publicKey: selfPubkey }, item.text)
-          await publishToRelays(deps.pool, relays, wrap, `notifier DM (${item.kind})`)
+          // DM inbox relays commonly demand NIP-42 before taking a gift
+          // wrap; authenticate as the account key, which is the recipient.
+          await publishToRelays(deps.pool, relays, wrap, `notifier DM (${item.kind})`, {
+            authKey: deps.secretKey,
+          })
         } catch (err) {
           console.warn(`notifier: failed to send '${item.kind}':`, err)
         }

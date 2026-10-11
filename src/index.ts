@@ -1,5 +1,5 @@
 import './polyfills'
-import { SimplePool } from 'nostr-tools/pool'
+import { SimplePool, useWebSocketImplementation } from 'nostr-tools/pool'
 
 import { loadConfig, readServerOverrides } from './config'
 import {
@@ -28,6 +28,7 @@ import { autoRefreshPass } from './auto_refresh'
 import { resumeAtomicSends } from './atomic/send'
 import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from './atomic/boltz_ws'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
+import { PingableWebSocket } from './nostr/ping_ws'
 import { createRelayGate } from './nostr/relay_gate'
 import { startNotifier, type Notifier, type NotifyFn } from './nostr/notifier'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
@@ -88,8 +89,10 @@ async function main(): Promise<void> {
   // re-issues the REQ, and whether that may open a socket is decided by
   // the relay gate (exponential backoff per relay — relay_gate.ts).
   // enablePing keeps healthy sockets from going stale behind NAT/idle
-  // timeouts; in Bun it takes the dummy-REQ fallback (no ws.once), which
-  // works fine.
+  // timeouts. PingableWebSocket makes that a real ping/pong instead of
+  // nostr-tools' dummy-REQ fallback, which kills the socket of any relay
+  // that is slow to (or never does) answer a REQ with EOSE — ping_ws.ts.
+  useWebSocketImplementation(PingableWebSocket)
   const pool = new SimplePool({ enablePing: true })
   const relayGate = createRelayGate({ pool })
   pool.allowConnectingToRelay = (url) => relayGate.allow(url)

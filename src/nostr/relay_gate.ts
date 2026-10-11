@@ -111,7 +111,7 @@ export function createRelayGate(opts: RelayGateOptions): RelayGate {
         s.failures = 0
         s.blockedUntil = 0
       } else {
-        penalize(url, s, `dropped us after ${Math.round(lived / 1000)}s`)
+        penalize(url, s, `connection lost after ${Math.round(lived / 1000)}s`)
       }
     }
     return t >= s.blockedUntil
