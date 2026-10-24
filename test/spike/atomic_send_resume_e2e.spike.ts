@@ -23,6 +23,7 @@
 
 import '../../src/polyfills'
 import { execFileSync } from 'node:child_process'
+import { join } from 'node:path'
 import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { randomBytes } from '@noble/hashes/utils.js'
@@ -48,7 +49,7 @@ const enc = (b: Uint8Array) => hex.encode(b)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const toXOnly = (k: Uint8Array) => (k.length === 32 ? k : k.subarray(1))
 
-const REGTEST_DIR = process.env.REGTEST_DIR ?? '/Users/zxcvjklkjasdflk/dev/ark/my-server/reference/arkade-nwc-bridge/regtest-e2e/arkade-regtest'
+const REGTEST_DIR = process.env.REGTEST_DIR ?? join(import.meta.dir, '../../regtest-e2e/arkade-regtest')
 const regtest = (...a: string[]) => execFileSync('node', ['regtest.mjs', ...a], { cwd: REGTEST_DIR, encoding: 'utf8', maxBuffer: 1e7 })
 const lnd = (...a: string[]) => execFileSync('docker', ['exec', 'lnd', 'lncli', '--network=regtest', ...a], { encoding: 'utf8' })
 const boltzLnd = (...a: string[]) => execFileSync('docker', ['exec', 'boltz-lnd', 'lncli', '--network=regtest', ...a], { encoding: 'utf8' })

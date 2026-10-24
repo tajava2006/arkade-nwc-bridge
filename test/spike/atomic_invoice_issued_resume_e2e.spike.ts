@@ -21,6 +21,7 @@
 import '../../src/polyfills'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import { hex } from '@scure/base'
 import { randomBytes } from '@noble/hashes/utils.js'
 import { DefaultVtxo, RestArkProvider, SingleKey, type ArkInfo } from '@arkade-os/sdk'
@@ -35,7 +36,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const toXOnly = (k: Uint8Array) => (k.length === 32 ? k : k.subarray(1))
 const sha256 = (b: Uint8Array) => Uint8Array.from(createHash('sha256').update(b).digest())
 
-const REGTEST_DIR = process.env.REGTEST_DIR ?? '/Users/zxcvjklkjasdflk/dev/ark/my-server/reference/ts-sdk/regtest'
+const REGTEST_DIR = process.env.REGTEST_DIR ?? join(import.meta.dir, '../../../ts-sdk/regtest')
 const regtest = (...a: string[]) => execFileSync('node', ['regtest.mjs', ...a], { cwd: REGTEST_DIR, encoding: 'utf8', maxBuffer: 1e7 })
 
 let PASS = 0

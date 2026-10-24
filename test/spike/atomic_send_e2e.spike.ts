@@ -13,6 +13,7 @@
 
 import '../../src/polyfills'
 import { execFileSync } from 'node:child_process'
+import { join } from 'node:path'
 import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { randomBytes } from '@noble/hashes/utils.js'
@@ -40,7 +41,7 @@ const toXOnly = (k: Uint8Array) => (k.length === 32 ? k : k.subarray(1))
 
 // arkade-regtest lives under the operator workspace's ts-sdk clone.
 const REGTEST_DIR =
-  process.env.REGTEST_DIR ?? '/Users/zxcvjklkjasdflk/dev/ark/my-server/reference/ts-sdk/regtest'
+  process.env.REGTEST_DIR ?? join(import.meta.dir, '../../../ts-sdk/regtest')
 const regtest = (...a: string[]) =>
   execFileSync('node', ['regtest.mjs', ...a], { cwd: REGTEST_DIR, encoding: 'utf8', maxBuffer: 1e7 })
 

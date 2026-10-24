@@ -43,7 +43,7 @@ const enc = (b: Uint8Array) => hex.encode(b)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const toXOnly = (k: Uint8Array) => (k.length === 32 ? k : k.subarray(1))
 // The exact uexit leaf bytes arkd accepted in #02 (see atomic_script.test.ts).
-const REGTEST_DIR = '/Users/zxcvjklkjasdflk/dev/ark/my-server/reference/ts-sdk/regtest'
+const REGTEST_DIR = join(import.meta.dir, '../../../ts-sdk/regtest')
 const regtest = (...a: string[]) =>
   execFileSync('node', ['regtest.mjs', ...a], { cwd: REGTEST_DIR, encoding: 'utf8', maxBuffer: 1e7 })
 
