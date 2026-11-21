@@ -8,6 +8,7 @@ import { LndClient } from './lnd/client.ts'
 import { probeLnd } from './lnd/probe.ts'
 import { createLogger } from './log.ts'
 import { probeUntilAnswered } from './probe.ts'
+import { SwapStore } from './store.ts'
 
 const path = process.argv[2]
 if (!path) {
@@ -46,6 +47,13 @@ try {
   refuse(`config.lnd: cannot load the TLS cert: ${(e as Error).message}`)
 }
 
+let store!: SwapStore
+try {
+  store = SwapStore.open(config.dbPath)
+} catch (e) {
+  refuse(`config.dbPath: ${(e as Error).message}`)
+}
+
 const log = createLogger(config.logLevel)
 for (const w of warnings) log.warn(`config: ${w}`)
 log.info(
@@ -64,6 +72,7 @@ const shutdown = (reason: string, code = 0) => {
   log.info(`${reason}: shutting down`)
   server.stop(true)
   lnd.close()
+  store.close()
   process.exit(code)
 }
 process.on('SIGINT', () => shutdown('SIGINT'))
