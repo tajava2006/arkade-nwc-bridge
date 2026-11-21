@@ -24,6 +24,33 @@ in that same file.
 the paths that need them; it does not restart the process, which still has
 old swaps to settle and refund.
 
+## Send API (ARK → LN)
+
+The request and response shapes are the Boltz fork's. Errors come back as
+`{ error }`, 400 unless noted.
+
+| endpoint | does |
+|---|---|
+| `POST /v2/subdust/atomic/send/init` `{invoice, userPubkey}` | `{swapId, boltzPubkey, refundLocktime, exitDelay, boltzScriptDelay, feeSats, dust, vtxoMin}`. T is sized from a route measurement, capped by `sendWindowSecs`. Calling it again for an unfunded invoice returns the same swap |
+| `POST …/send/fund` `{swapId, presigs, fundingOutpoint?}` | Finds the funding through arkd's indexer, verifies the presigs, pays, then claims. Returns `{status:'claimed', preimage, claimTxid}` or `{status:'failed', error}` |
+| `POST …/send/cancel` `{swapId, fundingOutpoint, outputs, presigs}` | Co-signs the funder's unwind, only when the cancel gate says the payment is dead. Otherwise `{status:'refused', error}` |
+| `GET …/send/status?swapId=` | `{state, preimage?}` |
+
+Where this differs from the fork:
+
+- **`fund` answers 503 when the LN outcome is unknown.** That happens when the
+  payment stream dropped, or LND refused the request before sending anything.
+  The swap stays `ln_inflight`, and `resolveInflight` decides it from LND's own
+  record (`trackPayment` snapshot): never sent or FAILED → `failed`,
+  SUCCEEDED → claim with LND's preimage, still in flight → ask again later.
+  The bridge already treats a non-2xx `fund` as "poll the status endpoint".
+- **Fund, cancel and resolve take a per-swap lock.** A cancel that arrives
+  while a `fund` has not reached LND yet is refused. In the fork, LND had no
+  record at that moment, so the gate allowed the unwind, and the payment
+  then went out with nothing left to claim.
+- **Fee and exit delay are frozen at init.** The presigned split is rebuilt
+  from the stored row, not from current config or arkd info.
+
 ## Ark key
 
 subdustd has its own key and its own float. It funds receives from that float,

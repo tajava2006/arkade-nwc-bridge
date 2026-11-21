@@ -73,9 +73,13 @@ export class ArkSigner {
     return (await this.getInfo()).unilateralExitDelay
   }
 
-  /** Our own wallet script: funding inputs spend through its forfeit leaf. */
-  async selfScript(): Promise<DefaultVtxo.Script> {
-    const delay = await this.selfDelay()
+  /**
+   * Our own wallet script: funding inputs spend through its forfeit leaf. A swap
+   * passes the delay it froze at init, so its split rebuilds byte-identically
+   * even if arkd's advertised delay moves mid-swap.
+   */
+  async selfScript(delay?: bigint): Promise<DefaultVtxo.Script> {
+    delay ??= await this.selfDelay()
     return new DefaultVtxo.Script({
       pubKey: await this.xOnlyPublicKey(),
       serverPubKey: await this.serverXOnly(),
@@ -84,9 +88,9 @@ export class ArkSigner {
   }
 
   /** Where claim proceeds and the funding top-up go. */
-  async receiveAddress(): Promise<ArkAddress> {
+  async receiveAddress(delay?: bigint): Promise<ArkAddress> {
     const info = await this.getInfo()
-    return (await this.selfScript()).address(getNetwork(info.network as NetworkName).hrp, await this.serverXOnly())
+    return (await this.selfScript(delay)).address(hrpOf(info), await this.serverXOnly())
   }
 
   /**
@@ -103,6 +107,8 @@ export class ArkSigner {
     return selectFundingInputs(await this.ownVtxos(), args)
   }
 }
+
+export const hrpOf = (info: Pick<OperatorInfo, 'network'>): string => getNetwork(info.network as NetworkName).hrp
 
 export const arkdNetworkMismatch = (network: Network, info: Pick<OperatorInfo, 'network'>): string | undefined =>
   info.network === network ? undefined : `arkd is on ${info.network || 'an unknown network'} but config.network is ${network} — refusing to run`

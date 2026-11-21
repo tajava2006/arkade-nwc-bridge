@@ -34,6 +34,7 @@ const MIGRATIONS: readonly Migration[] = [
         self_delay       TEXT,
         invoice          TEXT,
         funding_outpoint TEXT,
+        funding_value    INTEGER,
         presigs          TEXT,
         preimage         TEXT,
         created_at       INTEGER NOT NULL,
@@ -56,6 +57,7 @@ export interface SwapRow {
   selfDelay: bigint | null
   invoice: string | null
   fundingOutpoint: string | null
+  fundingValue: number | null
   presigs: string | null
   preimage: string | null
   createdAt: number
@@ -75,12 +77,13 @@ export interface NewSwap {
 }
 
 /** Fields a transition may set in the same atomic UPDATE as the state change. */
-export type SwapUpdate = Partial<Pick<SwapRow, 'fundingOutpoint' | 'presigs' | 'preimage' | 'invoice'>>
+export type SwapUpdate = Partial<Pick<SwapRow, 'fundingOutpoint' | 'fundingValue' | 'presigs' | 'preimage' | 'invoice'>>
 
 export class DuplicatePaymentHash extends Error {}
 
 const COLUMN: Record<keyof SwapUpdate, string> = {
   fundingOutpoint: 'funding_outpoint',
+  fundingValue: 'funding_value',
   presigs: 'presigs',
   preimage: 'preimage',
   invoice: 'invoice',
@@ -98,6 +101,7 @@ interface DbRow {
   self_delay: string | null
   invoice: string | null
   funding_outpoint: string | null
+  funding_value: number | null
   presigs: string | null
   preimage: string | null
   created_at: number
@@ -116,6 +120,7 @@ const fromDb = (r: DbRow): SwapRow => ({
   selfDelay: r.self_delay === null ? null : BigInt(r.self_delay),
   invoice: r.invoice,
   fundingOutpoint: r.funding_outpoint,
+  fundingValue: r.funding_value,
   presigs: r.presigs,
   preimage: r.preimage,
   createdAt: r.created_at,
@@ -216,7 +221,7 @@ export class SwapStore {
     }
     const params: Params = { id, from, to, now: nowSecs() }
     const sets = ['state = $to', 'updated_at = $now']
-    for (const [key, value] of Object.entries(fields) as [keyof SwapUpdate, string | null | undefined][]) {
+    for (const [key, value] of Object.entries(fields) as [keyof SwapUpdate, string | number | null | undefined][]) {
       if (value === undefined) continue
       sets.push(`${COLUMN[key]} = $${key}`)
       params[key] = value

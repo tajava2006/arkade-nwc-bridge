@@ -1,5 +1,7 @@
 import '../src/polyfills.ts'
 import { hex } from '@scure/base'
+import { SendService } from './api/send.ts'
+import { SwapLocks } from './api/http_error.ts'
 import { KeyFileError, loadKeyFile } from './ark/key.ts'
 import { arkdNetworkMismatch, ArkSigner } from './ark/signer.ts'
 import { checkConfigFiles, ConfigError, loadConfig, type SubdustdConfig } from './config.ts'
@@ -63,7 +65,11 @@ log.info(
 
 const signer = new ArkSigner(key, config.arkdUrl)
 log.info(`ark key ${hex.encode(await signer.xOnlyPublicKey())}`)
-const server = startHttp(config, log)
+const locks = new SwapLocks()
+// The push channel (SM-27) hooks in here; until then transitions are only logged.
+const emit = (swapId: string, state: string) => log.debug(`swap ${swapId} → ${state}`)
+const send = new SendService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
+const server = startHttp(config, log, { send })
 
 let stopping = false
 const shutdown = (reason: string, code = 0) => {

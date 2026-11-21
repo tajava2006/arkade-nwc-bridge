@@ -255,7 +255,8 @@ describe.skipIf(!CERT || !MACAROON)('subdustd LndClient on regtest', () => {
   test('boot against the wrong chain exits 1; the right chain logs the node', async () => {
     const wrong = await bootWith('bitcoin')
     expect(await wrong.exited).toBe(1)
-    expect(await new Response(wrong.stderr).text()).toContain('LND is on regtest but config.network is bitcoin')
+    // LND and arkd are probed in parallel; whichever answers first refuses.
+    expect(await new Response(wrong.stderr).text()).toMatch(/(LND|arkd) is on regtest but config\.network is bitcoin/)
 
     const right = await bootWith('regtest')
     const out: string[] = []
