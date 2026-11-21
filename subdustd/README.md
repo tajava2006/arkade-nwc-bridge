@@ -24,6 +24,26 @@ in that same file.
 the paths that need them; it does not restart the process, which still has
 old swaps to settle and refund.
 
+## Ark key
+
+subdustd has its own key and its own float. It funds receives from that float,
+and send proceeds land back on it.
+
+```bash
+bun run subdustd:keygen /data/subdustd.key   # once; refuses to overwrite
+```
+
+- **Back the file up.** It is a hex secret with mode 600, and the only copy.
+- **Boot never creates a key.** A missing or malformed file refuses boot. A
+  wrong volume mount must not silently start a fresh, empty wallet.
+- **Top-up address:** logged at boot (`receive/top-up address …`) once arkd
+  answers.
+- **Exit delay:** the key's script uses arkd's advertised exit delay. The
+  Boltz fork's 605184 override existed only because it shared fulmine's key.
+- **Funding:** a receive spends the smallest eligible coins whole, ascending,
+  until `dust + a` is covered. Eligible means spendable, at least dust, and
+  outliving T plus the margin.
+
 ## LND
 
 Direct gRPC (`subdustd/lnd/client.ts`, protos vendored from LND v0.21.5-beta),
