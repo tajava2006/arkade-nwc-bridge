@@ -3,6 +3,7 @@ import {
   EsploraProvider,
   InMemoryContractRepository,
   InMemoryWalletRepository,
+  RestIndexerProvider,
   RestOperatorProvider,
   SingleKey,
   Wallet,
@@ -13,7 +14,6 @@ import {
 } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import type { Config } from './config'
-import { WholeSetIndexerProvider } from './indexer'
 
 export interface ArkContext {
   identity: SingleKey
@@ -163,12 +163,11 @@ export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promis
     // ASP-dead mode agree on what's confirmed — and a config.json override
     // (e.g. a self-hosted mempool) retargets both at once.
     onchainProvider: new EsploraProvider(cfg.esploraUrls[0]!),
-    // The SDK's vtxo pager truncates the wallet's own set against arkd >=
-    // v0.9.16 (src/indexer.ts has the mechanism and the mainnet case). This
-    // instance is the one that matters: the snapshot behind getVtxos, the
-    // balance, settle()'s input selection and the exit vault's live set all
-    // read through it.
-    indexerProvider: new WholeSetIndexerProvider(cfg.arkServerUrl),
+    // The SDK's own indexer. The bridge used to substitute a whole-set reader
+    // here because the 0.4 pager stopped after one arkd page (F23); 0.5 pages
+    // on the server's own totals and sees every coin (regtest-checked with 155
+    // coins and spent rows mixed in — test/regtest/sdk05_pager.test.ts).
+    indexerProvider: new RestIndexerProvider(cfg.arkServerUrl),
     // Node has no IndexedDB; rebuild local caches from the indexer on each
     // boot. We have our own sqlite in src/db.ts for bridge-level state
     // (connections, payments, invoices) — that's a separate concern.

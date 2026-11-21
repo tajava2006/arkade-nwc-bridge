@@ -16,7 +16,7 @@ import { loadAccount } from './account'
 import { resolveServerSet, getServerRow, setServerRow } from './server_config'
 import { EsploraProvider, OnchainWallet, RestArkProvider, SingleKey } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
-import { initBoltz, reconcilePendingIncoming } from './boltz'
+import { initBoltz, reconcilePendingIncoming, wholeScriptIndexer } from './boltz'
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
@@ -43,7 +43,6 @@ import {
 import { renderBalanceFragment, renderExitReadinessFragment } from './web/views/dashboard'
 import { renderBreakdownFragment } from './web/views/send'
 import { splitHotPocket } from './wallet_spend'
-import { WholeSetIndexerProvider } from './indexer'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -368,7 +367,7 @@ async function main(): Promise<void> {
       // only thing that ever flips them (see ln_receive.ts).
       // arkd indexer for M3's landing verification (exact VHTLC-spend → our-coin
       // txid binding) — same server the wallet trusts, never boltz.
-      const reconcileIndexer = new WholeSetIndexerProvider(bootCfg.arkServerUrl)
+      const reconcileIndexer = wholeScriptIndexer(bootCfg.arkServerUrl)
       const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, wallet, indexer: reconcileIndexer, notify }
       const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
       const runReconcilePasses = async (): Promise<void> => {

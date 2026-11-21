@@ -11,14 +11,13 @@ import {
   type BoltzSwap,
   type BoltzSwapStatus,
 } from '@arkade-os/boltz-swap'
-import { ArkAddress, RestIndexerProvider, type Wallet } from '@arkade-os/sdk'
+import { ArkAddress, getAllNormalizedVtxos, RestIndexerProvider, type Wallet } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import type { Database } from 'bun:sqlite'
 import { SqliteSwapRepository } from './boltz_repository'
 import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
 import type { Config } from './config'
 import type { NotifyFn } from './nostr/notifier'
-import { WholeSetIndexerProvider } from './indexer'
 
 export interface BoltzContext {
   swaps: ArkadeSwaps
@@ -38,6 +37,21 @@ const REVERSE_LAND_GAP_MS = 1000
 
 /** The narrow indexer surface confirmReverseLanded needs (stubbable in tests). */
 export type VtxoIndexer = Pick<RestIndexerProvider, 'getVtxos'>
+
+/**
+ * Every row of the queried scripts. M3 reads our wallet script's whole history,
+ * which outgrows one arkd page (100); the SDK's own reader pages it correctly
+ * since 0.5 (F23 fixed upstream, regtest-checked), so no bridge pager is needed.
+ */
+export const wholeScriptIndexer = (arkServerUrl: string): VtxoIndexer => {
+  const indexer = new RestIndexerProvider(arkServerUrl)
+  return {
+    getVtxos: async (opts) => {
+      const { scripts = [], outpoints: _o, pageIndex: _p, ...rest } = opts ?? {}
+      return { vtxos: await getAllNormalizedVtxos(indexer, scripts, rest) }
+    },
+  }
+}
 
 export async function confirmReverseLanded(
   wallet: Wallet,
@@ -186,7 +200,7 @@ export async function initBoltz(deps: {
 }): Promise<BoltzContext> {
   // M3's landing verification reads the arkd indexer directly — the same
   // server the wallet trusts, never boltz.
-  const indexer = new WholeSetIndexerProvider(deps.cfg.arkServerUrl)
+  const indexer = wholeScriptIndexer(deps.cfg.arkServerUrl)
   const swaps = await ArkadeSwaps.create({
     wallet: deps.wallet,
     swapProvider: new BoltzSwapProvider({
