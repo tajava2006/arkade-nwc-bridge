@@ -73,6 +73,16 @@ Two additions over the fork:
   The payer gets the HTLC back immediately. The fork held it until LND
   timed it out.
 
+## Push channel
+
+`/v2/ws` on the API port serves the subset of the Boltz sidecar's `swap.update`
+WebSocket that the bridge's existing client (`src/atomic/boltz_ws.ts`) speaks.
+That client already derives `${apiUrl}/v2/ws`, so pointing the bridge at
+subdustd needs no other setting. On a subscribe, subdustd replays the current
+status of every known id, then pushes each transition. It is purely an
+accelerator: the bridge's 30s reconciler stays the source of truth. Limits:
+100 ids per message, 1,000 subscriptions per connection.
+
 ## Scanner (durable path)
 
 The request handlers and the invoice subscription are fast paths. On boot and

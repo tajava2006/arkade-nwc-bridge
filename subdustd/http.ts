@@ -3,6 +3,7 @@ import type { SendService } from './api/send.ts'
 import { HttpError } from './api/http_error.ts'
 import type { SubdustdConfig } from './config.ts'
 import type { Logger } from './log.ts'
+import type { PushHub } from './push.ts'
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -10,6 +11,7 @@ const json = (body: unknown, status = 200) =>
 export interface Api {
   send?: SendService
   receive?: ReceiveService
+  push?: PushHub
 }
 
 const PREFIX = '/v2/subdust/atomic'
@@ -59,11 +61,19 @@ export const startHttp = (config: SubdustdConfig, log: Logger, api?: Api) => {
     routes[`${PREFIX}/receive/status`] = { GET: handle(log, (r) => receive.status(query(r))) }
     routes[`${PREFIX}/receive/settle`] = { POST: handle(log, async (r) => receive.settle(await body(r))) }
   }
+  const push = api?.push
   const server = Bun.serve({
     hostname: config.http.host,
     port: config.http.port,
     routes,
-    fetch: () => json({ error: 'not found' }, 404),
+    fetch: (req, srv) => {
+      if (push && new URL(req.url).pathname === '/v2/ws') {
+        if (srv.upgrade(req, { data: push.newSocketData() })) return undefined
+        return json({ error: 'websocket upgrade required' }, 426)
+      }
+      return json({ error: 'not found' }, 404)
+    },
+    websocket: push?.websocket ?? { message() {} },
     error: (e) => {
       log.error(`http: ${e.stack ?? e.message}`)
       return json({ error: 'internal error' }, 500)

@@ -11,6 +11,7 @@ import { LndClient } from './lnd/client.ts'
 import { probeLnd } from './lnd/probe.ts'
 import { createLogger } from './log.ts'
 import { probeUntilAnswered } from './probe.ts'
+import { PushHub } from './push.ts'
 import { Scanner } from './scanner.ts'
 import { SwapStore } from './store.ts'
 
@@ -68,11 +69,14 @@ log.info(
 const signer = new ArkSigner(key, config.arkdUrl)
 log.info(`ark key ${hex.encode(await signer.xOnlyPublicKey())}`)
 const locks = new SwapLocks()
-// The push channel (SM-27) hooks in here; until then transitions are only logged.
-const emit = (swapId: string, state: string) => log.debug(`swap ${swapId} → ${state}`)
+const push = new PushHub((id) => store.get(id)?.state)
+const emit = (swapId: string, state: string) => {
+  log.debug(`swap ${swapId} → ${state}`)
+  push.publish(swapId, state)
+}
 const send = new SendService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
 const receive = new ReceiveService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
-const server = startHttp(config, log, { send, receive })
+const server = startHttp(config, log, { send, receive, push })
 const scanner = new Scanner({ store, send, receive, medianTimePast: () => lnd.medianTimePast(), log })
 scanner.start()
 

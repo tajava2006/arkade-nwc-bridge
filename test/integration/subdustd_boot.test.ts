@@ -61,6 +61,14 @@ describe('subdustd boot', () => {
     expect(await res?.json()).toEqual({ ok: true })
     expect((await fetch(`http://127.0.0.1:${port}/nope`)).status).toBe(404)
 
+    // The push channel is served by the real process on the same port.
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/v2/ws`)
+    const pong = new Promise((r) => ws.addEventListener('message', (e) => r(JSON.parse(String(e.data)))))
+    await new Promise((r) => ws.addEventListener('open', r, { once: true }))
+    ws.send(JSON.stringify({ op: 'ping' }))
+    expect(await pong).toEqual({ event: 'pong' })
+    ws.close()
+
     const hc = Bun.spawn(['bun', 'run', 'subdustd/healthcheck.ts', join(dir, 'ok.json')])
     expect(await hc.exited).toBe(0)
 
