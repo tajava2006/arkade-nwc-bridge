@@ -51,6 +51,28 @@ Where this differs from the fork:
 - **Fee and exit delay are frozen at init.** The presigned split is rebuilt
   from the stored row, not from current config or arkd info.
 
+## Receive API (LN → ARK)
+
+| endpoint | does |
+|---|---|
+| `POST …/receive/init` `{amount, paymentHash, userPubkey, descriptionHash?}` | `{swapId, invoice}`: a hold invoice. Final CLTV is `⌈receiveWindow / blockTime⌉ + 18`, so the held HTLC outlives T (F10). The same hash returns the same invoice while it is unpaid (F17) |
+| `GET …/receive/status?swapId=` | `{state, fundingOutpoint?, presigs?, boltzPubkey, refundLocktime, exitDelay, boltzScriptDelay}`, which is what the receiver needs to verify and claim |
+| `POST …/receive/settle` `{swapId, preimage}` | `{settled: true}`. Settling again is idempotent (F12) |
+
+Once the payer's HTLC is held, subdustd funds the shared vtxo from its float.
+It spends coins whole, ascending, and adopts a coin already on the shared
+script after a crash (F15). Then it presigns the claim. Detection is a
+subscription (fast path); the resume pass (`resumeInvoiceIssued`) covers
+restarts (F14).
+
+Two additions over the fork:
+
+- **init answers 503 when the float cannot fund the amount now.** No invoice
+  is issued that nobody could fund.
+- **An accepted HTLC that provably cannot be funded is cancelled at once.**
+  The payer gets the HTLC back immediately. The fork held it until LND
+  timed it out.
+
 ## Ark key
 
 subdustd has its own key and its own float. It funds receives from that float,

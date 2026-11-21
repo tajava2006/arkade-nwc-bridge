@@ -1,3 +1,4 @@
+import type { ReceiveService } from './api/receive.ts'
 import type { SendService } from './api/send.ts'
 import { HttpError } from './api/http_error.ts'
 import type { SubdustdConfig } from './config.ts'
@@ -7,7 +8,8 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 export interface Api {
-  send: SendService
+  send?: SendService
+  receive?: ReceiveService
 }
 
 const PREFIX = '/v2/subdust/atomic'
@@ -44,11 +46,18 @@ export const startHttp = (config: SubdustdConfig, log: Logger, api?: Api) => {
   const routes: Record<string, Record<string, (req: Request) => Response | Promise<Response>>> = {
     '/healthz': { GET: () => json({ ok: true }) },
   }
-  if (api) {
-    routes[`${PREFIX}/send/init`] = { POST: handle(log, async (r) => api.send.init(await body(r))) }
-    routes[`${PREFIX}/send/fund`] = { POST: handle(log, async (r) => api.send.fund(await body(r))) }
-    routes[`${PREFIX}/send/cancel`] = { POST: handle(log, async (r) => api.send.cancel(await body(r))) }
-    routes[`${PREFIX}/send/status`] = { GET: handle(log, (r) => api.send.status(query(r))) }
+  const send = api?.send
+  if (send) {
+    routes[`${PREFIX}/send/init`] = { POST: handle(log, async (r) => send.init(await body(r))) }
+    routes[`${PREFIX}/send/fund`] = { POST: handle(log, async (r) => send.fund(await body(r))) }
+    routes[`${PREFIX}/send/cancel`] = { POST: handle(log, async (r) => send.cancel(await body(r))) }
+    routes[`${PREFIX}/send/status`] = { GET: handle(log, (r) => send.status(query(r))) }
+  }
+  const receive = api?.receive
+  if (receive) {
+    routes[`${PREFIX}/receive/init`] = { POST: handle(log, async (r) => receive.init(await body(r))) }
+    routes[`${PREFIX}/receive/status`] = { GET: handle(log, (r) => receive.status(query(r))) }
+    routes[`${PREFIX}/receive/settle`] = { POST: handle(log, async (r) => receive.settle(await body(r))) }
   }
   const server = Bun.serve({
     hostname: config.http.host,

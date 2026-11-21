@@ -1,5 +1,6 @@
 import '../src/polyfills.ts'
 import { hex } from '@scure/base'
+import { ReceiveService } from './api/receive.ts'
 import { SendService } from './api/send.ts'
 import { SwapLocks } from './api/http_error.ts'
 import { KeyFileError, loadKeyFile } from './ark/key.ts'
@@ -69,7 +70,8 @@ const locks = new SwapLocks()
 // The push channel (SM-27) hooks in here; until then transitions are only logged.
 const emit = (swapId: string, state: string) => log.debug(`swap ${swapId} → ${state}`)
 const send = new SendService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
-const server = startHttp(config, log, { send })
+const receive = new ReceiveService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
+const server = startHttp(config, log, { send, receive })
 
 let stopping = false
 const shutdown = (reason: string, code = 0) => {
@@ -77,6 +79,7 @@ const shutdown = (reason: string, code = 0) => {
   stopping = true
   log.info(`${reason}: shutting down`)
   server.stop(true)
+  receive.close()
   lnd.close()
   store.close()
   process.exit(code)
