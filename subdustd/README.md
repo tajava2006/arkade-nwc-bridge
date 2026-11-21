@@ -73,6 +73,22 @@ Two additions over the fork:
   The payer gets the HTLC back immediately. The fork held it until LND
   timed it out.
 
+## Scanner (durable path)
+
+The request handlers and the invoice subscription are fast paths. On boot and
+every 60s, `scanner.ts` walks the non-terminal rows and pushes each one forward
+from chain and LND state alone, under the per-swap lock:
+
+| rows | action |
+|---|---|
+| send `ln_inflight` | `resolveInflight`: paid → claim with LND's preimage, dead → `failed` (F6, F25) |
+| receive `invoice_issued` | held → fund, cancelled → `failed` (F14) |
+| receive `funded` | Spent by the user's claim → harvest the preimage from that tx and settle (F1). Unspent and **chain MTP > T** → refund to our script, then cancel the hold invoice (F2). Every refund attempt is verified through the indexer; an ACK that never registers re-mints a fresh txid |
+| receive `refund_wait` | Cancel the hold invoice and finish. Retried until LND answers (F16) |
+
+A pass is skipped while the previous one is still running (F13). An unknown
+MTP refunds nothing.
+
 ## Ark key
 
 subdustd has its own key and its own float. It funds receives from that float,
@@ -99,13 +115,17 @@ Direct gRPC (`subdustd/lnd/client.ts`, protos vendored from LND v0.21.5-beta),
 the same RPCs the Boltz fork used. Give it a least-privilege macaroon:
 
 ```bash
-lncli bakemacaroon invoices:read invoices:write offchain:read offchain:write info:read \
+lncli bakemacaroon invoices:read invoices:write offchain:read offchain:write info:read onchain:read \
   --save_to subdustd.macaroon
 ```
 
 - **Dialing by IP works.** Bun refuses an IP as the TLS server name, so for an
   IP socket the client names the cert `localhost`, which every LND cert
   carries. The cert file is still the only trusted root.
+- **`onchain:read` is for the clock.** It lets subdustd read block headers
+  (chainkit) to compute the chain's median time past. arkd enforces refund
+  CLTVs against MTP, and wall clock runs ahead of it. The macaroon still
+  cannot create addresses or send coins.
 - **Boot checks the chain.** If LND reports a different chain than
   `config.network`, the process exits. An unreachable LND does not stop boot.
 - **A thrown `sendPayment` is not a failure.** Only a returned `FAILED` is

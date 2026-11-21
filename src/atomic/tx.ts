@@ -11,6 +11,7 @@ import {
   type Identity,
   type TapLeafScript,
 } from '@arkade-os/sdk'
+import type { ArkAddress } from '@arkade-os/sdk'
 import type { AtomicVtxoScript } from './script'
 import type { AtomicOutput } from './split'
 
@@ -448,3 +449,29 @@ export function buildUexitSweep(args: UexitSweepArgs): Transaction {
   tx.addOutput({ script: args.outputScript, amount: BigInt(out) })
   return tx
 }
+
+// ── poisoned-txid recovery (shared by the funder's send refund and the server's receive refund) ──
+/**
+ * arkd rejects a refund submitted before chain MTP passes T — and that rejected
+ * arkTxid is then POISONED: later submits ACK but never register (mainnet
+ * false-refund 2026-07-17). The tx is deterministic in (input, leaf, outputs),
+ * so the only way to a fresh txid is a different output split. Attempt 1 is the
+ * clean single output; the rest split V across a regular and a sub-dust output
+ * to the same owner (same total, new txid), with the regular part kept ≥ dust.
+ */
+export function freshTxidAttempts(ourAddr: ArkAddress, value: number, dust: number): AtomicOutput[][] {
+  const maxK = Math.min(20, value - dust)
+  const attempts: AtomicOutput[][] = [[{ script: ourAddr.pkScript, amount: BigInt(value) }]]
+  for (let k = 1; k <= maxK; k++) {
+    attempts.push([
+      { script: ourAddr.pkScript, amount: BigInt(value - k) },
+      { script: ourAddr.subdustPkScript, amount: BigInt(k) },
+    ])
+  }
+  return attempts
+}
+
+/** arkd's answer for a CLTV refund submitted before the chain clock reached T. */
+export const isBlocktimeLocked = (e: unknown): boolean =>
+  e instanceof Error &&
+  (/FORFEIT_CLOSURE_LOCKED/.test(e.message) || (e as { code?: number }).code === 11)

@@ -15,7 +15,7 @@ import * as protoLoader from '@grpc/proto-loader'
 const PROTO_DIR = fileURLToPath(new URL('./proto/', import.meta.url))
 
 const loadPackage = () => {
-  const def = protoLoader.loadSync(['lightning.proto', 'invoices.proto', 'router.proto'], {
+  const def = protoLoader.loadSync(['lightning.proto', 'invoices.proto', 'router.proto', 'chainkit.proto'], {
     keepCase: true,
     longs: String,
     enums: String,
@@ -27,6 +27,7 @@ const loadPackage = () => {
     lnrpc: { Lightning: grpc.ServiceClientConstructor }
     invoicesrpc: { Invoices: grpc.ServiceClientConstructor }
     routerrpc: { Router: grpc.ServiceClientConstructor }
+    chainrpc: { ChainKit: grpc.ServiceClientConstructor }
   }
 }
 
@@ -181,6 +182,7 @@ export class LndClient {
   private readonly lightning: grpc.Client & Record<string, any>
   private readonly invoices: grpc.Client & Record<string, any>
   private readonly router: grpc.Client & Record<string, any>
+  private readonly chain: grpc.Client & Record<string, any>
 
   constructor(
     conn: LndConnection,
@@ -208,12 +210,14 @@ export class LndClient {
     this.lightning = new pkg.lnrpc.Lightning(conn.socket, creds, opts) as never
     this.invoices = new pkg.invoicesrpc.Invoices(conn.socket, creds, opts) as never
     this.router = new pkg.routerrpc.Router(conn.socket, creds, opts) as never
+    this.chain = new pkg.chainrpc.ChainKit(conn.socket, creds, opts) as never
   }
 
   close(): void {
     this.lightning.close()
     this.invoices.close()
     this.router.close()
+    this.chain.close()
   }
 
   // A deadline on every unary call: an LND that hangs must surface as an
@@ -235,6 +239,29 @@ export class LndClient {
       blockHeight: num(r.block_height),
       syncedToChain: Boolean(r.synced_to_chain),
     }
+  }
+
+  /**
+   * BIP-113 median time past of the chain tip: the median timestamp of the last
+   * 11 headers, walked back through prev-hash. This is the clock arkd enforces
+   * a CLTV refund against — wall clock runs ahead of it, and a refund submitted
+   * early is rejected and poisons its txid. From our own LND (chainkit), so
+   * no third party sets this clock. Needs `onchain:read`.
+   */
+  async medianTimePast(): Promise<number> {
+    const best = await this.unary<any>(this.chain, 'GetBestBlock', {})
+    let hash: Buffer = best.block_hash
+    const times: number[] = []
+    for (let i = 0; i < 11; i++) {
+      const raw: Buffer = (await this.unary<any>(this.chain, 'GetBlockHeader', { block_hash: hash })).raw_block_header
+      if (raw.length !== 80) throw new LndError('GetBlockHeader', undefined, `header is ${raw.length} bytes, expected 80`)
+      times.push(raw.readUInt32LE(68))
+      const prev = raw.subarray(4, 36)
+      if (prev.every((b) => b === 0)) break // genesis
+      hash = Buffer.from(prev)
+    }
+    times.sort((a, b) => a - b)
+    return times[Math.floor(times.length / 2)]!
   }
 
   async decodeInvoice(bolt11: string): Promise<DecodedInvoice> {

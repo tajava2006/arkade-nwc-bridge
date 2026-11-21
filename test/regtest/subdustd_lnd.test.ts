@@ -13,7 +13,7 @@ import { LndClient, LndError, type InvoiceSnapshot } from '../../subdustd/lnd/cl
 //   SUBDUSTD_LND_CERT=… SUBDUSTD_LND_MACAROON=… bun test test/regtest
 //
 // The macaroon should be the least-privilege one subdustd ships with:
-//   lncli bakemacaroon invoices:read invoices:write offchain:read offchain:write info:read
+//   lncli bakemacaroon invoices:read invoices:write offchain:read offchain:write info:read onchain:read
 // SUBDUSTD_LND_PEER_CERT (optional) = the peer's tls.cert, for the pinning check.
 
 const CERT = process.env.SUBDUSTD_LND_CERT
@@ -214,11 +214,23 @@ describe.skipIf(!CERT || !MACAROON)('subdustd LndClient on regtest', () => {
     expect(await lnPaymentIsDead(lnd, hash)).toEqual({ dead: true, reason: 'no LN payment was ever initiated' })
   })
 
-  test('the least-privilege macaroon cannot touch on-chain funds', async () => {
+  test('the least-privilege macaroon reads chain state but cannot move or receive on-chain funds', async () => {
     const client = lnd as unknown as { unary: (c: unknown, m: string, r: object) => Promise<unknown>; lightning: unknown }
-    const err = await client.unary(client.lightning, 'WalletBalance', {}).catch((e) => e)
-    expect(err).toBeInstanceOf(LndError)
-    expect((err as LndError).message).toContain('permission denied')
+    for (const [method, req] of [
+      ['NewAddress', { type: 'TAPROOT_PUBKEY' }],
+      ['SendCoins', { addr: 'bcrt1qxxxx', amount: '1000' }],
+    ] as const) {
+      const err = await client.unary(client.lightning, method, req).catch((e) => e)
+      expect(err).toBeInstanceOf(LndError)
+      expect((err as LndError).message).toContain('permission denied')
+    }
+  })
+
+  test('chain MTP from our own LND equals bitcoind mediantime', async () => {
+    const bitcoind = JSON.parse(
+      execFileSync('docker', ['exec', 'bitcoin', 'bitcoin-cli', '-regtest', '-rpcuser=admin1', '-rpcpassword=123', 'getblockchaininfo'], { encoding: 'utf8' }),
+    )
+    expect(await lnd.medianTimePast()).toBe(bitcoind.mediantime)
   })
 
   test.skipIf(!PEER_CERT)('a different cert is refused even with the localhost name override', async () => {

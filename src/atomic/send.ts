@@ -13,6 +13,8 @@ import {
   AtomicVtxoScript,
   classifyResume,
   computeClaimSplit,
+  freshTxidAttempts,
+  isBlocktimeLocked,
   isEligibleFundingInput,
   presignCancel,
   presignClaim,
@@ -387,9 +389,6 @@ export class RefundNotYetError extends Error {
   }
 }
 
-const isBlocktimeLocked = (e: unknown): boolean =>
-  e instanceof Error &&
-  (/FORFEIT_CLOSURE_LOCKED/.test(e.message) || (e as { code?: number }).code === 11)
 
 /**
  * Estimate the chain's MTP (BIP-113 median time past) from esplora — the
@@ -428,17 +427,6 @@ async function estimateMtp(esploraUrl: string): Promise<number | undefined> {
  * submit poisons that txid's event stream forever (mainnet false-refund
  * 2026-07-17, see collaborativeSpend). maxK keeps the regular part ≥ dust.
  */
-function freshTxidAttempts(ourAddr: ArkAddress, value: number, dust: number): AtomicOutput[][] {
-  const maxK = Math.min(20, value - dust)
-  const attempts: AtomicOutput[][] = [[{ script: ourAddr.pkScript, amount: BigInt(value) }]]
-  for (let k = 1; k <= maxK; k++) {
-    attempts.push([
-      { script: ourAddr.pkScript, amount: BigInt(value - k) },
-      { script: ourAddr.subdustPkScript, amount: BigInt(k) },
-    ])
-  }
-  return attempts
-}
 
 /**
  * Reclaim the full funding V of a send swap through the refund leaf (CLTV T,

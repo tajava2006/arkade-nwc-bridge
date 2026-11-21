@@ -4,12 +4,16 @@ import { DefaultVtxo, getAllNormalizedVtxos, type ArkTxInput } from '@arkade-os/
 import {
   AtomicVtxoScript,
   computeClaimSplit,
+  freshTxidAttempts,
   fundShared,
+  isBlocktimeLocked,
   isEligibleFundingInput,
   presignClaim,
+  refundSpend,
   selectFundingInputs,
   type SharedVtxo,
 } from '../../src/atomic/index.ts'
+import { extractPreimageFromClaim } from '../preimage.ts'
 import type { SubdustKnobs } from '../config.ts'
 import { hrpOf, type ArkSigner } from '../ark/signer.ts'
 import type { LndClient } from '../lnd/client.ts'
@@ -42,6 +46,10 @@ export const RECEIVE_CLTV_BUFFER_BLOCKS = 18
 export const receiveFinalCltv = (knobs: Pick<SubdustKnobs, 'receiveWindowSecs' | 'blockTimeSecs'>): number =>
   Math.ceil(knobs.receiveWindowSecs / knobs.blockTimeSecs) + RECEIVE_CLTV_BUFFER_BLOCKS
 
+/** How long a refund submit gets to show up as spent before we call its txid poisoned. */
+const REGISTER_CHECKS = 8
+const REGISTER_INTERVAL_MS = 1_000
+
 export interface ReceiveDeps {
   store: SwapStore
   signer: ArkSigner
@@ -57,6 +65,9 @@ class NoFunding extends Error {}
 
 export class ReceiveService {
   private readonly subscriptions = new Map<string, { stop: () => void; timer: ReturnType<typeof setTimeout> }>()
+  // Funded receives spent by something that carries no matching preimage —
+  // logged once each so a persistent oddity does not spam every pass.
+  private readonly loggedUnharvestable = new Set<string>()
 
   constructor(private readonly d: ReceiveDeps) {}
 
@@ -295,6 +306,155 @@ export class ReceiveService {
         release()
       }
     }
+  }
+
+  private sharedScript(swap: SwapRow, server: Uint8Array, funder: Uint8Array): AtomicVtxoScript {
+    return new AtomicVtxoScript({
+      funder,
+      claimer: hex.decode(swap.userPubkey),
+      server,
+      paymentHash: hex.decode(swap.paymentHash),
+      refundLocktime: BigInt(swap.refundLocktime),
+      exitDelay: swap.selfDelay!,
+    })
+  }
+
+  /** spentBy of the shared vtxo, or undefined while unspent (arkd serves "" for unspent). */
+  private async sharedSpentBy(swap: SwapRow): Promise<string | undefined> {
+    const [txid, vout] = swap.fundingOutpoint!.split(':')
+    const { vtxos } = await this.d.signer.indexer.getVtxos({ outpoints: [{ txid: txid!, vout: Number(vout) }] })
+    const spentBy = vtxos.find((v) => v.txid === txid && v.vout === Number(vout))?.spentBy
+    return spentBy ? spentBy : undefined
+  }
+
+  /**
+   * One pass over a funded receive. One read of the shared vtxo decides:
+   *  - spent by the user's claim → harvest the preimage from that tx and settle
+   *    ourselves (F1). Never wait for /receive/settle: a receiver who withholds
+   *    it would take `a` for free.
+   *  - unspent and chain MTP past T → refund our funding, then release the
+   *    payer (F2). Wall clock is not the clock arkd enforces; an early submit is
+   *    rejected and poisons its txid.
+   *  - otherwise nothing yet. An unknown MTP refunds nothing.
+   */
+  async resumeFunded(swapId: string, mtp: number | undefined): Promise<void> {
+    const release = this.d.locks.tryAcquire(swapId)
+    if (!release) return
+    try {
+      const swap = this.d.store.get(swapId)
+      if (!swap || swap.direction !== 'receive' || swap.state !== 'funded') return
+      const spentBy = await this.sharedSpentBy(swap)
+      if (spentBy) return await this.harvest(swap, spentBy)
+      if (mtp !== undefined && mtp > swap.refundLocktime) await this.refund(swap)
+    } finally {
+      release()
+    }
+  }
+
+  private async harvest(swap: SwapRow, spentBy: string): Promise<void> {
+    const [txid, vout] = swap.fundingOutpoint!.split(':')
+    const { txs } = await this.d.signer.indexer.getVirtualTxs([spentBy])
+    const preimage = extractPreimageFromClaim(txs, spentBy, { txid: txid!, vout: Number(vout) }, Buffer.from(swap.paymentHash, 'hex'))
+    if (!preimage) {
+      if (!this.loggedUnharvestable.has(swap.id)) {
+        this.loggedUnharvestable.add(swap.id)
+        this.d.log.warn(`receive ${swap.id}: shared vtxo spent by ${spentBy} with no matching preimage — not settling`)
+      }
+      return
+    }
+    await this.settleWith(swap.id, preimage.toString('hex'))
+    this.d.log.info(`receive ${swap.id}: settled from the preimage in the user's claim ${spentBy}`)
+  }
+
+  /**
+   * Refund the shared vtxo to us through the refund leaf. arkd's ACK is not
+   * registration: only the indexer dropping the shared outpoint proves the
+   * spend landed. An ACK that never registers means a poisoned txid, so the
+   * next attempt re-mints one by splitting the same total differently.
+   */
+  private async refund(swap: SwapRow): Promise<void> {
+    const { signer, store } = this.d
+    const info = await signer.getInfo()
+    const server = await signer.serverXOnly()
+    const script = this.sharedScript(swap, server, await signer.xOnlyPublicKey())
+    const [txid, voutStr] = swap.fundingOutpoint!.split(':')
+    const vout = Number(voutStr)
+    const unspent = async () =>
+      (await getAllNormalizedVtxos(signer.indexer, [hex.encode(script.pkScript)], { spendableOnly: true })).some(
+        (v) => v.txid === txid && v.vout === vout,
+      )
+    if (!(await unspent())) return // claimed (or swept) since the check — the next pass harvests
+    const shared: SharedVtxo = { txid: txid!, vout, value: swap.fundingValue!, script }
+    const ours = await signer.receiveAddress(swap.selfDelay!)
+    const unroll = await signer.serverUnroll()
+
+    let refunded = ''
+    for (const outputs of freshTxidAttempts(ours, shared.value, Number(info.dust))) {
+      let attempt: string
+      try {
+        attempt = await refundSpend(shared, outputs, unroll, signer.identity, signer.ark)
+      } catch (e) {
+        if (isBlocktimeLocked(e)) return // arkd's clock not past T yet — retry next pass, txid not burned
+        throw e
+      }
+      let landed = false
+      for (let i = 0; i < REGISTER_CHECKS && !landed; i++) {
+        await Bun.sleep(REGISTER_INTERVAL_MS)
+        landed = !(await unspent())
+      }
+      if (landed) {
+        refunded = attempt
+        break
+      }
+      this.d.log.warn(`receive ${swap.id}: refund ${attempt} ACKed but never registered (poisoned txid) — re-minting`)
+    }
+    if (!refunded) throw new Error(`receive ${swap.id}: refund never registered — retrying next pass`)
+
+    // Record our refund before touching the invoice: if the cancel blips, the
+    // row must not sit at funded where the next pass would read our own refund
+    // as a spend and try to harvest it (F16).
+    store.transition(swap.id, 'funded', 'refund_wait')
+    this.d.emit(swap.id, 'refund_wait')
+    this.d.log.info(`receive ${swap.id}: T passed unclaimed, refunded ${shared.value} sats (arkTx ${refunded})`)
+    await this.cancelHeld(swap.id)
+  }
+
+  /**
+   * Release the payer of a receive we already refunded on-chain, then
+   * terminalize. Safe only after our own refund — cancelling a claimed swap
+   * would refund the payer while the user keeps `a` (F1). A failed lookup or
+   * cancel leaves refund_wait for the next pass (F16).
+   */
+  async resumeRefundWait(swapId: string): Promise<void> {
+    const release = this.d.locks.tryAcquire(swapId)
+    if (!release) return
+    try {
+      await this.cancelHeld(swapId)
+    } finally {
+      release()
+    }
+  }
+
+  private async cancelHeld(swapId: string): Promise<void> {
+    const swap = this.d.store.get(swapId)
+    if (!swap || swap.state !== 'refund_wait') return
+    let state: string
+    try {
+      state = (await this.d.lnd.lookupInvoice(swap.paymentHash)).state
+    } catch (e) {
+      this.d.log.warn(`receive ${swapId}: invoice lookup failed, retrying next pass: ${(e as Error).message}`)
+      return
+    }
+    if (state === 'OPEN' || state === 'ACCEPTED') {
+      try {
+        await this.d.lnd.cancelHoldInvoice(swap.paymentHash)
+      } catch (e) {
+        this.d.log.warn(`receive ${swapId}: hold-invoice cancel failed, retrying next pass: ${(e as Error).message}`)
+        return
+      }
+    }
+    this.d.store.transition(swapId, 'refund_wait', 'refunded')
+    this.d.emit(swapId, 'refunded')
   }
 
   status(query: unknown) {

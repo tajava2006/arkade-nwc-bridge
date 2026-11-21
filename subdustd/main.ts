@@ -11,6 +11,7 @@ import { LndClient } from './lnd/client.ts'
 import { probeLnd } from './lnd/probe.ts'
 import { createLogger } from './log.ts'
 import { probeUntilAnswered } from './probe.ts'
+import { Scanner } from './scanner.ts'
 import { SwapStore } from './store.ts'
 
 const path = process.argv[2]
@@ -72,12 +73,15 @@ const emit = (swapId: string, state: string) => log.debug(`swap ${swapId} → ${
 const send = new SendService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
 const receive = new ReceiveService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
 const server = startHttp(config, log, { send, receive })
+const scanner = new Scanner({ store, send, receive, medianTimePast: () => lnd.medianTimePast(), log })
+scanner.start()
 
 let stopping = false
 const shutdown = (reason: string, code = 0) => {
   if (stopping) return
   stopping = true
   log.info(`${reason}: shutting down`)
+  scanner.stop()
   server.stop(true)
   receive.close()
   lnd.close()
