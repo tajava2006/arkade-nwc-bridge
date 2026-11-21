@@ -1,5 +1,7 @@
 import { checkConfigFiles, ConfigError, loadConfig, type SubdustdConfig } from './config.ts'
 import { startHttp } from './http.ts'
+import { LndClient } from './lnd/client.ts'
+import { probeLnd } from './lnd/probe.ts'
 import { createLogger } from './log.ts'
 
 const path = process.argv[2]
@@ -25,12 +27,28 @@ log.info(
     `knobs=${JSON.stringify(config.subdust)}`,
 )
 
+let lnd: LndClient
+try {
+  lnd = new LndClient(config.lnd)
+} catch (e) {
+  console.error(`subdustd config rejected:\n  - config.lnd: cannot load the TLS cert: ${(e as Error).message}`)
+  process.exit(1)
+}
 const server = startHttp(config, log)
 
-const shutdown = (signal: string) => {
-  log.info(`${signal}: shutting down`)
+let stopping = false
+const shutdown = (reason: string, code = 0) => {
+  if (stopping) return
+  stopping = true
+  log.info(`${reason}: shutting down`)
   server.stop(true)
-  process.exit(0)
+  lnd.close()
+  process.exit(code)
 }
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
+
+void probeLnd(lnd, config.network, log, (reason) => {
+  log.error(reason)
+  shutdown('lnd network mismatch', 1)
+}, { stopped: () => stopping })

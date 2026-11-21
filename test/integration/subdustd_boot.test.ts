@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,7 +8,12 @@ import { join } from 'node:path'
 // and refuses to boot (non-zero, no listener) on a broken one.
 
 const dir = mkdtempSync(join(tmpdir(), 'subdustd-boot-'))
-for (const f of ['cert', 'mac', 'key']) writeFileSync(join(dir, f), 'x')
+for (const f of ['mac', 'key', 'garbage-cert']) writeFileSync(join(dir, f), 'x')
+// A parseable cert is all boot needs; no LND has to answer it.
+execFileSync('openssl', [
+  'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '1',
+  '-subj', '/CN=localhost', '-keyout', join(dir, 'cert.key'), '-out', join(dir, 'cert'),
+], { stdio: 'ignore' })
 
 const writeConfig = (name: string, extra: Record<string, unknown>) => {
   const path = join(dir, name)
@@ -16,7 +22,7 @@ const writeConfig = (name: string, extra: Record<string, unknown>) => {
     JSON.stringify({
       network: 'regtest',
       arkdUrl: 'http://127.0.0.1:7070',
-      lnd: { socket: '127.0.0.1:10009', certPath: join(dir, 'cert'), macaroonPath: join(dir, 'mac') },
+      lnd: { socket: '127.0.0.1:1', certPath: join(dir, 'cert'), macaroonPath: join(dir, 'mac') },
       keyPath: join(dir, 'key'),
       dbPath: join(dir, 'db.sqlite'),
       ...extra,
@@ -73,6 +79,13 @@ describe('subdustd boot', () => {
     children.push(child)
     expect(await child.exited).toBe(1)
     expect(await new Response(child.stderr).text()).toContain('config.keyPath:')
+  }, 20_000)
+
+  test('refuses to boot on a cert that does not parse', async () => {
+    const child = spawnDaemon(writeConfig('badcert.json', { lnd: { socket: '127.0.0.1:1', certPath: join(dir, 'garbage-cert'), macaroonPath: join(dir, 'mac') } }))
+    children.push(child)
+    expect(await child.exited).toBe(1)
+    expect(await new Response(child.stderr).text()).toContain('config.lnd: cannot load the TLS cert')
   }, 20_000)
 
   test('healthcheck fails when nothing is listening', async () => {

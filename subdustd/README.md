@@ -24,6 +24,36 @@ in that same file.
 the paths that need them; it does not restart the process, which still has
 old swaps to settle and refund.
 
+## LND
+
+Direct gRPC (`subdustd/lnd/client.ts`, protos vendored from LND v0.21.5-beta),
+the same RPCs the Boltz fork used. Give it a least-privilege macaroon:
+
+```bash
+lncli bakemacaroon invoices:read invoices:write offchain:read offchain:write info:read \
+  --save_to subdustd.macaroon
+```
+
+- **Dialing by IP works.** Bun refuses an IP as the TLS server name, so for an
+  IP socket the client names the cert `localhost`, which every LND cert
+  carries. The cert file is still the only trusted root.
+- **Boot checks the chain.** If LND reports a different chain than
+  `config.network`, the process exits. An unreachable LND does not stop boot.
+- **A thrown `sendPayment` is not a failure.** Only a returned `FAILED` is
+  terminal. A throw can be a dropped stream with the HTLC still in flight, or
+  a request LND refused before sending anything. Look the payment up with
+  `trackPayment` to tell which.
+- **Cancel gate** (`cancel_gate.ts`): co-signing a failed send's unwind is
+  allowed only when LND says the payment is terminally `FAILED`, or that it
+  never saw the hash. An unreachable or hung LND refuses: every unary call
+  and snapshot has a deadline.
+
+Regtest check (arkade-regtest stack running):
+
+```bash
+SUBDUSTD_LND_CERT=… SUBDUSTD_LND_MACAROON=… [SUBDUSTD_LND_PEER_CERT=…] bun run test:regtest
+```
+
 ## Config
 
 One JSON file, no env vars. Unknown keys are rejected, so a misspelled knob
