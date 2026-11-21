@@ -287,18 +287,17 @@ row exists. Logs go to stdout; when running in background pipe to
   Don't link to them from anything that gets committed — public links
   will 404. External URLs are in [DESIGN.md §10](DESIGN.md). Refresh
   them via the workspace's `update-refs.sh`, not a bridge npm script.
-- **A "degraded — checkpoint exit delay rejected" boot is an encoding
-  artifact, not a misconfigured ASP.** arkd's stock checkpoint exit delay is
-  86400s (24h), but BIP-68 relative timelocks count in 512-second units and
-  86400 is not a multiple of 512 — the script carries 168 units and decodes
-  back as 86016s. SDK 0.4.62 enforces a mainnet floor of exactly 86400s
-  against that decoded value, so a stock ASP can never clear it. `wallet.ts`
-  restates the floor at `MIN_CHECKPOINT_EXIT_DELAY_SECONDS` (86016n, mainnet
-  only — regtest keeps the SDK's lower floor). Do NOT "fix" this by reading
-  the delay from the server: the floor's whole job is to reject an ASP that
-  advertises a shorter delay than we accept. Note this only affects the
-  checkpoint script; vtxo addresses derive from `unilateralExitDelay`, so
-  nothing here forks the address space.
+- **A "degraded — checkpoint exit delay rejected" boot means the ASP
+  advertises a checkpoint exit delay below our floor.** The floor is
+  `MIN_CHECKPOINT_EXIT_DELAY_SECONDS` (86016n, mainnet-class only) in
+  `wallet.ts`, enforced by the bridge itself (`assertCheckpointExitDelay`)
+  before the wallet is built — SDK 0.5 dropped its own 86400s floor and the
+  option that used to carry ours (its floor is 512s). 86016 is arkd's stock
+  86400s as it survives BIP-68's 512-second units, so a stock ASP passes. Do
+  NOT "fix" a rejection by reading the delay from the server: the floor's
+  whole job is to reject an ASP that advertises a shorter delay than we
+  accept. This only concerns the checkpoint script; vtxo addresses derive
+  from `unilateralExitDelay`.
 - **The ark dependency chain must stay a single instance.**
   `@arkade-os/swap` pins `@arkade-os/sdk` to an *exact* version,
   and that SDK in turn pins `@noble/curves` / `@scure/base` /
