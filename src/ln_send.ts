@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite'
-import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { decodeInvoice } from './lib/bolt11'
 import { RestArkProvider, type ArkInfo, type Wallet } from '@arkade-os/sdk'
 import { atomicSubdustSend } from './atomic/send'
 import { poolSats, sendSelected, spendablePool } from './wallet_spend'

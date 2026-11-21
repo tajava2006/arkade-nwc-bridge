@@ -76,11 +76,13 @@ function vtxoOf(
     value: over.value ?? 1000,
     script: '5120' + 'ab'.repeat(32),
     tapTree: hex.decode('c0de'),
-    virtualStatus: {
-      state: over.status ?? 'preconfirmed',
-      batchExpiry: over.batchExpiry ?? 1783431985000, // ms, as the SDK reports it
-      ...(over.commitmentTxIds ? { commitmentTxIds: over.commitmentTxIds } : {}),
-    },
+    // SDK 0.5 coin shape: flat flags + expiresAt; `status` / `batchExpiry` (ms)
+    // stay as the fixture's vocabulary.
+    isSpent: over.status === 'spent',
+    isSwept: over.status === 'swept',
+    isPreconfirmed: (over.status ?? 'preconfirmed') === 'preconfirmed',
+    expiresAt: new Date(over.batchExpiry ?? 1783431985000),
+    ...(over.commitmentTxIds ? { commitmentTxIds: over.commitmentTxIds } : {}),
   } as unknown as ExtendedVirtualCoin
 }
 
@@ -119,7 +121,8 @@ function makeFake(opts: FakeOpts) {
             vout: o.vout,
             spentBy: row.spentBy,
             settledBy: row.settledBy,
-            virtualStatus: { state: row.state ?? 'spent' },
+            isSpent: (row.state ?? 'spent') === 'spent',
+            isSwept: row.state === 'swept',
           },
         ]
       })

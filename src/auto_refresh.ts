@@ -1,10 +1,4 @@
-import {
-  isRecoverable,
-  isSpendable,
-  isSubdust,
-  isVtxoExpiringSoon,
-  type ExtendedVirtualCoin,
-} from '@arkade-os/sdk'
+import { canSpendOffchain, isSubdust, isVtxoExpiringSoon, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 
 // Consolidate-all auto-refresh. The SDK's own renewal (settlementConfig in
 // wallet.ts) folds only what is near expiry plus sub-dust/swept riders —
@@ -47,12 +41,14 @@ export function needsRefresh(
   dust: bigint,
   thresholdMs: number,
 ): boolean {
+  // SDK 0.5 port (money path — what triggers a refresh): 0.4's
+  // isSpendable && !isRecoverable became canSpendOffchain, which also drops a
+  // vtxo already past expiry but not yet swept. Such a coin is recoverable-only
+  // and, like a swept one, cannot anchor a round on its own (anchor rule above),
+  // so it was never a useful trigger.
+  const now = { timestamp: new Date() }
   return vtxos.some(
-    (v) =>
-      isSpendable(v) &&
-      !isRecoverable(v) &&
-      !isSubdust(v, dust) &&
-      isVtxoExpiringSoon(v, thresholdMs),
+    (v) => canSpendOffchain(v, now) && !isSubdust(v, dust) && isVtxoExpiringSoon(v, thresholdMs),
   )
 }
 

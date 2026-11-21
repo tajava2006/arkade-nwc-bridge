@@ -8,7 +8,7 @@ import {
   type VirtualCoin,
   type Wallet,
 } from '@arkade-os/sdk'
-import { decodeInvoice } from '@arkade-os/boltz-swap'
+import { decodeInvoice } from '../lib/bolt11'
 import {
   AtomicVtxoScript,
   classifyResume,
@@ -28,7 +28,7 @@ import {
 } from './index'
 import { boltzFetch } from './boltz_http'
 import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from './ark_util'
-import { captureVtxo, expirySec } from '../exit/proof_sync'
+import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
 import { makeExitCostOracle } from '../exit/cost_oracle'
 import { gcOrphanProofs, removeVtxo } from '../exit/vault'
 import { selectSpendInputs } from '../coin_select'
@@ -175,12 +175,14 @@ export async function atomicSubdustSend(
   // funding change ⇒ the wallet can never be left with a sub-dust remainder
   // here; the claim split returns V′ − a − fee (≥ dust ⇒ regular).
   // V′ ≥ a + fee + dust; net cost stays a + fee.
-  // Coin source is the WALLET, not a raw indexer read. wallet.getVtxos is where
-  // the SDK masks inputs a concurrent spend has already claimed
-  // (_addPendingSpends, held until that spend is persisted) and where the
-  // bridge's unrolled filter lives. Reading the indexer directly opted out of
-  // both, so two zaps fired at once each saw the same coin as free.
-  const ownVtxos = await deps.wallet.getVtxos({ withRecoverable: false })
+  // Coin source is the WALLET, not a raw indexer read: getSpendableVtxos is
+  // where the SDK masks inputs a concurrent spend has already claimed (its
+  // pending-spend set), plus contract-locked, pending-recovery, held and
+  // intent-locked coins, and unrolled ones. Reading the indexer directly opted
+  // out of that, so two zaps fired at once each saw the same coin as free.
+  // (SDK 0.5 port: 0.4 read getVtxos here; 0.5's getVtxos is the raw
+  // reporting read and must not feed send({ selectedVtxos }).)
+  const ownVtxos = await deps.wallet.getSpendableVtxos({ withRecoverable: false })
   // Eligibility (regular / spendable / outlasts T) is the vendored rule boltz
   // shares; WHICH eligible coin to burn is a bridge-only policy, so the
   // ascending-by-value accumulation is replaced by the exit-cost-aware selector
@@ -236,9 +238,8 @@ export async function atomicSubdustSend(
     // now come from each coin instead of one assumed script.
     let txid: string
     try {
-      txid = await deps.wallet.sendBitcoin({
-        address: script.address(hrp(info.network), serverXOnly).encode(),
-        amount: Vp,
+      txid = await deps.wallet.send({
+        recipients: [{ address: script.address(hrp(info.network), serverXOnly).encode(), amount: Vp }],
         selectedVtxos: funding,
       })
     } catch (err) {
@@ -268,7 +269,7 @@ export async function atomicSubdustSend(
         source: 'atomic',
         script: hex.encode(script.pkScript),
         tapTree: hex.encode(script.encode()),
-        status: coin.virtualStatus?.state ?? 'unknown',
+        status: vtxoStatus(coin),
         expiresAt: expirySec(coin),
       })
     } catch (err) {

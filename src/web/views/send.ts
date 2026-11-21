@@ -1,4 +1,4 @@
-import type { ArkInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
+import type { OperatorInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
 import type { FeesResponse } from '@arkade-os/boltz-swap'
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
@@ -29,9 +29,9 @@ function fmtSats(n: number): string {
 }
 
 function expiryHint(v: ExtendedVirtualCoin): RawHtml {
-  const expiry = v.virtualStatus.batchExpiry
+  const expiry = v.expiresAt
   if (!expiry) return html`<span class="muted">—</span>`
-  const ms = expiry - Date.now()
+  const ms = expiry.getTime() - Date.now()
   if (ms <= 0) return html`<span class="muted">expired</span>`
   const days = Math.floor(ms / 86_400_000)
   const hours = Math.floor((ms % 86_400_000) / 3_600_000)
@@ -125,7 +125,7 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
  * Amounts are computed from arkInfo + the boltz fee table, never hardcoded:
  * either fee config can change without this copy going stale.
  */
-function drainHint(arkInfo: ArkInfo, fees: FeesResponse, buckets: VtxoBuckets): RawHtml {
+function drainHint(arkInfo: OperatorInfo, fees: FeesResponse, buckets: VtxoBuckets): RawHtml {
   if (buckets.roundTotalSat === 0) return html``
   const fee = offboardFeeSat(arkInfo, buckets.roundTotalSat)
   const dust = Number(arkInfo.dust)

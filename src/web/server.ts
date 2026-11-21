@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet, WalletBalance, RestArkProvider } from '@arkade-os/sdk'
-import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { decodeInvoice } from '../lib/bolt11'
 import { SqliteSwapRepository } from '../boltz_repository'
 
 import type { Config } from '../config'

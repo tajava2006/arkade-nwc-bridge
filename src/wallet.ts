@@ -1,12 +1,17 @@
 import {
+  CSVMultisigTapscript,
+  EsploraProvider,
   InMemoryContractRepository,
   InMemoryWalletRepository,
+  RestOperatorProvider,
   SingleKey,
   Wallet,
   type ContractWithVtxos,
   type ExtendedVirtualCoin,
   type GetVtxosFilter,
+  type OperatorInfo,
 } from '@arkade-os/sdk'
+import { hex } from '@scure/base'
 import type { Config } from './config'
 import { WholeSetIndexerProvider } from './indexer'
 
@@ -44,9 +49,29 @@ export const VTXO_RENEW_THRESHOLD_SECONDS = 3600
 // the check it is. 384 seconds below arkd's nominal 24h is the encoding's
 // rounding, not a policy concession.
 //
-// Regtest is exempt: the drill's arkd runs deliberately short delays and the
-// SDK's own regtest floor (1200s) already accommodates them.
+// Regtest is exempt: the drill's arkd runs deliberately short delays.
+//
+// SDK 0.5 dropped both its 86400s floor and the `minCheckpointExitDelaySeconds`
+// option this constant used to feed — its own floor is now 512s. The floor is
+// a bridge policy, so the bridge enforces it itself (assertCheckpointExitDelay,
+// before the wallet is built); dropping it with the option would have quietly
+// accepted any ASP.
 export const MIN_CHECKPOINT_EXIT_DELAY_SECONDS = 86016n
+
+/**
+ * Throws (→ degraded boot, same message prefix the SDK used) when the ASP's
+ * checkpoint exit delay is below our floor or not time-based. Mainnet-class
+ * networks only.
+ */
+export function assertCheckpointExitDelay(info: Pick<OperatorInfo, 'checkpointTapscript'>): void {
+  const { timelock } = CSVMultisigTapscript.decode(hex.decode(info.checkpointTapscript)).params
+  if (timelock.type !== 'seconds' || timelock.value < MIN_CHECKPOINT_EXIT_DELAY_SECONDS) {
+    throw new Error(
+      `checkpoint exit delay rejected: ${timelock.value} ${timelock.type} is below the ` +
+        `${MIN_CHECKPOINT_EXIT_DELAY_SECONDS}s floor`,
+    )
+  }
+}
 
 /**
  * The default-filter semantics `getVtxos` documents but does not deliver:
@@ -125,15 +150,19 @@ export function installUnrolledVtxoFilter(wallet: {
 export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promise<ArkContext> {
   const identity = SingleKey.fromPrivateKey(privateKey)
 
+  // SDK 0.5 takes providers, not URLs (arkServerUrl / esploraUrl are gone).
+  const operatorProvider = new RestOperatorProvider(cfg.arkServerUrl)
+  if (cfg.network !== 'regtest') assertCheckpointExitDelay(await operatorProvider.getInfo())
+
   const wallet = await Wallet.create({
     identity,
-    arkServerUrl: cfg.arkServerUrl,
+    operatorProvider,
     // Pin the wallet's esplora to our own priority list instead of the
     // SDK's ASP-network-derived default (mempool.arkade.sh). The exit path
     // (src/exit/) reads chain state from the same list, so normal mode and
     // ASP-dead mode agree on what's confirmed — and a config.json override
     // (e.g. a self-hosted mempool) retargets both at once.
-    esploraUrl: cfg.esploraUrls[0],
+    onchainProvider: new EsploraProvider(cfg.esploraUrls[0]!),
     // The SDK's vtxo pager truncates the wallet's own set against arkd >=
     // v0.9.16 (src/indexer.ts has the mechanism and the mainnet case). This
     // instance is the one that matters: the snapshot behind getVtxos, the
@@ -156,12 +185,6 @@ export async function initArkWallet(cfg: Config, privateKey: Uint8Array): Promis
     // deprecatedSignerMigration fall back to their defaults (the SDK reads each
     // field with `?? DEFAULT_SETTLEMENT_CONFIG.*`). Seconds, not ms.
     settlementConfig: { vtxoThreshold: VTXO_RENEW_THRESHOLD_SECONDS },
-    // See MIN_CHECKPOINT_EXIT_DELAY_SECONDS: the SDK's mainnet floor is a
-    // value the encoding cannot represent, so a stock arkd is rejected out of
-    // the box. Regtest keeps the SDK's own (lower) floor.
-    ...(cfg.network === 'regtest'
-      ? {}
-      : { minCheckpointExitDelaySeconds: MIN_CHECKPOINT_EXIT_DELAY_SECONDS }),
   })
   installUnrolledVtxoFilter(wallet)
 

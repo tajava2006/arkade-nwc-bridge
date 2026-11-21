@@ -1,15 +1,15 @@
 import {
+  canRecoverOnchain,
   Estimator,
-  isExpired,
-  isRecoverable,
-  isSpendable,
   isSubdust,
   isVtxoExpiringSoon,
+  isVtxoSpent,
   isValidArkAddress,
-  type ArkInfo,
   type ExtendedVirtualCoin,
+  type OperatorInfo,
 } from '@arkade-os/sdk'
-import { decodeInvoice, type FeesResponse } from '@arkade-os/boltz-swap'
+import type { FeesResponse } from '@arkade-os/boltz-swap'
+import { decodeInvoice } from './lib/bolt11'
 import { decode as decodeBolt11 } from 'light-bolt11-decoder'
 
 // Pure send-side logic shared by the web routes and views: destination → rail
@@ -48,7 +48,7 @@ export function classifyDestination(raw: string): Rail | null {
  * plus the boltz fee table (for the LN drain hint — see lnDrainInvoiceSat).
  */
 export interface SendData {
-  arkInfo: ArkInfo
+  arkInfo: OperatorInfo
   vtxos: ExtendedVirtualCoin[]
   fees: FeesResponse
 }
@@ -79,15 +79,20 @@ export function classifyVtxos(vtxos: ExtendedVirtualCoin[], dust: bigint): VtxoB
   const subdust: ExtendedVirtualCoin[] = []
   const recoverable: ExtendedVirtualCoin[] = []
 
+  // SDK 0.5 port (money path — balance buckets): 0.4's isSpendable / isRecoverable /
+  // isExpired became flat flags + capability predicates. Same buckets: skip
+  // spent (and unrolled — the F24 boundary already drops those upstream),
+  // sub-dust first, then swept-or-expired (= canRecoverOnchain) as recoverable.
+  const now = { timestamp: new Date() }
   for (const v of vtxos) {
-    if (!isSpendable(v)) continue
+    if (isVtxoSpent(v) || v.isUnrolled) continue
     // Sub-dust label takes priority over swept/expired: a sub-dust vtxo is
     // sub-dust regardless of its expiry, and that's the more useful thing to
     // surface. Both buckets are round-only recoverable, so this only changes
     // the display label, not behavior.
     if (isSubdust(v, dust)) {
       subdust.push(v)
-    } else if (isRecoverable(v) || isExpired(v)) {
+    } else if (canRecoverOnchain(v, now)) {
       recoverable.push(v)
     } else {
       spendable.push(v)
@@ -123,7 +128,7 @@ export function isExpiringSoon(v: ExtendedVirtualCoin): boolean {
  * The fee actually deducted is whatever `Ramps.offboard` computes at round time
  * — this is only the pre-submit preview.
  */
-export function offboardFeeSat(arkInfo: ArkInfo, amountSat: number): number {
+export function offboardFeeSat(arkInfo: OperatorInfo, amountSat: number): number {
   const estimator = new Estimator(arkInfo.fees.intentFee)
   const fee = estimator.evalOnchainOutput({ amount: BigInt(amountSat), script: '' })
   return Number(fee.satoshis)
@@ -136,7 +141,7 @@ export function offboardFeeSat(arkInfo: ArkInfo, amountSat: number): number {
  * deduction — only the single onchain-output fee comes off the top. Returns
  * null if the result would be below dust (no valid output → genuinely stuck).
  */
-export function offboardMaxSat(arkInfo: ArkInfo, buckets: VtxoBuckets): number | null {
+export function offboardMaxSat(arkInfo: OperatorInfo, buckets: VtxoBuckets): number | null {
   const fee = offboardFeeSat(arkInfo, buckets.roundTotalSat)
   const out = buckets.roundTotalSat - fee
   if (out < Number(arkInfo.dust)) return null
@@ -163,7 +168,7 @@ export interface OffboardDustChange {
  * round total needs no per-input deduction.
  */
 export function offboardDustChange(
-  arkInfo: ArkInfo,
+  arkInfo: OperatorInfo,
   buckets: VtxoBuckets,
   recipientSat: number,
 ): OffboardDustChange | null {

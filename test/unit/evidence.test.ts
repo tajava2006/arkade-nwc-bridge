@@ -193,10 +193,7 @@ describe('resolveAbsorbedByConservation', () => {
   const R2 = 'b'.repeat(64)
 
   const liveOf = (value: number, commitmentTxIds?: string[]) =>
-    ({ value, virtualStatus: { state: 'settled', commitmentTxIds } }) as Pick<
-      VirtualCoin,
-      'value' | 'virtualStatus'
-    >
+    ({ value, commitmentTxIds }) as Pick<VirtualCoin, 'value' | 'commitmentTxIds'>
 
   test('balanced group: forfeited dust+ and no-forfeit sub-dust both absorbed', () => {
     const out = resolveAbsorbedByConservation(

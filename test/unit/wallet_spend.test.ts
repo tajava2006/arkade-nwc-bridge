@@ -31,26 +31,26 @@ const vtxo = (value: number): ExtendedVirtualCoin =>
   ({ txid: fakeTxid(0x40 + seq++), vout: 0, value }) as unknown as ExtendedVirtualCoin
 
 interface Calls {
-  sendBitcoin: { address: string; amount: number; selected: number[] }[]
+  explicit: { address: string; amount: number; selected: number[] }[]
   send: { address: string; amount: number }[]
 }
 
 function stubWallet(pool: ExtendedVirtualCoin[]): { wallet: Wallet; calls: Calls } {
-  const calls: Calls = { sendBitcoin: [], send: [] }
+  const calls: Calls = { explicit: [], send: [] }
   const wallet = {
     getVtxos: async () => pool,
+    getSpendableVtxos: async () => pool,
     getAddress: async () => ARK_ADDR,
-    sendBitcoin: async (p: { address: string; amount: number; selectedVtxos?: ExtendedVirtualCoin[] }) => {
-      calls.sendBitcoin.push({
-        address: p.address,
-        amount: p.amount,
-        selected: (p.selectedVtxos ?? []).map((v) => v.value),
-      })
-      return 'tx-explicit'
-    },
-    // multi-recipient: splitHotPocket carves every lane in one call
-    send: async (...recipients: { address: string; amount: number }[]) => {
-      for (const r of recipients) calls.send.push({ address: r.address, amount: r.amount })
+    // SDK 0.5: one send(). The object form with selectedVtxos is the explicit
+    // path (0.4's sendBitcoin); recipients alone let the SDK select.
+    send: async (...args: unknown[]) => {
+      const first = args[0] as { recipients?: { address: string; amount: number }[]; selectedVtxos?: ExtendedVirtualCoin[] }
+      if (first && 'recipients' in first) {
+        const r = first.recipients![0]!
+        calls.explicit.push({ address: r.address, amount: r.amount, selected: (first.selectedVtxos ?? []).map((v) => v.value) })
+        return 'tx-explicit'
+      }
+      for (const r of args as { address: string; amount: number }[]) calls.send.push({ address: r.address, amount: r.amount })
       return 'tx-sdk'
     },
   } as unknown as Wallet
@@ -68,12 +68,12 @@ describe('sendSelected', () => {
     return sendSelected({ wallet, db, arkInfo: arkInfo() }, { address: ARK_ADDR, amount: 1_000 }).then((txid) => {
       expect(txid).toBe('tx-explicit')
       expect(calls.send).toEqual([])
-      expect(calls.sendBitcoin[0]!.selected).toEqual([4_000])
+      expect(calls.explicit[0]!.selected).toEqual([4_000])
     })
   })
 
   test('hands selection back to the SDK when the ASP advertises deprecated signers', async () => {
-    // sendBitcoin({selectedVtxos}) skips the pendingRecoveryOutpoints() filter
+    // send({ selectedVtxos }) skips the pendingRecoveryOutpoints() filter
     // that only matters in exactly that case. Correctness beats coin policy.
     const { wallet, calls } = stubWallet([vtxo(100_000), vtxo(4_000)])
     const txid = await sendSelected(
@@ -81,21 +81,21 @@ describe('sendSelected', () => {
       { address: ARK_ADDR, amount: 1_000 },
     )
     expect(txid).toBe('tx-sdk')
-    expect(calls.sendBitcoin).toEqual([])
+    expect(calls.explicit).toEqual([])
   })
 
   test('reuses a pool the caller already read (drain sizing must not re-read)', async () => {
     const { wallet, calls } = stubWallet([vtxo(1)]) // would be wrong if re-read
     const pool = [vtxo(9_000)]
     await sendSelected({ wallet, db, arkInfo: arkInfo() }, { address: ARK_ADDR, amount: 1_000, pool })
-    expect(calls.sendBitcoin[0]!.selected).toEqual([9_000])
+    expect(calls.explicit[0]!.selected).toEqual([9_000])
   })
 
   test('a drain (amount === pool total) selects everything and leaves no change', async () => {
     const pool = [vtxo(3_000), vtxo(2_000)]
     const { wallet, calls } = stubWallet(pool)
     await sendSelected({ wallet, db, arkInfo: arkInfo() }, { address: ARK_ADDR, amount: 5_000 })
-    expect(calls.sendBitcoin[0]!.selected.sort()).toEqual([2_000, 3_000])
+    expect(calls.explicit[0]!.selected.sort()).toEqual([2_000, 3_000])
   })
 
   test('too little money → the error says how much is spendable', async () => {
@@ -153,7 +153,7 @@ describe('splitHotPocket', () => {
     expect(txid).toBe('tx-sdk')
     expect(calls.send).toHaveLength(HOT_POCKET_COUNT)
     expect(calls.send.every((c) => c.address === ARK_ADDR && c.amount === HOT_POCKET_SATS)).toBe(true)
-    expect(calls.sendBitcoin).toEqual([]) // NOT the explicit-selection path
+    expect(calls.explicit).toEqual([]) // NOT the explicit-selection path
   })
 
   test('tops up only the missing lanes', async () => {

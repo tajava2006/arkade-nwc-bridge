@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite'
-import { NetworkError, decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { NetworkError, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { decodeInvoice } from '../lib/bolt11'
 import type { Wallet } from '@arkade-os/sdk'
 
 import { cycleSpentMsat } from '../lib/budget'

@@ -9,7 +9,7 @@ import type {
   Wallet,
   WalletBalance,
   ArkTransaction,
-  ArkInfo,
+  OperatorInfo,
   ExtendedVirtualCoin,
   RestArkProvider,
 } from '@arkade-os/sdk'
@@ -65,14 +65,19 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
     async getVtxos() {
       return opts.vtxos ?? []
     },
-    async send(args: { address: string; amount: number }) {
-      return opts.sendImpl ? opts.sendImpl(args) : 'arktxid-stub'
+    async getSpendableVtxos() {
+      return opts.vtxos ?? []
     },
-    // Routed through the same recorder as send(): the spend funnel
-    // (wallet_spend.sendSelected) picks inputs itself and calls sendBitcoin,
-    // so a stub that ignored sendImpl would make every send look like a no-op.
-    async sendBitcoin(args: { address: string; amount: number }) {
-      return opts.sendImpl ? opts.sendImpl(args) : 'arktxid-stub'
+    // SDK 0.5 has one send(): a Recipient, or { recipients, selectedVtxos } — the
+    // explicit-selection form the spend funnel (wallet_spend.sendSelected) uses.
+    // Both land in the same recorder, so neither path looks like a no-op.
+    async send(
+      args:
+        | { address: string; amount: number }
+        | { recipients: { address: string; amount: number }[]; selectedVtxos?: unknown[] },
+    ) {
+      const flat = 'recipients' in args ? { ...args.recipients[0]!, selectedVtxos: args.selectedVtxos } : args
+      return opts.sendImpl ? opts.sendImpl(flat as never) : 'arktxid-stub'
     },
     async settle() {
       return 'settletxid-stub'
@@ -90,7 +95,7 @@ export function makeArkProviderStub(
   const info = {
     dust: opts.dust ?? 330n,
     fees: { intentFee: opts.intentFee ?? {}, txFeeRate: '1' },
-  } as unknown as ArkInfo
+  } as unknown as OperatorInfo
   return {
     async getInfo() {
       return info

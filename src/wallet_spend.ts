@@ -1,12 +1,12 @@
 import type { Database } from 'bun:sqlite'
-import { isSubdust, type ArkInfo, type ExtendedVirtualCoin, type Wallet } from '@arkade-os/sdk'
+import { isSubdust, type OperatorInfo, type ExtendedVirtualCoin, type Wallet } from '@arkade-os/sdk'
 import { selectSpendInputs } from './coin_select'
 import { makeExitCostOracle } from './exit/cost_oracle'
 
 // The single funnel for coins leaving the wallet offchain, and the hot-pocket
 // shape that makes the funnel's job easy (SEND_DESIGN.md §9). Every rail that
 // spends VTXOs offchain goes through `sendSelected`; nothing calls
-// `wallet.send` / `wallet.sendBitcoin` directly any more, because the SDK's own
+// `wallet.send` with its own selector any more, because the SDK's own
 // selector reaches for the LARGEST coin first (expiry asc, then value desc) and
 // that is precisely the coin we want to keep pristine.
 
@@ -49,16 +49,21 @@ export interface SpendDeps {
   wallet: Wallet
   db: Database
   /** arkd getInfo — `dust` sizes the change guard, `deprecatedSigners` gates explicit selection. */
-  arkInfo: Pick<ArkInfo, 'dust' | 'deprecatedSigners'>
+  arkInfo: Pick<OperatorInfo, 'dust' | 'deprecatedSigners'>
 }
 
 /**
  * VTXOs an offchain spend can actually consume: the SDK's selection pool
  * (`withRecoverable: false` drops swept/expired) minus fresh sub-dust, which
  * sits in that pool but can only be consumed by a settlement round.
+ *
+ * SDK 0.5 port (money path — coin selection): `getSpendableVtxos`, not
+ * `getVtxos`. 0.5's getVtxos also reports contract-locked, deprecated-signer
+ * and pending-settlement coins, and handing those to `send({ selectedVtxos })`
+ * bypasses the SDK's generic-spending gate (its own docs say so).
  */
 export async function spendablePool(wallet: Wallet, dust: bigint): Promise<ExtendedVirtualCoin[]> {
-  const vtxos = await wallet.getVtxos({ withRecoverable: false })
+  const vtxos = await wallet.getSpendableVtxos({ withRecoverable: false })
   return vtxos.filter((v) => !isSubdust(v, dust))
 }
 
@@ -66,8 +71,8 @@ export const poolSats = (pool: ExtendedVirtualCoin[]): number => pool.reduce((n,
 
 /**
  * Explicit selection is unsafe to use while the ASP advertises deprecated
- * signers: `Wallet.sendBitcoin({ selectedVtxos })` skips the
- * `pendingRecoveryOutpoints()` filter that `Wallet.send` applies, and that
+ * signers: `Wallet.send({ selectedVtxos })` skips the generic-spending gate
+ * (the `pendingRecoveryOutpoints()` filter implicit selection applies), and that
  * filter is exactly what keeps a send off VTXOs an in-flight recovery intent
  * has already committed to. That set is empty unless deprecated signers exist,
  * so in the normal case we lose nothing — but when they do exist, correctness
@@ -112,14 +117,12 @@ export async function sendSelected(
     )
   }
 
-  // sendBitcoin is @deprecated in favour of send(), but `selectedVtxos` is the
-  // ONLY explicit-selection surface the SDK exposes — send(...recipients) always
-  // runs its own selector. The branch is first-class (tx lock, dust-aware
-  // change scripts, the same _submitOffchainSpend), so this is a supported call,
-  // not a back door. If an SDK bump drops it, the unit test pins the contract.
-  return deps.wallet.sendBitcoin({
-    address: params.address,
-    amount: params.amount,
+  // `selectedVtxos` is the ONLY explicit-selection surface the SDK exposes —
+  // the variadic send(...recipients) always runs its own selector. In 0.5 it
+  // moved from the deprecated sendBitcoin onto send's object form, "spent as
+  // given, nothing added". If an SDK bump drops it, the unit test pins the contract.
+  return deps.wallet.send({
+    recipients: [{ address: params.address, amount: params.amount }],
     selectedVtxos: selected,
   })
 }
