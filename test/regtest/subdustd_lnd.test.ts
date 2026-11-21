@@ -231,7 +231,7 @@ describe.skipIf(!CERT || !MACAROON)('subdustd LndClient on regtest', () => {
 
   const bootWith = async (network: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'subdustd-net-'))
-    writeFileSync(join(dir, 'key'), 'x')
+    writeFileSync(join(dir, 'key'), `${'11'.repeat(32)}\n`, { mode: 0o600 })
     const port = (() => {
       const s = Bun.serve({ port: 0, fetch: () => new Response() })
       const p = s.port

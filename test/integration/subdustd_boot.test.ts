@@ -8,7 +8,8 @@ import { join } from 'node:path'
 // and refuses to boot (non-zero, no listener) on a broken one.
 
 const dir = mkdtempSync(join(tmpdir(), 'subdustd-boot-'))
-for (const f of ['mac', 'key', 'garbage-cert']) writeFileSync(join(dir, f), 'x')
+for (const f of ['mac', 'garbage-cert', 'garbage-key']) writeFileSync(join(dir, f), 'x')
+writeFileSync(join(dir, 'key'), `${'11'.repeat(32)}\n`, { mode: 0o600 })
 // A parseable cert is all boot needs; no LND has to answer it.
 execFileSync('openssl', [
   'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '1',
@@ -79,6 +80,13 @@ describe('subdustd boot', () => {
     children.push(child)
     expect(await child.exited).toBe(1)
     expect(await new Response(child.stderr).text()).toContain('config.keyPath:')
+  }, 20_000)
+
+  test('refuses to boot on a key file that is not a secret key', async () => {
+    const child = spawnDaemon(writeConfig('badkey.json', { keyPath: join(dir, 'garbage-key') }))
+    children.push(child)
+    expect(await child.exited).toBe(1)
+    expect(await new Response(child.stderr).text()).toContain('expected 64 hex characters')
   }, 20_000)
 
   test('refuses to boot on a cert that does not parse', async () => {

@@ -6,6 +6,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "subdustd": "bun run subdustd/main.ts",
+    "subdustd:keygen": "bun run subdustd/keygen.ts",
     "dev": "bun --hot run src/index.ts",
     "show-nsec": "bun run scripts/show-nsec.ts",
     "show-btc-key": "bun run scripts/show-btc-key.ts",

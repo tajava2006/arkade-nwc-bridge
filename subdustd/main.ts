@@ -1,13 +1,23 @@
+import '../src/polyfills.ts'
+import { hex } from '@scure/base'
+import { KeyFileError, loadKeyFile } from './ark/key.ts'
+import { arkdNetworkMismatch, ArkSigner } from './ark/signer.ts'
 import { checkConfigFiles, ConfigError, loadConfig, type SubdustdConfig } from './config.ts'
 import { startHttp } from './http.ts'
 import { LndClient } from './lnd/client.ts'
 import { probeLnd } from './lnd/probe.ts'
 import { createLogger } from './log.ts'
+import { probeUntilAnswered } from './probe.ts'
 
 const path = process.argv[2]
 if (!path) {
   console.error('usage: bun run subdustd/main.ts <config.json>')
   process.exit(2)
+}
+
+const refuse = (problem: string): never => {
+  console.error(`subdustd config rejected:\n  - ${problem}`)
+  process.exit(1)
 }
 
 let config: SubdustdConfig
@@ -20,6 +30,22 @@ try {
   process.exit(1)
 }
 
+let key!: Uint8Array
+try {
+  const loaded = loadKeyFile(config.keyPath)
+  key = loaded.key
+  warnings.push(...loaded.warnings)
+} catch (e) {
+  refuse(`config.keyPath: ${e instanceof KeyFileError ? e.message : String(e)}`)
+}
+
+let lnd!: LndClient
+try {
+  lnd = new LndClient(config.lnd)
+} catch (e) {
+  refuse(`config.lnd: cannot load the TLS cert: ${(e as Error).message}`)
+}
+
 const log = createLogger(config.logLevel)
 for (const w of warnings) log.warn(`config: ${w}`)
 log.info(
@@ -27,13 +53,8 @@ log.info(
     `knobs=${JSON.stringify(config.subdust)}`,
 )
 
-let lnd: LndClient
-try {
-  lnd = new LndClient(config.lnd)
-} catch (e) {
-  console.error(`subdustd config rejected:\n  - config.lnd: cannot load the TLS cert: ${(e as Error).message}`)
-  process.exit(1)
-}
+const signer = new ArkSigner(key, config.arkdUrl)
+log.info(`ark key ${hex.encode(await signer.xOnlyPublicKey())}`)
 const server = startHttp(config, log)
 
 let stopping = false
@@ -48,7 +69,24 @@ const shutdown = (reason: string, code = 0) => {
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
-void probeLnd(lnd, config.network, log, (reason) => {
+const fatal = (reason: string) => {
   log.error(reason)
-  shutdown('lnd network mismatch', 1)
-}, { stopped: () => stopping })
+  shutdown('dependency on the wrong network', 1)
+}
+const probeOpts = { stopped: () => stopping }
+
+void probeLnd(lnd, config.network, log, fatal, probeOpts)
+void probeUntilAnswered(
+  {
+    name: 'arkd',
+    ask: () => signer.getInfo(true),
+    mismatch: (info) => arkdNetworkMismatch(config.network, info),
+    describe: (info) =>
+      `arkd on ${info.network}, signer ${info.signerPubkey}, exit delay ${info.unilateralExitDelay}, dust ${info.dust}`,
+  },
+  log,
+  fatal,
+  probeOpts,
+).then(async (info) => {
+  if (info) log.info(`receive/top-up address ${(await signer.receiveAddress()).encode()}`)
+})
