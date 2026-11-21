@@ -165,6 +165,13 @@ src/
     views/                   — server-rendered pages incl. setup.ts,
                                degraded.ts, exit.ts + exit_detail.ts;
                                layout.ts injects the SSE client JS
+subdustd/                    — separate service (own entrypoint + Dockerfile,
+                               build context = this repo root): the server side
+                               of atomic sub-dust swaps, imports src/atomic so
+                               client and server share one protocol lib. Same
+                               no-env rule: one strict JSON config (unknown keys
+                               fail boot). See subdustd/README.md for the knob
+                               table carried over from the Boltz fork
 scripts/
   show-nsec.ts               — recovery: print npub/nsec from sqlite
   show-btc-key.ts            — recovery: same key as WIF + tr() descriptor
