@@ -300,16 +300,17 @@ row exists. Logs go to stdout; when running in background pipe to
   checkpoint script; vtxo addresses derive from `unilateralExitDelay`, so
   nothing here forks the address space.
 - **The ark dependency chain must stay a single instance.**
-  `@arkade-os/boltz-swap` pins `@arkade-os/sdk` to an *exact* version,
+  `@arkade-os/swap` pins `@arkade-os/sdk` to an *exact* version,
   and that SDK in turn pins `@noble/curves` / `@scure/base` /
   `@scure/btc-signer` exactly. Running ahead of those pins puts two
   copies of the same library in the tree: `tsc` rejects it outright
   (`Wallet` vs `IWallet`, "separate declarations of a private property"),
   and the failure mode where it *doesn't* is worse — two `Transaction`
   classes on a money path. The `overrides` block in package.json is what
-  holds the line; `./update-deps.sh` prints boltz-swap's required SDK
-  next to the override so a drift is visible. Bump those four by hand
-  only when boltz-swap bumps its own pin.
+  holds the line; `./update-deps.sh` compares each override with what
+  `@arkade-os/swap` and the SDK declare and stops on a mismatch. Bump those
+  four by hand only when swap bumps its own pin. (`@noble/hashes` 2.0.1 also
+  sits in the tree via nostr-tools — off the ark signing path, left alone.)
 - **Boltz endpoint is *not* `api.ark.boltz.exchange`.** The d.ts
   docstring lies; the real SDK default is `api.boltz.exchange` and
   that's what the production wallet uses. Don't pass `swapProvider`
