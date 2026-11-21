@@ -190,15 +190,16 @@ ever deleted silently**:
   leaves the live list the moment it's unrolled onchain, but the sweep still
   reads the vault (the old unconditional GC could strand a ready-mode exit
   here). A completed op (swept) is its own evidence and the row is removed
-  without any server round-trip. NOTE: "leaves the live list" is enforced by
-  our own wallet boundary, not the SDK — arkd keeps serving an
-  unrolled-but-unspent vtxo as `isSpent=false` forever and the SDK's
-  `withUnrolled: false` default never actually fires for it, so
-  `installUnrolledVtxoFilter` (src/wallet.ts) drops `isUnrolled` rows from
-  every `getVtxos` read (balance, /send, settle input selection, this sync's
-  live set). Without it the exited vtxo haunts the balance permanently and
-  one ghost input fails the consolidate-all settle wholesale
-  (VTXO_ALREADY_UNROLLED — observed mainnet 2026-08-01). Ops-owned rows also
+  without any server round-trip. NOTE: arkd keeps serving an
+  unrolled-but-unspent vtxo as `isSpent=false` forever. SDK 0.4.62 let such a
+  row into every read, and the bridge carried its own wallet-boundary filter
+  (`installUnrolledVtxoFilter`, F24). SDK 0.5 checks `isUnrolled` first:
+  `getVtxos` / `getSpendableVtxos` / settle's selection drop it by default, and
+  the balance files it under its own `unrolled` bucket — regtest-checked with
+  a real unroll (test/regtest/sdk05_unrolled.test.ts), so the filter is gone.
+  Without that the exited vtxo would haunt the balance and one ghost input
+  would fail the consolidate-all settle wholesale (VTXO_ALREADY_UNROLLED —
+  observed mainnet 2026-08-01). Re-run that regtest check on every SDK bump. Ops-owned rows also
   leave the readiness math and the ASP claim symmetrically (vaultStats /
   sync_service) and surface as the dashboard's "exiting — sats in transit"
   line until the sweep lands.
