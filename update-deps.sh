@@ -67,4 +67,7 @@ bun run test
 
 echo ""
 echo "⚠️ @arkade-os/* 는 pre-1.0 — minor에도 breaking 가능."
+echo "   SDK가 올라갔으면 regtest 스택에서 bun run test:regtest 도 돌릴 것 —"
+echo "   sdk05_pager(F23: 100개 넘는 지갑을 끝까지 읽나)·sdk05_unrolled(F24: 일방탈출 코인이"
+echo "   잔고·지출 선택·consolidate에서 빠지나)가 bridge가 더는 직접 막지 않는 SDK 동작을 고정한다."
 echo "   운영 배포 전 mainnet 스모크(잔고 조회 + 소액 송금 1회) 할 것."
