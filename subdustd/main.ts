@@ -13,6 +13,7 @@ import { createLogger } from './log.ts'
 import { probeUntilAnswered } from './probe.ts'
 import { PushHub } from './push.ts'
 import { Scanner } from './scanner.ts'
+import { FloatLock, FloatRenewer, lazyFloatManager } from './float.ts'
 import { SwapStore } from './store.ts'
 
 const path = process.argv[2]
@@ -75,9 +76,23 @@ const emit = (swapId: string, state: string) => {
   push.publish(swapId, state)
 }
 const send = new SendService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
-const receive = new ReceiveService({ store, signer, lnd, knobs: config.subdust, log, locks, emit })
+const floatLock = new FloatLock()
+const receive = new ReceiveService({ store, signer, lnd, knobs: config.subdust, log, locks, emit, floatLock })
 const server = startHttp(config, log, { send, receive, push })
-const scanner = new Scanner({ store, send, receive, medianTimePast: () => lnd.medianTimePast(), log })
+// Renew a float coin while it still has two receive windows (+ margins) of
+// batch life left: a coin under one window can no longer fund a receive.
+const float = new FloatRenewer({
+  manager: lazyFloatManager({
+    identity: signer.identity,
+    operator: signer.ark,
+    indexer: signer.indexer,
+    expectedAddress: async () => (await signer.receiveAddress()).encode(),
+  }),
+  lock: floatLock,
+  thresholdSecs: 2 * (config.subdust.receiveWindowSecs + config.subdust.payMarginSecs),
+  log,
+})
+const scanner = new Scanner({ store, send, receive, medianTimePast: () => lnd.medianTimePast(), float, log })
 scanner.start()
 
 let stopping = false

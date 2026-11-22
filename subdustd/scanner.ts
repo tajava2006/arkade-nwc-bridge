@@ -11,6 +11,7 @@ import type { SwapStore } from './store.ts'
 //  - receive invoice_issued → fund a held invoice, or fail a cancelled one (F14)
 //  - receive funded → harvest + settle (F1), or refund after MTP passes T (F2)
 //  - receive refund_wait → cancel the hold invoice, terminalize (F16)
+//  - then the float: renew coins near batch expiry, recover swept ones (float.ts)
 //
 // Every step takes the per-swap lock, so a pass never races a live request.
 
@@ -19,6 +20,8 @@ export interface ScannerDeps {
   send: Pick<SendService, 'resolveInflight'>
   receive: Pick<ReceiveService, 'resumeInvoiceIssued' | 'resumeFunded' | 'resumeRefundWait'>
   medianTimePast: () => Promise<number>
+  /** Float upkeep (float.ts), after the swaps; never throws. */
+  float?: { pass(): Promise<unknown> }
   log: Logger
 }
 
@@ -71,6 +74,7 @@ export class Scanner {
       await step('receive invoice_issued', ids('receive', 'invoice_issued'), (id) => receive.resumeInvoiceIssued(id))
       await step('receive funded', ids('receive', 'funded'), (id) => receive.resumeFunded(id, mtp))
       await step('receive refund_wait', ids('receive', 'refund_wait'), (id) => receive.resumeRefundWait(id))
+      await this.d.float?.pass()
       return true
     } finally {
       this.running = false

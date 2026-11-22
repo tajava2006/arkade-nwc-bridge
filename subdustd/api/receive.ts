@@ -20,6 +20,7 @@ import type { LndClient } from '../lnd/client.ts'
 import type { Logger } from '../log.ts'
 import { DuplicatePaymentHash, type SwapRow, type SwapStore } from '../store.ts'
 import { badRequest, HttpError, validateArgs, xOnlyHex, type SwapLocks } from './http_error.ts'
+import { FloatLock } from '../float.ts'
 
 // Atomic RECEIVE (LN → ARK), server side — every bridge receive, sub-dust or
 // not (D10: the solver's hold invoice cannot carry a NIP-57 description
@@ -60,6 +61,8 @@ export interface ReceiveDeps {
   knobs: SubdustKnobs
   log: Logger
   locks: SwapLocks
+  /** Serializes coin picking with the float's renewal (float.ts); one per process. */
+  floatLock?: FloatLock
   emit: (swapId: string, state: string) => void
 }
 
@@ -72,7 +75,11 @@ export class ReceiveService {
   // logged once each so a persistent oddity does not spam every pass.
   private readonly loggedUnharvestable = new Set<string>()
 
-  constructor(private readonly d: ReceiveDeps) {}
+  private readonly floatLock: FloatLock
+
+  constructor(private readonly d: ReceiveDeps) {
+    this.floatLock = d.floatLock ?? new FloatLock()
+  }
 
   close(): void {
     for (const { stop, timer } of this.subscriptions.values()) {
@@ -240,9 +247,27 @@ export class ReceiveService {
     if (existing) {
       shared = { txid: existing.txid, vout: existing.vout, value: existing.value, script }
     } else {
-      let funding
+      let outpoint: { txid: string; vout: number } | undefined
+      let value = 0
       try {
-        funding = await this.fundingFor(swap.amount, swap.refundLocktime)
+        // Pick and spend under the float lock: a renewal round or another
+        // receive must not take the same coins between selection and submit.
+        ;({ outpoint, value } = await this.floatLock.run(async () => {
+          const funding = await this.fundingFor(swap.amount, swap.refundLocktime)
+          const self = await signer.selfScript(delay)
+          const inputs: ArkTxInput[] = funding.map((f) => ({
+            txid: f.txid,
+            vout: f.vout,
+            value: f.value,
+            tapLeafScript: self.forfeit(),
+            tapTree: self.encode(),
+          }))
+          // Spent WHOLE: the shared value is the picked total; the excess comes back
+          // to us as regular change in the claim.
+          const total = funding.reduce((n, f) => n + f.value, 0)
+          const op = await fundShared(inputs, [{ script: script.pkScript, amount: BigInt(total) }], unroll, signer.identity, signer.ark)
+          return { outpoint: op, value: total }
+        }))
       } catch (e) {
         if (!(e instanceof NoFunding)) throw e
         // Provably unfundable: hand the payer their HTLC back now instead of
@@ -253,19 +278,7 @@ export class ReceiveService {
         this.d.log.warn(`receive ${swap.id}: cannot fund, hold invoice cancelled: ${e.message}`)
         return
       }
-      const self = await signer.selfScript(delay)
-      const inputs: ArkTxInput[] = funding.map((f) => ({
-        txid: f.txid,
-        vout: f.vout,
-        value: f.value,
-        tapLeafScript: self.forfeit(),
-        tapTree: self.encode(),
-      }))
-      // Spent WHOLE: the shared value is the picked total; the excess comes back
-      // to us as regular change in the claim.
-      const value = funding.reduce((n, f) => n + f.value, 0)
-      const outpoint = await fundShared(inputs, [{ script: script.pkScript, amount: BigInt(value) }], unroll, signer.identity, signer.ark)
-      shared = { txid: outpoint.txid, vout: outpoint.vout, value, script }
+      shared = { txid: outpoint!.txid, vout: outpoint!.vout, value, script }
     }
 
     const userAddress = new DefaultVtxo.Script({
