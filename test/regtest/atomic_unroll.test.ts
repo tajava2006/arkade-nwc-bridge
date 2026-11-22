@@ -45,7 +45,17 @@ const waitFor = async <T>(what: string, fn: () => Promise<T | undefined>, timeou
   throw new Error(`timeout waiting for ${what}`)
 }
 
-describe.skipIf(!ARKD || !REGTEST_DIR)('atomic shared vtxo: funder unilateral exit via uexit (SDK 0.5)', () => {
+// Block mode only: the test elapses the CSV by mining, which a seconds-typed
+// arkd (the solver harness) would need hours of chain time for. It runs on the
+// exit-drill harness (regtest-e2e, block mode) and skips elsewhere.
+const blockMode = ARKD
+  ? await fetch(`${ARKD}/v1/info`)
+      .then((r) => r.json() as Promise<{ unilateralExitDelay?: string }>)
+      .then((i) => Number(i.unilateralExitDelay) < 512)
+      .catch(() => false)
+  : false
+
+describe.skipIf(!ARKD || !REGTEST_DIR || !blockMode)('atomic shared vtxo: funder unilateral exit via uexit (SDK 0.5)', () => {
   const esplora = new EsploraProvider(ESPLORA, { forcePolling: true, pollingInterval: 2000 })
   const indexer = new RestIndexerProvider(ARKD!)
   const identity = SingleKey.fromPrivateKey(randomBytes(32))
