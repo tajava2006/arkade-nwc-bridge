@@ -20,7 +20,7 @@ import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendClinkAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
-import { reconcileAtomicSendRows, watchSolverSends } from './ln_ledger'
+import { reconcileAtomicSendRows, watchSolverSends, watchUnresolvedSolverSends } from './ln_ledger'
 import type { LightningRails } from './ln_send'
 import { startSolverRail } from './solver_rail'
 import { sweepInterruptedWebSends } from './history'
@@ -327,6 +327,8 @@ async function main(): Promise<void> {
         undo.push(() => solver.dispose())
         lightning = { solver, subdustdUrl: bootCfg.lightning.subdustdUrl }
         undo.push(watchSolverSends({ lightning, arkServerUrl: bootCfg.arkServerUrl, db, notify }))
+        const unresolved = watchUnresolvedSolverSends({ client: solver.client, notify })
+        undo.push(() => unresolved.stop())
         console.log(`  lightning      solver ${bootCfg.lightning.solverUrl}, subdustd ${bootCfg.lightning.subdustdUrl}`)
       } else {
         console.log('  lightning      not configured — Ark-only')

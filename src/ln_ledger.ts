@@ -155,3 +155,51 @@ export function reconcileAtomicSendRows(db: Database): void {
     // non-terminal → still in flight, leave pending
   }
 }
+
+/** A solver send still open after this long gets one operator DM (F31). */
+export const UNRESOLVED_SEND_ALERT_SECS = 30 * 60
+
+/**
+ * F31: a solver send that stays open — the payee may be holding the HTLC (a
+ * legitimate slow payment), or the payment failed while our emulator was down
+ * and the solver parked the swap `stuck` for a human. The client can't tell the
+ * two apart, and the second one would otherwise sit until the refund locktime
+ * (days) with nobody noticing. One DM per swap per process, pointing at the
+ * solver's `status` / `refund-now`. Never throws.
+ */
+export function watchUnresolvedSolverSends(deps: {
+  client: Pick<LnSendDeps['lightning']['solver']['client'], 'swaps'>
+  notify?: NotifyFn
+  thresholdSecs?: number
+  intervalMs?: number
+  now?: () => number
+}): { stop(): void; pass(): Promise<string[]> } {
+  const threshold = deps.thresholdSecs ?? UNRESOLVED_SEND_ALERT_SECS
+  const now = deps.now ?? (() => Math.floor(Date.now() / 1000))
+  const alerted = new Set<string>()
+  const pass = async (): Promise<string[]> => {
+    const fired: string[] = []
+    try {
+      for (const s of await deps.client.swaps()) {
+        if (!isSend(s) || alerted.has(s.id)) continue
+        if (s.outcome !== 'funded' && s.outcome !== 'funding') continue
+        const age = now() - s.createdAt
+        if (age < threshold) continue
+        alerted.add(s.id)
+        fired.push(s.id)
+        deps.notify?.(
+          'send-fail',
+          () =>
+            `send: LN payment unresolved for ${Math.round(age / 60)} min — ${sats(s, 'take')} sats [swap ${s.id.slice(4, 12)}, hash ${s.lock?.hash.slice(0, 8) ?? '?'}]. ` +
+            `Either the payee is holding the HTLC, or the solver parked the swap 'stuck' (payment failed while the emulator was down). ` +
+            `Check on the solver: cli status / refund-now. Untouched, it refunds itself at the refund locktime.`,
+        )
+      }
+    } catch (e) {
+      console.warn(`ln: unresolved-send check failed: ${(e as Error).message}`)
+    }
+    return fired
+  }
+  const timer = setInterval(() => void pass(), deps.intervalMs ?? 60_000)
+  return { stop: () => clearInterval(timer), pass }
+}
