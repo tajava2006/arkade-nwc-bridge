@@ -61,8 +61,8 @@ describe('swap repository on the bridge sqlite', () => {
     const repo = openSwapRepository(db)
     await repo.saveSwapRecord(record('q1', 100))
     const tables = db
-      .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1")
-      .all(`${SWAP_TABLE_PREFIX}%` as never)
+      .query<{ name: string }, [string]>("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1")
+      .all(`${SWAP_TABLE_PREFIX}%`)
       .map((t) => t.name)
     expect(tables.length).toBeGreaterThan(0)
     expect(tables.every((t) => t.startsWith(SWAP_TABLE_PREFIX))).toBe(true)

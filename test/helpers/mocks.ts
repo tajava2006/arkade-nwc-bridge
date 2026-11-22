@@ -228,3 +228,95 @@ export const INVOICE_21_SAT = reAmount('lnbc210n')
 export const INVOICE_328_SAT = reAmount('lnbc3280n')
 export const INVOICE_NO_AMOUNT = reAmount('lnbc')
 
+
+/**
+ * INVOICE_2000_SAT (or a reAmount variant) with its payment-hash tag replaced,
+ * so a test can know the preimage: the ledger only accepts a preimage that
+ * hashes to the invoice's own payment hash. Same caveat as reAmount — the
+ * signature stops matching, which the decoder never checks.
+ */
+export function invoiceWithHash(paymentHashHex: string, base: string = INVOICE_2000_SAT): string {
+  const { prefix, words } = bech32.decode(base as never, false)
+  const out = [...words]
+  const sigStart = out.length - 104
+  for (let i = 7; i < sigStart; ) {
+    const type = out[i]!
+    const len = out[i + 1]! * 32 + out[i + 2]!
+    if (type === 1 && len === 52) {
+      const hashWords = bech32.toWords(Buffer.from(paymentHashHex, 'hex'))
+      out.splice(i + 3, 52, ...hashWords)
+      return bech32.encode(prefix, out, false)
+    }
+    i += 3 + len
+  }
+  throw new Error('no payment hash tag')
+}
+
+/** A preimage and the INVOICE_2000_SAT-shaped invoice locked to its hash. */
+export function knownPreimageInvoice(base?: string): { preimage: string; paymentHash: string; invoice: string } {
+  const preimage = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex')
+  const paymentHash = new Bun.CryptoHasher('sha256').update(Buffer.from(preimage, 'hex')).digest('hex')
+  return { preimage, paymentHash, invoice: invoiceWithHash(paymentHash, base) }
+}
+
+export interface LightningStubOptions {
+  /** Thrown from client.pay — a refusal before any value moved. */
+  payError?: Error
+  /** Where the swap ends up after pay() returns ('funding'). Default 'paid'. */
+  finalOutcome?: 'paid' | 'refunded' | 'failed' | 'needs_recovery'
+  /** Solver fee in sats (give = take + fee). */
+  feeSats?: number
+  /** The preimage the record will carry for a paid swap. */
+  preimage?: string
+  swapId?: string
+}
+
+/**
+ * The bridge's Lightning rails with a scripted solver: pay() returns the swap
+ * at 'funding' and the final outcome is emitted on the next tick, the way the
+ * drive reports it. The record store answers getSwapRecord for the preimage.
+ */
+export function makeLightningStub(opts: LightningStubOptions = {}): {
+  lightning: import('../../src/ln_send').LightningRails
+  paid: string[]
+  emit: (swap: Record<string, unknown>) => void
+} {
+  const listeners = new Set<(u: { swap: unknown }) => void>()
+  const paid: string[] = []
+  const id = opts.swapId ?? 'rfq:00112233445566778899aabbccddeeff'
+  const emit = (swap: Record<string, unknown>) => {
+    for (const l of listeners) l({ swap })
+  }
+  const client = {
+    pay: async (invoice: string) => {
+      if (opts.payError) throw opts.payError
+      paid.push(invoice)
+      const { decodeInvoice } = await import('../../src/lib/bolt11')
+      const d = decodeInvoice(invoice)
+      const take = BigInt(d.amountSats ?? 0)
+      const base = {
+        id,
+        route: { give: { corridor: 'arkade' }, take: { corridor: 'lightning' } },
+        give: { amount: take + BigInt(opts.feeSats ?? 0) },
+        take: { amount: take },
+        fee: { amount: BigInt(opts.feeSats ?? 0) },
+        lock: { hash: d.paymentHash },
+        fundingTxid: 'arktxid-lockup',
+      }
+      setTimeout(() => emit({ ...base, outcome: opts.finalOutcome ?? 'paid', failure: 'no route' }), 0)
+      return { kind: 'swap', swap: { ...base, outcome: 'funding' } }
+    },
+    onUpdate: (fn: (u: { swap: unknown }) => void) => {
+      listeners.add(fn)
+      return () => listeners.delete(fn)
+    },
+  }
+  const repository = {
+    getSwapRecord: async () => ({ settlementPreimageHex: opts.preimage, lockupPkScript: '5120' + '00'.repeat(32) }),
+  }
+  return {
+    lightning: { solver: { client, repository, dispose: async () => {} } as never, subdustdUrl: 'http://subdustd.invalid' },
+    paid,
+    emit,
+  }
+}

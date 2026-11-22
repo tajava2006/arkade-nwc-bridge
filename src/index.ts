@@ -22,6 +22,9 @@ import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendOfferReceipt, sendSubdustAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
+import { watchSolverSends } from './ln_ledger'
+import type { LightningRails } from './ln_send'
+import { startSolverRail } from './solver_rail'
 import { sweepInterruptedWebSends } from './history'
 import { makeBoardingEsplora, reconcileBoardingHistory } from './boarding_history'
 import { autoRefreshPass } from './auto_refresh'
@@ -303,6 +306,31 @@ async function main(): Promise<void> {
         `  balance        total=${balance.total} available=${balance.available} settled=${balance.settled} boarding=${balance.boarding.total}`,
       )
 
+      // Second provider for ArkInfo reads (/send's dust + intent-fee programs,
+      // the solver rail's coin policy). Stateless REST; the wallet keeps its
+      // own internal one for signing.
+      const arkProvider = new RestArkProvider(bootCfg.arkServerUrl)
+
+      // Lightning: our solver (dust and up) + subdustd (sub-dust), from
+      // data/config.json's `lightning` block. Absent → Ark-only: NWC LN
+      // methods refuse rather than reach anything else.
+      let lightning: LightningRails | undefined
+      if (bootCfg.lightning) {
+        const solver = await startSolverRail({
+          wallet,
+          db,
+          lightning: bootCfg.lightning,
+          network: bootCfg.network,
+          arkInfo: () => arkProvider.getInfo(),
+        })
+        undo.push(() => solver.dispose())
+        lightning = { solver, subdustdUrl: bootCfg.lightning.subdustdUrl }
+        undo.push(watchSolverSends({ lightning, arkServerUrl: bootCfg.arkServerUrl, db, notify }))
+        console.log(`  lightning      solver ${bootCfg.lightning.solverUrl}, subdustd ${bootCfg.lightning.subdustdUrl}`)
+      } else {
+        console.log('  lightning      not configured — Ark-only')
+      }
+
       const { swaps } = await initBoltz({
         db,
         wallet,
@@ -345,6 +373,7 @@ async function main(): Promise<void> {
         db,
         wallet,
         swaps,
+        lightning,
         pool,
         notify,
         onClientRequest: (conn) =>
@@ -483,10 +512,6 @@ async function main(): Promise<void> {
         onPoke: reconcileReceives,
         log: (msg) => console.log(msg),
       })
-
-      // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
-      // Stateless REST; the wallet keeps its own internal one for signing.
-      const arkProvider = new RestArkProvider(bootCfg.arkServerUrl)
 
       // SWR caches for the slow ark-side reads. minIntervalMs keeps
       // back-to-back page visits from hammering the upstream — opening
@@ -644,6 +669,7 @@ async function main(): Promise<void> {
         boltzApiUrl: bootCfg.boltzApiUrl,
         wallet,
         swaps,
+        lightning,
         nostr,
         offers,
         caches,
@@ -784,6 +810,7 @@ async function main(): Promise<void> {
       appState.current.offers.stop()
       await appState.current.nostr.stop()
       await appState.current.swaps.dispose()
+      await appState.current.lightning?.solver.dispose()
       // Wallet.dispose tears down the VtxoManager poll loop, ContractWatcher's
       // SSE subscription, and ArkProvider's settlement-event stream so the
       // Ark server sees a clean disconnect rather than a half-open socket.

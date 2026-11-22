@@ -89,23 +89,45 @@ const explicitSelectionSafe = (arkInfo: SpendDeps['arkInfo']): boolean =>
  * `pool` may be passed in when the caller already read it (the LN rail sizes
  * its drain against the same numbers and must not re-read between the two).
  */
+/**
+ * Residue up to this many sats above `amount` may stay behind as sub-dust
+ * change instead of refusing the send: a drain sized by our fee mirror can
+ * disagree by ±1 with the server's rounding. The 1–2 sats stay ours — a
+ * recoverable sub-dust vtxo the next consolidate-all sweeps in (the SDK burns
+ * it as fee only below the operator's vtxo minimum). Any larger residue must
+ * still compose as ≥ dust change. Before the solver this was an overpay the
+ * swap provider kept; a solver lockup must be exact, and giving the sats away
+ * was never better than keeping them.
+ */
+export const DRAIN_SLACK_SATS = 2
+
 export async function sendSelected(
   deps: SpendDeps,
-  params: { address: string; amount: number; pool?: ExtendedVirtualCoin[] },
+  params: {
+    address: string
+    amount: number
+    pool?: ExtendedVirtualCoin[]
+    /** The SDK refuses before submission at/after this unix second (a quote's funding deadline). */
+    validUntil?: number
+  },
 ): Promise<string> {
   const dust = Number(deps.arkInfo.dust)
   const pool = params.pool ?? (await spendablePool(deps.wallet, deps.arkInfo.dust))
 
+  const deadline = params.validUntil === undefined ? {} : { validUntil: params.validUntil }
   if (!explicitSelectionSafe(deps.arkInfo)) {
     console.warn('spend: ASP advertises deprecated signers — deferring coin choice to the SDK')
-    return deps.wallet.send({ address: params.address, amount: params.amount })
+    const recipient = { address: params.address, amount: params.amount }
+    return params.validUntil === undefined ? deps.wallet.send(recipient) : deps.wallet.send({ recipients: [recipient], ...deadline })
   }
 
-  const selected = selectSpendInputs(pool, {
+  let selected = selectSpendInputs(pool, {
     target: params.amount,
     changeDust: dust,
     exitCostOf: makeExitCostOracle(deps.db),
   })
+  const surplus = poolSats(pool) - params.amount
+  if (selected.length === 0 && surplus > 0 && surplus <= DRAIN_SLACK_SATS) selected = pool
   if (selected.length === 0) {
     // Distinguish "not enough money" from "enough money, but only in shapes
     // that would leave sub-dust change" — the second reads as a bug otherwise.
@@ -124,6 +146,48 @@ export async function sendSelected(
   return deps.wallet.send({
     recipients: [{ address: params.address, amount: params.amount }],
     selectedVtxos: selected,
+    ...deadline,
+  })
+}
+
+/**
+ * `wallet` with its plain single-recipient BTC sends routed through
+ * sendSelected — for code that funds through `wallet.send` on its own, i.e. the
+ * swap client's lockup funding, so one coin policy still governs every spend.
+ * Anything sendSelected doesn't model (assets, extensions, tap trees, an
+ * explicit selection, an input-expiry floor, several recipients) goes to the
+ * SDK untouched. Every other member is the wallet's own.
+ */
+export function withSpendPolicy(wallet: Wallet, deps: { db: Database; arkInfo: () => Promise<SpendDeps['arkInfo']> }): Wallet {
+  type Plain = { address: string; amount: number; validUntil?: number }
+  const plain = (args: unknown[]): Plain | undefined => {
+    const one = (r: Record<string, unknown>): Plain | undefined => {
+      const keys = Object.keys(r).filter((k) => r[k] !== undefined)
+      return keys.every((k) => k === 'address' || k === 'amount') && typeof r.address === 'string' && typeof r.amount === 'number'
+        ? { address: r.address, amount: r.amount }
+        : undefined
+    }
+    if (args.length !== 1 || typeof args[0] !== 'object' || args[0] === null) return undefined
+    const a = args[0] as Record<string, unknown>
+    if (!('recipients' in a)) return one(a)
+    const extra = Object.keys(a).filter((k) => a[k] !== undefined && k !== 'recipients' && k !== 'validUntil')
+    const rs = a.recipients as Record<string, unknown>[]
+    if (extra.length > 0 || !Array.isArray(rs) || rs.length !== 1) return undefined
+    const r = one(rs[0]!)
+    return r && { ...r, ...(typeof a.validUntil === 'number' ? { validUntil: a.validUntil } : {}) }
+  }
+  return new Proxy(wallet, {
+    get(target, prop) {
+      if (prop === 'send') {
+        return async (...args: unknown[]) => {
+          const p = plain(args)
+          if (!p) return (target.send as (...a: unknown[]) => Promise<string>)(...args)
+          return sendSelected({ wallet: target, db: deps.db, arkInfo: await deps.arkInfo() }, p)
+        }
+      }
+      const v = Reflect.get(target, prop, target)
+      return typeof v === 'function' ? v.bind(target) : v
+    },
   })
 }
 

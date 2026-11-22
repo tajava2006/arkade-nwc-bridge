@@ -1,154 +1,199 @@
 import type { Database } from 'bun:sqlite'
-import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
-import { decodeInvoice } from './lib/bolt11'
-import { RestArkProvider, type ArkInfo, type Wallet } from '@arkade-os/sdk'
+import { createHash } from 'node:crypto'
+import { RestIndexerProvider, type Wallet } from '@arkade-os/sdk'
+import { isSwapError, quoteIdOfSwapId, type Swap } from '@arkade-os/swap'
+import { readLockupFate } from '@arkade-os/swap/protocol'
+import { hex } from '@scure/base'
+import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
 import { atomicSubdustSend } from './atomic/send'
-import { poolSats, sendSelected, spendablePool } from './wallet_spend'
+import { decodeInvoice } from './lib/bolt11'
 import type { NotifyFn } from './nostr/notifier'
+import type { SolverRail } from './solver_rail'
 
-// Below P2TR dust a Boltz submarine swap can't settle: the vHTLC lockup vtxo is
-// sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the claim, so the swap
-// strands. Sub-dust sends take the atomic sub-dust path instead (atomic_send.ts).
+// Below P2TR dust a covenant lockup is itself sub-dust: arkd marks it
+// recoverable and refuses the claim, so neither side could ever take it. The
+// atomic sub-dust path (subdustd) replaces the lockup with a shared vtxo the
+// funder's change keeps above dust.
 const DUST_SATS = 330
 
-/**
- * Residue up to this many sats above the required funding is folded into the
- * swap (boltz keeps it as margin) instead of being left behind: change below
- * dust becomes an OP_RETURN sub-dust vtxo — stranded until a round — which is
- * strictly worse than donating 1–2 sats. The 2-sat width covers a ±1
- * disagreement between our mirrored fee ceil (send.ts lnDrainInvoiceSat) and
- * the server's at float boundaries. Anything larger stays in the wallet as
- * normal change: donating e.g. 300 sats would cost more than the recoverable
- * sub-dust it avoids.
- */
-const DRAIN_SLACK_SATS = 2
+/** The two Lightning rails. Absent ⇒ the bridge runs Ark-only. */
+export interface LightningRails {
+  /** Our intent-solver, dust and up. */
+  solver: SolverRail
+  /** subdustd's API base, sub-dust. */
+  subdustdUrl: string
+}
 
 export interface LnSendDeps {
-  swaps: ArkadeSwaps
+  lightning: LightningRails
   wallet: Wallet
-  /** Boltz REST base (no /v2 suffix). */
-  boltzApiUrl: string
-  /** ASP (arkd) REST base — the atomic sub-dust send needs server params. */
+  /** ASP (arkd) REST base — the atomic send's server params; a paid send's chain read. */
   arkServerUrl: string
-  /** sqlite handle — the atomic sub-dust send persists swaps for refund recovery. */
+  /** sqlite handle — the atomic send persists its swaps for refund recovery. */
   db: Database
   /**
-   * Fired as soon as a swap has been *created* (submarine: right after the
-   * create call) so the caller can write the swap id to its ledger row before
-   * the (long) settlement wait — a crash mid-await otherwise leaves the row
-   * pending with no swap link, and restart reconcile can't match it (M1/R1).
+   * Fired the moment a solver swap exists, so the caller can link its ledger
+   * row before the wait. Restart recovery doesn't depend on it — the ledger
+   * matches a pending row by payment hash too — it only narrows the match.
    */
   onSwapCreated?: (swapId: string) => void
-  /** Operator DM sink — passed through to the atomic send path. */
   notify?: NotifyFn
-  /**
-   * ASP info the submarine rail needs (dust for the change guard,
-   * deprecatedSigners for the explicit-selection safety valve). Injectable so
-   * a caller that already holds it — or a test — doesn't pay a REST round-trip
-   * per send; defaults to reading the configured ASP.
-   */
-  getArkInfo?: () => Promise<ArkInfo>
 }
 
 export interface LnSendResult {
-  /** sats that left the wallet (invoice + fee, incl. any drain residue) */
+  /** sats that left the wallet (invoice + fee) */
   amount: number
   preimage: string
-  /** ark txid (submarine swap funding, or the sub-dust funding tx) */
+  /** ark txid (the lockup funding, or the sub-dust funding tx) */
   txid: string
-  /** boltz swap id — the ledger link that makes an interrupted send reconcilable */
+  /** the swap behind it (solver `rfq:…`, or the atomic swap id) */
   swapId: string
 }
 
 /**
- * Full balance when it's within DRAIN_SLACK_SATS of the required funding
- * (empties the wallet, boltz keeps the residue), the exact requirement
- * otherwise. Throws early with a readable message when the balance doesn't
- * cover the requirement — wallet.send's own "Selected VTXOs do not cover"
- * doesn't say how much is missing or why (sub-dust/swept not being usable is
- * the common surprise).
+ * A payment the rail cannot call either way yet: the solver may still pay, or
+ * the lockup needs recovery. The caller must leave its ledger row pending —
+ * marking it failed would release a reservation for money that may have moved.
  */
-function fundingAmount(requiredSat: number, spendableSat: number): number {
-  if (requiredSat > spendableSat) {
-    throw new Error(
-      `LN send needs ${requiredSat} sats (invoice + fee) but only ${spendableSat} sats are ` +
-        `offchain-spendable — sub-dust/swept funds don't count until a Refresh`,
-    )
+export class LnSendUnresolved extends Error {}
+
+/** Refused before any value moved (no swap, nothing funded). */
+export class LnSendRefused extends Error {
+  constructor(
+    message: string,
+    readonly insufficientFunds = false,
+  ) {
+    super(message)
   }
-  const surplus = spendableSat - requiredSat
-  return surplus > 0 && surplus <= DRAIN_SLACK_SATS ? spendableSat : requiredSat
 }
 
 /**
  * Pay a BOLT11 over Lightning from the Ark wallet — the single LN-send entry
- * point shared by every caller (NWC pay_invoice, dashboard /send LN rail). For
- * amounts >= dust it's a Boltz submarine swap. For sub-dust amounts the
- * submarine swap can't settle (vHTLC lockup is sub-dust -> arkd
- * VTXO_RECOVERABLE -> claim strands), so it routes through the atomic sub-dust
- * path (atomic_send.ts): fund a shared 4-leaf vtxo whole-input, hand boltz a
- * pre-signed claim, and let it pay the invoice only against that. No vHTLC, so
- * no swept-vtxo garbage, and the funder's remainder comes back as one regular
- * vtxo. Atomicity holds either way — boltz pays and claims, or T passes and we
- * refund ourselves; it cannot take the funding without paying.
+ * point (NWC pay_invoice, dashboard /send). Dust and up: our solver, through
+ * the swap client. Below dust: the atomic sub-dust send against subdustd.
+ * Atomic either way — the solver claims the lockup only with the preimage
+ * (= the invoice paid), else the lockup comes back to us.
  *
- * Both paths fund all-in when the whole balance is within DRAIN_SLACK_SATS of
- * the requirement, so a drain invoice (send.ts lnDrainInvoiceSat) empties the
- * wallet instead of stranding a sub-dust change vtxo.
- *
- * Any new LN send entry point MUST go through here, not raw
- * swaps.sendLightningPayment — that helper funds exactly expectedAmount
- * (re-stranding drain residue) and pushes sub-dust amounts into a submarine
- * swap that cannot settle, bypassing the atomic path entirely.
+ * Any new LN-send entry point MUST come through here: a sub-dust amount on the
+ * solver rail would strand on claim.
  */
 export async function sendLightning(deps: LnSendDeps, invoice: string): Promise<LnSendResult> {
-  let invoiceSats = 0
+  let decoded
   try {
-    invoiceSats = decodeInvoice(invoice).amountSats ?? 0
-  } catch {
-    // let createSubmarineSwap surface the decode error with its own messaging
+    decoded = decodeInvoice(invoice)
+  } catch (e) {
+    throw new LnSendRefused(`invalid BOLT11 invoice: ${(e as Error).message}`)
   }
+  const sats = decoded.amountSats ?? 0
+  if (sats <= 0) throw new LnSendRefused('0-amount invoices are not supported')
 
-  if (invoiceSats > 0 && invoiceSats < DUST_SATS) {
-    const r = await atomicSubdustSend(
-      { wallet: deps.wallet, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl, notify: deps.notify },
-      invoice,
-      invoiceSats,
-    )
-    return { amount: r.amount, preimage: r.preimage, txid: r.txid, swapId: r.swapId }
+  if (sats < DUST_SATS) {
+    try {
+      const r = await atomicSubdustSend(
+        {
+          wallet: deps.wallet,
+          arkServerUrl: deps.arkServerUrl,
+          db: deps.db,
+          boltzApiUrl: deps.lightning.subdustdUrl,
+          notify: deps.notify,
+        },
+        invoice,
+        sats,
+      )
+      return { amount: r.amount, preimage: r.preimage, txid: r.txid, swapId: r.swapId }
+    } catch (e) {
+      // A throw that leaves the swap ln_inflight means subdustd had the
+      // presigs and never answered (a 503/502, a dropped connection): it may
+      // still pay. The atomic reconcile resolves it from the swap row.
+      const row = new SqliteAtomicSwapRepository(deps.db).getByPaymentHash(decoded.paymentHash)
+      if (row?.direction === SwapDirection.Send && row.state === 'ln_inflight') {
+        throw new LnSendUnresolved(`sub-dust payment outcome unknown (${(e as Error).message}) — resolving in the background`)
+      }
+      throw e
+    }
   }
-  return sendSubmarine(deps, invoice)
+  return sendViaSolver(deps, invoice, decoded.paymentHash)
 }
+
+/** Outcomes after which the send can be called. */
+const PAID = 'paid'
+const FAILED = new Set(['refunded', 'failed', 'cancelled'])
+
+async function sendViaSolver(deps: LnSendDeps, invoice: string, paymentHash: string): Promise<LnSendResult> {
+  const { client } = deps.lightning.solver
+  // Subscribed before pay() so no transition can slip between pay returning
+  // and the listener existing; updates for other swaps are ignored.
+  let swapId: string | undefined
+  const seen: Swap[] = []
+  let wake = () => {}
+  const unsubscribe = client.onUpdate(({ swap }) => {
+    seen.push(swap)
+    wake()
+  })
+  try {
+    let res
+    try {
+      res = await client.pay(invoice)
+    } catch (e) {
+      if (isSwapError(e)) {
+        throw new LnSendRefused(`solver: ${e.message}`, (e as { name?: string }).name === 'InsufficientFunds')
+      }
+      throw e
+    }
+    if (res.kind !== 'swap') throw new Error(`a lightning invoice paid as ${res.kind}`)
+    swapId = res.swap.id
+    deps.onSwapCreated?.(swapId)
+    seen.push(res.swap)
+
+    for (;;) {
+      const latest = seen.filter((s) => s.id === swapId).at(-1)
+      seen.length = 0
+      if (latest?.outcome === PAID) {
+        return {
+          amount: Number(latest.give.amount),
+          preimage: await paidPreimage(deps, latest, paymentHash),
+          txid: latest.fundingTxid ?? '',
+          swapId,
+        }
+      }
+      if (latest && FAILED.has(latest.outcome)) {
+        throw new Error(`lightning payment failed (${latest.outcome}${latest.failure ? `: ${latest.failure}` : ''})`)
+      }
+      if (latest?.outcome === 'needs_recovery') {
+        throw new LnSendUnresolved(
+          `lightning payment unresolved — the lockup needs recovery${latest.blockedReason ? ` (${latest.blockedReason})` : ''}`,
+        )
+      }
+      await new Promise<void>((r) => (wake = r))
+    }
+  } finally {
+    unsubscribe()
+  }
+}
+
+const sha256hex = (h: string) => createHash('sha256').update(Buffer.from(h, 'hex')).digest('hex')
 
 /**
- * Submarine swap, hand-assembled from the same public pieces
- * swaps.sendLightningPayment uses (create -> fund -> wait) purely so the
- * funding amount can be the full balance on a near-drain: boltz accepts
- * overpay up to max(10k sats, 2%) on submarine lockups (OverpaymentProtector)
- * and simply keeps it. Failure handling is unchanged from the SDK helper —
- * its in-method refund path is dead code per its own docstring; refundable
- * failures are auto-refunded by the SwapManager (enabled in boltz.ts). A
- * throw before wallet.send leaves only an unfunded swap row, which boltz
- * expires server-side.
+ * The preimage of a paid send. The drive stores the one it verified when it
+ * classified the solver's claim (`settlementPreimageHex`); re-checked against
+ * the hash here, and read off the chain — the claim's witness, via arkd — if
+ * the record somehow lacks it. Never taken on the solver's word.
  */
-async function sendSubmarine(deps: LnSendDeps, invoice: string): Promise<LnSendResult> {
-  const pending = await deps.swaps.createSubmarineSwap({ invoice })
-  // Persist the swap link the moment the swap exists (R1) — before the
-  // settlement wait. A crash here leaves swap_id on the row, so the SwapManager
-  // resume + syncSwapToDb can settle it; without this the row is orphaned.
-  deps.onSwapCreated?.(pending.id)
-  const { address, expectedAmount } = pending.response
-  if (!address) {
-    throw new Error(`Swap ${pending.id}: missing address in submarine swap response`)
-  }
-
-  const arkInfo = await (deps.getArkInfo ?? (() => new RestArkProvider(deps.arkServerUrl).getInfo()))()
-  // One read of the pool for both the drain sizing and the selection — a
-  // re-read between them could size against a balance the selector no longer
-  // sees and turn a drain into "does not cover".
-  const pool = await spendablePool(deps.wallet, arkInfo.dust)
-  const amount = fundingAmount(expectedAmount, poolSats(pool))
-  const txid = await sendSelected({ wallet: deps.wallet, db: deps.db, arkInfo }, { address, amount, pool })
-  const { preimage } = await deps.swaps.waitForSwapSettlement(pending)
-  return { amount, preimage, txid, swapId: pending.id }
+export async function paidPreimage(
+  deps: Pick<LnSendDeps, 'lightning' | 'arkServerUrl'>,
+  swap: Swap,
+  paymentHash: string,
+): Promise<string> {
+  const record = (await deps.lightning.solver.repository.getSwapRecord(quoteIdOfSwapId(swap.id))) as
+    | { settlementPreimageHex?: string; lockupPkScript?: string }
+    | undefined
+  const stored = record?.settlementPreimageHex
+  if (stored && sha256hex(stored) === paymentHash) return stored
+  if (!record?.lockupPkScript) throw new Error(`paid swap ${swap.id} has no lockup script to read the preimage from`)
+  const fate = await readLockupFate(new RestIndexerProvider(deps.arkServerUrl), {
+    swapPkScript: hex.decode(record.lockupPkScript),
+    paymentHash,
+  })
+  if (fate.fate !== 'claimed') throw new Error(`paid swap ${swap.id}: the lockup reads ${fate.fate}, not claimed`)
+  return hex.encode(fate.preimage)
 }
-

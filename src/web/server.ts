@@ -21,7 +21,7 @@ import {
   type ServerSet,
   type ValidateResult,
 } from '../server_config'
-import { sendLightning } from '../ln_send'
+import { sendLightning, type LightningRails } from '../ln_send'
 import {
   failWebLn,
   listHistoryPage,
@@ -150,6 +150,8 @@ export type AppState =
       boltzApiUrl: string
       wallet: Wallet
       swaps: ArkadeSwaps
+      /** Lightning rails; undefined = Ark-only. */
+      lightning?: LightningRails
       nostr: NostrService
       offers: OfferService
       caches: SwrCaches
@@ -1321,11 +1323,11 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               description: decoded.description || null,
             })
             try {
+              if (!ready.lightning) throw new Error('this wallet has no Lightning rail configured')
               const res = await sendLightning(
                 {
-                  swaps: ready.swaps,
+                  lightning: ready.lightning,
                   wallet: ready.wallet,
-                  boltzApiUrl: ready.boltzApiUrl,
                   arkServerUrl: ready.arkServerUrl,
                   db,
                   notify,

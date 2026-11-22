@@ -7,8 +7,10 @@ import {
   HOT_POCKET_COUNT,
   HOT_POCKET_SATS,
   hotPocketsNeeded,
+  DRAIN_SLACK_SATS,
   sendSelected,
   splitHotPocket,
+  withSpendPolicy,
 } from '../../src/wallet_spend'
 
 // sendSelected is the single funnel every offchain spend goes through, so the
@@ -167,5 +169,65 @@ describe('splitHotPocket', () => {
     const { wallet, calls } = stubWallet(pool)
     expect(await splitHotPocket({ wallet, db, arkInfo: arkInfo() })).toBeUndefined()
     expect(calls.send).toEqual([])
+  })
+})
+
+describe('sendSelected — drain residue and deadline', () => {
+  test('a residue of ≤ DRAIN_SLACK_SATS spends the whole pool (the residue stays as sub-dust change)', async () => {
+    const calls: Record<string, unknown>[] = []
+    const pool = [vtxo(3_000), vtxo(2_001)]
+    const wallet = { getSpendableVtxos: async () => pool, send: async (p: Record<string, unknown>) => (calls.push(p), 'tx') } as unknown as Wallet
+    await sendSelected({ wallet, db, arkInfo: arkInfo() }, { address: ARK_ADDR, amount: 5_000, validUntil: 1234 })
+    expect((calls[0]!.selectedVtxos as ExtendedVirtualCoin[]).map((v) => v.value).sort()).toEqual([2_001, 3_000])
+    expect(calls[0]!.maxChangeFee).toBeUndefined()
+    expect(calls[0]!.validUntil).toBe(1234)
+  })
+
+  test('a residue just past the slack is still refused as sub-dust change', async () => {
+    const wallet = { getSpendableVtxos: async () => [vtxo(5_000 + DRAIN_SLACK_SATS + 1)], send: async () => 'tx' } as unknown as Wallet
+    await expect(sendSelected({ wallet, db, arkInfo: arkInfo() }, { address: ARK_ADDR, amount: 5_000 })).rejects.toThrow(/sub-dust change/)
+  })
+})
+
+describe('withSpendPolicy', () => {
+  const setup = () => {
+    const calls: unknown[][] = []
+    const raw = {
+      tag: 'raw',
+      getSpendableVtxos: async () => [vtxo(100_000), vtxo(4_000)],
+      send: async (...args: unknown[]) => (calls.push(args), 'tx'),
+      whoami() {
+        return (this as { tag: string }).tag
+      },
+    }
+    const wrapped = withSpendPolicy(raw as unknown as Wallet, { db, arkInfo: async () => arkInfo() })
+    return { calls, wrapped: wrapped as unknown as typeof raw }
+  }
+
+  test("the swap client's plain lockup funding goes through our selector, deadline kept", async () => {
+    const { calls, wrapped } = setup()
+    await wrapped.send({ recipients: [{ address: ARK_ADDR, amount: 1_000 }], validUntil: 99 } as never)
+    const p = calls[0]![0] as { selectedVtxos: ExtendedVirtualCoin[]; validUntil: number }
+    expect(p.selectedVtxos.map((v) => v.value)).toEqual([4_000])
+    expect(p.validUntil).toBe(99)
+    await wrapped.send({ address: ARK_ADDR, amount: 1_000 } as never)
+    expect((calls[1]![0] as { selectedVtxos: unknown[] }).selectedVtxos).toHaveLength(1)
+  })
+
+  test('anything the selector does not model reaches the SDK untouched', async () => {
+    const { calls, wrapped } = setup()
+    const asset = { recipients: [{ address: ARK_ADDR, amount: 330, assets: [{ assetId: 'x', amount: 1n }] }] }
+    const floor = { recipients: [{ address: ARK_ADDR, amount: 1_000 }], inputExpiryFloor: { kind: 'time', value: 1n } }
+    const two = [{ address: ARK_ADDR, amount: 1_000 }, { address: ARK_ADDR, amount: 2_000 }]
+    await wrapped.send(asset as never)
+    await wrapped.send(floor as never)
+    await wrapped.send(...(two as never[]))
+    expect(calls[0]).toEqual([asset])
+    expect(calls[1]).toEqual([floor])
+    expect(calls[2]).toEqual(two)
+  })
+
+  test('other members are the wallet itself (this bound to the real wallet)', () => {
+    expect(setup().wrapped.whoami()).toBe('raw')
   })
 })

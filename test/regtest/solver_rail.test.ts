@@ -10,6 +10,7 @@ import {
   EsploraProvider,
   InMemoryContractRepository,
   InMemoryWalletRepository,
+  RestArkProvider,
   RestIndexerProvider,
   RestOperatorProvider,
   SingleKey,
@@ -58,6 +59,7 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () 
   let db: Database
   let rail: SolverRail
   let lightning: LightningConfig
+  const arkInfo = () => new RestArkProvider(ARKD).getInfo()
 
   const outcomeOf = async (id: string): Promise<Swap | undefined> => (await rail.client.swaps()).find((s) => s.id === id)
   const until = (id: string, outcome: string) =>
@@ -86,7 +88,7 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () 
       subdustdUrl: 'http://unused',
       emulatorPubkey: EMU!,
     }
-    rail = await startSolverRail({ wallet, db, lightning, network: 'regtest' })
+    rail = await startSolverRail({ wallet, db, lightning, network: 'regtest', arkInfo })
   }, 300_000)
 
   afterAll(async () => {
@@ -133,7 +135,7 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () 
     const before = (await wallet.getBalance()).available
     const r = await rail.client.receive({ amount: 6_000n, via: 'lightning' })
     await rail.dispose()
-    rail = await startSolverRail({ wallet, db, lightning, network: 'regtest' })
+    rail = await startSolverRail({ wallet, db, lightning, network: 'regtest', arkInfo })
     expect((await rail.client.swaps()).length).toBeGreaterThanOrEqual(4)
     peerPays(r.artifact.bolt11)
     await until(r.id, 'claimed')

@@ -1,11 +1,13 @@
 import type { Database } from 'bun:sqlite'
-import type { IWallet } from '@arkade-os/sdk'
+import type { OperatorInfo, Wallet } from '@arkade-os/sdk'
 import { discover } from '@arkade-os/solver-discovery'
 import { createSwapClient, type SwapClient } from '@arkade-os/swap'
+import type { SQLiteAssetSwapRepository } from '@arkade-os/swap/repositories/sqlite'
 import { httpTransport } from '@arkade-os/swap/protocol'
 import type { Network } from './defaults'
 import type { LightningConfig } from './lightning_config'
 import { openSwapRepository } from './swap_store'
+import { withSpendPolicy } from './wallet_spend'
 
 // Dust-and-up Lightning through the operator's own intent-solver (D5): the
 // high-level swap client, pinned to our solver alone.
@@ -20,15 +22,22 @@ import { openSwapRepository } from './swap_store'
 //   covenant built on it could only be co-signed by them.
 // - Drive: "auto" (the default): the client claims receives and refunds
 //   failed sends by itself, resuming whatever the store holds at boot.
+// - Funding: the client funds a send's lockup through `wallet.send`; the
+//   wallet it gets is wrapped so that goes through our coin policy
+//   (wallet_spend.ts) like every other spend.
 
 export interface SolverRail {
   readonly client: SwapClient
+  /** The client's own store — read for a paid send's hash-verified preimage. */
+  readonly repository: SQLiteAssetSwapRepository
   dispose(): Promise<void>
 }
 
 export async function startSolverRail(deps: {
-  wallet: IWallet
+  wallet: Wallet
   db: Database
+  /** Operator info for the coin policy (dust, deprecated signers). */
+  arkInfo: () => Promise<OperatorInfo>
   lightning: LightningConfig
   network: Network
   fetchImpl?: typeof fetch
@@ -43,9 +52,10 @@ export async function startSolverRail(deps: {
   if (markets.length === 0) {
     throw new Error(`the configured solver card advertises no ${network} market`)
   }
+  const repository = openSwapRepository(deps.db)
   const client = createSwapClient({
-    wallet: deps.wallet,
-    repository: openSwapRepository(deps.db),
+    wallet: withSpendPolicy(deps.wallet, { db: deps.db, arkInfo: deps.arkInfo }),
+    repository,
     discovery: { registryUrl: null, snapshot: markets } as never,
     transportFor: ({ solverPubkey }) => ({ ...httpTransport(lightning.solverUrl), attestedResponder: solverPubkey }),
     emulatorPubkey: lightning.emulatorPubkey,
@@ -55,5 +65,5 @@ export async function startSolverRail(deps: {
   // run (a funded send to refund, a held receive to claim). Rejects only on an
   // unreadable store, which must stop boot.
   await client.ready
-  return { client, dispose: () => client[Symbol.asyncDispose]() }
+  return { client, repository, dispose: () => client[Symbol.asyncDispose]() }
 }
