@@ -143,8 +143,8 @@ covers). A dropped row is resolved strictly by verdict — and **nothing is
 ever deleted silently**:
 
 - **spent-verified** — the indexer names `spentBy` (set for offchain sends
-  AND settlement forfeits — spike-confirmed against arkd, `test/spike/
-  spend_evidence.spike.ts`) and serves that tx, whose input consuming our
+  AND settlement forfeits — spike-confirmed against arkd; the spike is
+  retired, its logic is `src/exit/evidence.ts` + unit tests) and serves that tx, whose input consuming our
   outpoint carries a schnorr signature that verifies against **our own
   x-only pubkey** (sighash recomputed from the PSBT itself; labelled
   `tapScriptSig` first, finalized witness stack as fallback). Keying on the
@@ -536,9 +536,9 @@ bitcoind `submitpackage` RPC.
 
 - Unit/integration: `bun test` (network-free; real PSBT fixtures drive the
   actual `Unroll.Session` and sweep signing without touching mainnet).
-- Offline finalize regression after an SDK bump:
-  `bun test/spike/offline_finalize.spike.ts --replay <dump>` re-verifies stored
-  PSBTs still finalize under the new SDK's rules.
+- Offline finalize regression after an SDK bump: the SM-34 regtest
+  (`test/regtest/atomic_unroll.test.ts`, block mode) and the boost drill
+  re-verify that stored PSBTs still finalize under the new SDK's rules.
 - Full onchain drill (the one broadcast path unit tests can't cover): the
   regtest environment — bitcoin core + arkd + esplora brought up locally, bridge
   attached via `data/config.json`, driven from the browser at localhost:4282.
