@@ -87,6 +87,7 @@ const float = new FloatRenewer({
     operator: signer.ark,
     indexer: signer.indexer,
     expectedAddress: async () => (await signer.receiveAddress()).encode(),
+    chainHeight: async () => (await lnd.getInfo()).blockHeight,
   }),
   lock: floatLock,
   thresholdSecs: 2 * (config.subdust.receiveWindowSecs + config.subdust.payMarginSecs),

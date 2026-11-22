@@ -37,7 +37,13 @@ describe.skipIf(!ARKD)('subdustd float renewal on regtest', () => {
     expect(before.map((v) => v.value).sort((a, b) => a - b)).toEqual([2000, 5000])
 
     const renewer = new FloatRenewer({
-      manager: lazyFloatManager({ identity: signer.identity, operator: signer.ark, indexer: signer.indexer, expectedAddress: async () => address }),
+      manager: lazyFloatManager({
+        identity: signer.identity,
+        operator: signer.ark,
+        indexer: signer.indexer,
+        expectedAddress: async () => address,
+        chainHeight: async () => Number(await (await fetch(`${process.env.REGTEST_ESPLORA_URL ?? 'http://localhost:3000/api'}/blocks/tip/height`)).text()),
+      }),
       lock: new FloatLock(),
       thresholdSecs: 10 * 86_400, // everything is due
       log: silent,

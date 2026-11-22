@@ -98,7 +98,11 @@ export class FloatRenewer {
         log.info(`float: renewed ${due.length} coin(s) (${values.reduce((n, v) => n + v, 0)} sats) in round ${out.renewed}`)
       }
     } catch (e) {
-      log.warn(`float: renewal failed, retrying next pass: ${(e as Error).message}`)
+      const msg = (e as Error).message
+      // Only sub-dust change is due (claim/refund jitter remainders): it cannot
+      // form an output alone and rides along the next time a real coin is due.
+      if (/below dust threshold/i.test(msg)) log.debug(`float: nothing renewable yet: ${msg}`)
+      else log.warn(`float: renewal failed, retrying next pass: ${msg}`)
     }
     try {
       // Coins already swept (subdustd was down past an expiry): back into a
@@ -127,7 +131,26 @@ export function lazyFloatManager(deps: {
   indexer: import('@arkade-os/sdk').IndexerProvider
   /** subdustd's own funding address (ArkSigner.receiveAddress). */
   expectedAddress: () => Promise<string>
+  /** Chain tip height from our own LND — the only chain read renewal makes. */
+  chainHeight: () => Promise<number>
 }): FloatManager {
+  // The SDK reads the chain tip to evaluate height-based expiry, and nothing
+  // else on this path. Without an explicit provider it would default to a
+  // public esplora (mempool.space on mainnet) — a third party subdustd has no
+  // business querying — so the tip comes from our own LND, and every other
+  // onchain call refuses loudly (subdustd never boards or broadcasts).
+  const onchainProvider = new Proxy(
+    { getChainTip: async () => ({ height: await deps.chainHeight(), time: Math.floor(Date.now() / 1000), hash: '' }) },
+    {
+      get(target, prop) {
+        if (prop in target) return (target as Record<string | symbol, unknown>)[prop]
+        if (prop === 'then') return undefined
+        return () => {
+          throw new Error(`subdustd's renewal wallet has no onchain provider (${String(prop)})`)
+        }
+      },
+    },
+  )
   let manager: Promise<import('@arkade-os/sdk').VtxoManager> | undefined
   const get = () => {
     manager ??= (async () => {
@@ -136,6 +159,7 @@ export function lazyFloatManager(deps: {
         identity: deps.identity,
         operatorProvider: deps.operator,
         indexerProvider: deps.indexer,
+        onchainProvider: onchainProvider as never,
         storage: { walletRepository: new InMemoryWalletRepository(), contractRepository: new InMemoryContractRepository() },
         settlementConfig: false,
       })

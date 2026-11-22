@@ -88,4 +88,20 @@ describe('FloatRenewer', () => {
     const r = new FloatRenewer({ manager, lock: new FloatLock(), thresholdSecs: 10, log: silent })
     expect(await r.pass()).toEqual({})
   })
+
+  test('only sub-dust due is not a failure: no warning, retried silently', async () => {
+    const warns: string[] = []
+    const log = { debug() {}, info() {}, warn: (m: string) => warns.push(m), error() {} } as never
+    const manager = {
+      getExpiringVtxos: async () => [{ value: 44 }] as never,
+      renewVtxos: async () => {
+        throw new Error('Total amount 44 is below dust threshold 330')
+      },
+      recoverVtxos: async () => {
+        throw new Error('No recoverable VTXOs found')
+      },
+    }
+    expect(await new FloatRenewer({ manager, lock: new FloatLock(), thresholdSecs: 10, log }).pass()).toEqual({})
+    expect(warns).toEqual([])
+  })
 })
