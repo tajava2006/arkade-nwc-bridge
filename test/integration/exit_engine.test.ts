@@ -95,7 +95,7 @@ describe('exit engine', () => {
   }
 
   test('startExit unrolls to "waiting", then the CSV clock flips it to "sweepable"', async () => {
-    const f = await makeSignedExitFixture(1)
+    const f = await makeSignedExitFixture(1, { identity })
     storeVtxoWithProofs(temp.db, f.vtxo, f.proofs)
     const chain = mockChain()
     engine = makeEngine(chain)

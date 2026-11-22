@@ -227,7 +227,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     if (!status.confirmed) return
     const tip = await explorer.getChainTip()
     const confirmedAt = { height: status.blockHeight, time: status.blockTime }
-    if (availableExitPath(vtxo.tapTree, confirmedAt, tip)) {
+    if (availableExitPath(vtxo.tapTree, confirmedAt, tip, await deps.identity.xOnlyPublicKey())) {
       setExitOpState(db, op.txid, op.vout, 'sweepable')
       log(`exit-engine: ${op.txid}:${op.vout} CSV elapsed — sweepable`)
       notify(op.txid, op.vout)

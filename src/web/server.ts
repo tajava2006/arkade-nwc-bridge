@@ -24,7 +24,9 @@ import {
   syncHistoryFromSources,
 } from '../history'
 import { historyView } from './views/history'
-import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
+import { createAccount, generatePrivateKey, loadAccount, parseNsecInput } from '../account'
+import { getPublicKey } from 'nostr-tools/pure'
+import { hexToBytes } from 'nostr-tools/utils'
 import { nip19 } from 'nostr-tools'
 import type { SimplePool } from 'nostr-tools/pool'
 import { cycleSpentMsat, parseBudgetRenewal, type BudgetRenewal } from '../lib/budget'
@@ -264,6 +266,12 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       )
     }
     return null
+  }
+  // The account's x-only key — the Ark identity and the nostr key are the same
+  // secp256k1 key — so the exit views count down OUR leaf (SM-55).
+  const ourExitKey = (): Uint8Array | undefined => {
+    const account = loadAccount(db)
+    return account ? hexToBytes(getPublicKey(account.privateKey)) : undefined
   }
   // R4: GET (read) routes carry no Origin from most browsers, so the CSRF guard
   // can't see them — but DNS-rebinding reads (balance / history / exit / swaps)
@@ -548,7 +556,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const vout = Number.parseInt(req.params.vout, 10)
           if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
           const feeRate = await st.exitEngine.feeRate()
-          const stepper = buildExitStepper({ db }, txid, vout, feeRate)
+          const stepper = buildExitStepper({ db, ourXOnly: ourExitKey() }, txid, vout, feeRate)
           if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
           let estimate = null
           try {
@@ -598,7 +606,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           } catch {
             return new Response('esplora unavailable', { status: 503 })
           }
-          const probe = await probeExitStep({ db, explorer }, txid, vout, stepTxid)
+          const probe = await probeExitStep({ db, explorer, ourXOnly: ourExitKey() }, txid, vout, stepTxid)
           if (!probe) return new Response('no such step', { status: 404 })
           // a step sitting in the mempool gets its fee context (package rate
           // vs next block, boost button) — priced best-effort, the plain
@@ -633,7 +641,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const vout = Number.parseInt(req.params.vout, 10)
           if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
           const feeRate = await st.exitEngine.feeRate()
-          const stepper = buildExitStepper({ db }, txid, vout, feeRate)
+          const stepper = buildExitStepper({ db, ourXOnly: ourExitKey() }, txid, vout, feeRate)
           if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
           let info = null
           try {

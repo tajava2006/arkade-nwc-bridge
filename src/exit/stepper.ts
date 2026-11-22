@@ -80,22 +80,22 @@ export interface ExitStepper {
 }
 
 /** timelock size/unit from the tapTree alone — the elapsed part needs the chain */
-function csvNeedOf(tapTreeHex: string): { need: number; unit: 'blocks' | 'seconds' } | null {
+function csvNeedOf(tapTreeHex: string, ourXOnly?: Uint8Array): { need: number; unit: 'blocks' | 'seconds' } | null {
   try {
     const zero = { height: 0, time: 0 }
-    const s = csvPathStatuses(tapTreeHex, zero, zero)[0]
+    const s = csvPathStatuses(tapTreeHex, zero, zero, ourXOnly)[0]
     return s ? { need: s.need, unit: s.type } : null
   } catch {
     return null
   }
 }
 
-function buildWaitStep(vtxo: VaultVtxo, op: ExitOp | null): WaitStep {
+function buildWaitStep(vtxo: VaultVtxo, op: ExitOp | null, ourXOnly?: Uint8Array): WaitStep {
   if (op?.state === 'sweepable' || op?.state === 'swept') {
     return { kind: 'wait', status: 'sweepable', need: 0, have: null, unit: 'blocks' }
   }
   if (op?.state === 'waiting') {
-    const csv = csvNeedOf(vtxo.tapTree)
+    const csv = csvNeedOf(vtxo.tapTree, ourXOnly)
     return {
       kind: 'wait',
       status: 'running',
@@ -117,7 +117,8 @@ function buildSweepStep(op: ExitOp | null, waitStatus: StepStatus): SweepStep {
 }
 
 export function buildExitStepper(
-  deps: { db: Database },
+  /** ourXOnly: count down OUR exit leaf (a solver lockup has others, SM-55). */
+  deps: { db: Database; ourXOnly?: Uint8Array },
   txid: string,
   vout: number,
   feeRate: number,
@@ -157,7 +158,7 @@ export function buildExitStepper(
   }
   const levels = graph.levels.map((level) => level.map(toStep))
 
-  const waitStep = buildWaitStep(vtxo, op)
+  const waitStep = buildWaitStep(vtxo, op, deps.ourXOnly)
 
   // Probe in the engine's actual broadcast order — Session scans the stored
   // chain back-to-front — so "first non-confirmed ends the scan" mirrors the
@@ -239,7 +240,7 @@ async function txStatus(
  * also keeps the endpoint from being an open esplora proxy.
  */
 export async function probeExitStep(
-  deps: { db: Database; explorer: OnchainProvider; timeoutMs?: number },
+  deps: { db: Database; explorer: OnchainProvider; timeoutMs?: number; ourXOnly?: Uint8Array },
   txid: string,
   vout: number,
   stepTxid: string,
@@ -277,6 +278,7 @@ export async function probeExitStep(
           vtxo.tapTree,
           { height: s.blockHeight!, time: s.blockTime! },
           tip,
+          deps.ourXOnly,
         )[0]
         if (csv) {
           const op = getExitOp(deps.db, txid, vout)
