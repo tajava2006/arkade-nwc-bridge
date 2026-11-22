@@ -16,18 +16,18 @@ echo "▶ wiping any previous stack + bridge runtime for a fresh drill…"
 regtest clean >/dev/null 2>&1 || true
 rm -rf "${RUNTIME_DIR}"
 
-# Both profiles: `ark` is all the exit feature needs, but the bridge requires
-# a reachable Boltz at boot (getFees), so `boltz` must be up too — its REST
-# comes up without LN channels, which is all boot needs. We never make an LN
-# swap in this drill (that needs channels; out of scope — RUNBOOK).
-echo "▶ starting arkade-regtest (ark + boltz profiles, ${EXIT_DRILL_MODE} mode)…"
+# `ark` is all the exit feature needs. The bridge boots Ark-only without a
+# data/config.json `lightning` block, so no swap services are started here
+# (Lightning drills run on test-script/regtest-solver.sh in the operator
+# workspace).
+echo "▶ starting arkade-regtest (ark profile, ${EXIT_DRILL_MODE} mode)…"
 echo "  regtest dir: ${REGTEST_DIR}"
 if [ "${EXIT_DRILL_MODE}" = "seconds" ]; then
   echo "  seconds mode: no re-tree churn (good for building tree depth), CSV ~8.5 min hands-off"
 else
   echo "  blocks mode: fast CSV via 'mine 20', but re-tree churn (single-VTXO smoke only)"
 fi
-regtest start --profile ark --profile boltz
+regtest start --profile ark
 
 echo "▶ waiting for arkd at ${ARKD_URL}…"
 for i in $(seq 1 60); do
@@ -50,7 +50,6 @@ cat > "${RUNTIME_DIR}/data/config.json" <<JSON
 {
   "network": "regtest",
   "arkServerUrl": "${ARKD_URL}",
-  "boltzApiUrl": "${BOLTZ_URL}",
   "esploraUrls": ["${ESPLORA_URL}"],
   "dbPath": "./data/bridge-regtest.sqlite"
 }

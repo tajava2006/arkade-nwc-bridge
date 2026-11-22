@@ -91,7 +91,6 @@ fi
 # Regtest service endpoints (arkade-regtest defaults — README "Service URLs").
 ARKD_URL="http://localhost:7070"
 ESPLORA_URL="http://localhost:3000/api"
-BOLTZ_URL="http://localhost:9069"
 
 # arkd interprets locktimes by magnitude: values >= 512 are SECONDS (time
 # scheduler), < 512 are BLOCKS (regtest only, rejected elsewhere). All five

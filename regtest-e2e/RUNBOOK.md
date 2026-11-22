@@ -14,9 +14,10 @@ full local regtest stack. This is the existence proof for the exit feature
   an already-present copy: the initialized submodule first, else the operator
   workspace's sibling `../ts-sdk/regtest` (same repo, ts-sdk's submodule).
   `REGTEST_DIR` overrides everything.
-- **Not** a Lightning setup: sub-dust / LN receive is out of scope here (needs
-  the custom sub-dust Boltz + two LN nodes + a channel). Unilateral exit uses
-  only arkd + esplora, so none of that matters for this drill.
+- **Not** a Lightning setup: the bridge boots Ark-only here (no `lightning`
+  block in its config.json). Unilateral exit uses only arkd + esplora; the
+  Lightning drills — including exiting a stuck solver lockup — run on the
+  operator workspace's solver harness.
 
 ## You are the miner
 

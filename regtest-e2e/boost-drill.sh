@@ -235,6 +235,12 @@ step "12. confirm the boosted sweep onchain"
 regtest mine 1
 rpc gettxout "$NEW_SWEEP" 0 | jq -e '.value' >/dev/null || die "swept output not found onchain"
 echo "  swept output confirmed: $(rpc gettxout "$NEW_SWEEP" 0 | jq -r '.value') BTC on the fuel/dest P2TR"
+# bitcoind has it; esplora's ADDRESS index trails its tx index by a moment, and
+# the final send collects coins from that index — wait until the swept output
+# is listed there, or the send-all races it and leaves it behind.
+FUEL_ADDR=${FUEL_ADDR:-$(curl -fsS "$BRIDGE_URL/exit" | grep -oE 'bcrt1p[a-z0-9]{38,}' | head -1)}
+wait_until 30 "the swept output in esplora's address index" \
+  "curl -fsS '${ESPLORA_URL}/address/${FUEL_ADDR}/utxo' | jq -e --arg t '$NEW_SWEEP' 'any(.[]; .txid == \$t and .status.confirmed)'"
 
 final_send_stage
 
