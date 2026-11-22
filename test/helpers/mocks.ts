@@ -1,5 +1,5 @@
-// Hand-rolled minimal stubs for @arkade-os/sdk Wallet and
-// @arkade-os/boltz-swap ArkadeSwaps. Cast through `unknown` so we don't have
+// Hand-rolled minimal stubs for the @arkade-os/sdk Wallet and the bridge's
+// Lightning rails. Cast through `unknown` so we don't have
 // to satisfy the full interface — handlers only touch a small slice. If an
 // SDK upgrade changes one of the methods we *do* use, the cast surfaces the
 // drift at the call site rather than silently swallowing it.
@@ -13,14 +13,6 @@ import type {
   ExtendedVirtualCoin,
   RestArkProvider,
 } from '@arkade-os/sdk'
-import type {
-  ArkadeSwaps,
-  BoltzSubmarineSwap,
-  CreateLightningInvoiceRequest,
-  CreateLightningInvoiceResponse,
-  SendLightningPaymentRequest,
-  SendLightningPaymentResponse,
-} from '@arkade-os/boltz-swap'
 import { AsyncCache } from '../../src/lib/cache'
 import type { SwrCaches } from '../../src/web/server'
 import type { SendData } from '../../src/send'
@@ -144,82 +136,6 @@ export function makeSwrCaches(wallet: Wallet, balance: WalletBalance): SwrCaches
   }
   caches.balance.seed(balance)
   return caches
-}
-
-export interface SwapsStubOptions {
-  createLightningInvoice?: (
-    args: CreateLightningInvoiceRequest,
-  ) => Promise<CreateLightningInvoiceResponse>
-  sendLightningPayment?: (
-    args: SendLightningPaymentRequest,
-  ) => Promise<SendLightningPaymentResponse>
-  createSubmarineSwap?: (args: SendLightningPaymentRequest) => Promise<BoltzSubmarineSwap>
-  waitForSwapSettlement?: (pendingSwap: BoltzSubmarineSwap) => Promise<{ preimage: string }>
-}
-
-export function makeSwapsStub(opts: SwapsStubOptions = {}): ArkadeSwaps {
-  return {
-    createLightningInvoice:
-      opts.createLightningInvoice ??
-      (async () => {
-        throw new Error('createLightningInvoice not stubbed')
-      }),
-    sendLightningPayment:
-      opts.sendLightningPayment ??
-      (async () => {
-        throw new Error('sendLightningPayment not stubbed')
-      }),
-    createSubmarineSwap:
-      opts.createSubmarineSwap ??
-      (async () => {
-        throw new Error('createSubmarineSwap not stubbed')
-      }),
-    waitForSwapSettlement:
-      opts.waitForSwapSettlement ??
-      (async () => {
-        throw new Error('waitForSwapSettlement not stubbed')
-      }),
-    async getFees() {
-      return {
-        submarine: { percentage: 0.1, minerFees: 0 },
-        reverse: { percentage: 0.25, minerFees: { lockup: 0, claim: 0 } },
-      }
-    },
-  } as unknown as ArkadeSwaps
-}
-
-/**
- * A pre-baked pending submarine swap, shaped like createSubmarineSwap's
- * return: ln_send only reads response.address + response.expectedAmount.
- */
-export function fakeSubmarineSwap(
-  overrides: { expectedAmount?: number; address?: string } = {},
-): BoltzSubmarineSwap {
-  return {
-    id: 'swap-id-fake',
-    type: 'submarine',
-    response: {
-      address: overrides.address ?? 'tark1boltzlockup',
-      expectedAmount: overrides.expectedAmount ?? 105,
-    },
-  } as unknown as BoltzSubmarineSwap
-}
-
-/**
- * A pre-baked CreateLightningInvoiceResponse-shaped record. Tests can spread
- * over it to tweak individual fields without re-specifying the rest.
- */
-export function fakeInvoiceResponse(
-  overrides: Partial<CreateLightningInvoiceResponse> = {},
-): CreateLightningInvoiceResponse {
-  return {
-    amount: 99,
-    expiry: Math.floor(Date.now() / 1000) + 3600,
-    invoice: 'lnbcfake',
-    paymentHash: 'ff'.repeat(32),
-    pendingSwap: { id: 'swap-id-fake' },
-    ...overrides,
-  } as unknown as CreateLightningInvoiceResponse
 }
 
 /**

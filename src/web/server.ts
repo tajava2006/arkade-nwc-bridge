@@ -1,18 +1,10 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet, WalletBalance, RestArkProvider } from '@arkade-os/sdk'
-import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { decodeInvoice } from '../lib/bolt11'
 
 import type { Config } from '../config'
 import { readServerOverrides } from '../config'
-import {
-  ARK_SERVER_URL,
-  BOLTZ_API_URL,
-  EXIT_QUARANTINE_DM_GRACE_MS,
-  OFFICIAL_ARK_SERVER_URL,
-  OFFICIAL_BOLTZ_API_URL,
-  type Network,
-} from '../defaults'
+import { ARK_SERVER_URL, EXIT_QUARANTINE_DM_GRACE_MS, type Network } from '../defaults'
 import {
   setServerRow,
   clearServerRow,
@@ -127,8 +119,8 @@ export interface SwrCaches {
 export type AppState =
   | { mode: 'setup' }
   | {
-      // Account exists but the full bring-up (wallet/boltz/nostr) failed —
-      // typically the ASP or Boltz being unreachable, which is exactly the
+      // Account exists but the full bring-up (wallet/Lightning/nostr) failed —
+      // typically the ASP being unreachable, which is exactly the
       // scenario unilateral exit exists for (EXIT_PLAN #07). Everything here
       // works without the ASP: the vault is sqlite, the onchain address is
       // derived from the nsec. index.ts retries the full boot every 60s and
@@ -144,13 +136,11 @@ export type AppState =
     }
   | {
       mode: 'ready'
-      // The ASP endpoint pair this ready session is bound to — resolved from the
+      // The Ark server this ready session is bound to — resolved from the
       // fresh-start row (config.json > row > defaults) at bootReady. /send and
-      // /swaps/refund read these; cfg no longer carries the runtime ark/boltz.
+      // /swaps/refund read it; cfg no longer carries the runtime URL.
       arkServerUrl: string
-      boltzApiUrl: string
       wallet: Wallet
-      swaps: ArkadeSwaps
       /** Lightning rails; undefined = Ark-only. */
       lightning?: LightningRails
       nostr: NostrService
@@ -198,16 +188,16 @@ export interface WebServerDeps {
    */
   notify?: NotifyFn
   /**
-   * Brings up wallet → boltz → nostr inside the same process. Called from
-   * POST /setup after the account row is written. Throws if wiring up the
-   * Ark/Boltz/relay clients fails — caller is responsible for cleaning up
+   * Brings up wallet → Lightning rails → nostr inside the same process. Called
+   * from POST /setup after the account row is written. Throws if wiring up the
+   * Ark/Lightning/relay clients fails — caller is responsible for cleaning up
    * the partial state (POST /setup deletes the just-created row on error).
    */
   bootReady: (privateKey: Uint8Array) => Promise<void>
   /**
    * Validate the chosen server set before the /setup POST commits it. Injected
    * so tests can stub the network probe; production defaults to
-   * validateServerSet (arkd getInfo network assert + boltz reachability).
+   * validateServerSet (arkd getInfo network assert).
    */
   validateServer?: (set: ServerSet, network: Network) => Promise<ValidateResult>
 }
@@ -351,7 +341,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             setupView({
               choice: 'hoppe',
-              configPinned: override.arkServerUrl != null || override.boltzApiUrl != null,
+              configPinned: override.arkServerUrl != null,
             }),
           )
         },
@@ -364,34 +354,21 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const pastedNsec =
             typeof form.get('nsec') === 'string' ? (form.get('nsec') as string) : ''
 
-          // Server selection (fresh-start only, then immutable). Two fixed
-          // presets — the operator's own pair (default) and the official Arkade
-          // pair — plus a custom pair. Read first so a re-render after any later
-          // error preserves the choice. Trailing slash trimmed so URL joins
-          // don't double up.
+          // Server selection (fresh-start only, then immutable): the operator's
+          // own Ark server (default) or a custom one. Read first so a re-render
+          // after any later error preserves the choice. Trailing slash trimmed
+          // so URL joins don't double up.
           const override = readServerOverrides()
-          const configPinned = override.arkServerUrl != null || override.boltzApiUrl != null
-          const choiceRaw = (form.get('server_choice') ?? 'hoppe').toString()
-          const choice: ServerChoice =
-            choiceRaw === 'official' ? 'official' : choiceRaw === 'custom' ? 'custom' : 'hoppe'
+          const configPinned = override.arkServerUrl != null
+          const choice: ServerChoice = (form.get('server_choice') ?? 'hoppe').toString() === 'custom' ? 'custom' : 'hoppe'
           const trimUrl = (raw: string): string => raw.trim().replace(/\/+$/, '')
           const customArk = trimUrl((form.get('ark_url') ?? '').toString())
-          const customBoltz = trimUrl((form.get('boltz_url') ?? '').toString())
-          const chosen =
-            choice === 'official'
-              ? { arkServerUrl: OFFICIAL_ARK_SERVER_URL, boltzApiUrl: OFFICIAL_BOLTZ_API_URL }
-              : choice === 'custom'
-                ? { arkServerUrl: customArk, boltzApiUrl: customBoltz }
-                : { arkServerUrl: ARK_SERVER_URL, boltzApiUrl: BOLTZ_API_URL }
-          const serverArgs = { choice, customArk, customBoltz, configPinned }
+          const chosen = { arkServerUrl: choice === 'custom' ? customArk : ARK_SERVER_URL }
+          const serverArgs = { choice, customArk, configPinned }
 
-          if (choice === 'custom' && (!chosen.arkServerUrl || !chosen.boltzApiUrl)) {
+          if (choice === 'custom' && !chosen.arkServerUrl) {
             return htmlResponse(
-              setupView({
-                error: 'Enter both the Ark server URL and the Boltz API URL for a custom server.',
-                pastedNsec,
-                ...serverArgs,
-              }),
+              setupView({ error: 'Enter the Ark server URL for a custom server.', pastedNsec, ...serverArgs }),
               { status: 400 },
             )
           }
@@ -432,10 +409,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // install, and a wrong-network arkd could silently strand funds on a
           // chain we can't reach (the load-bearing check). Nothing is persisted
           // until this passes.
-          const effective = {
-            arkServerUrl: override.arkServerUrl ?? chosen.arkServerUrl,
-            boltzApiUrl: override.boltzApiUrl ?? chosen.boltzApiUrl,
-          }
+          const effective = { arkServerUrl: override.arkServerUrl ?? chosen.arkServerUrl }
           const check = await validateServer(effective, cfg.network)
           if (!check.ok) {
             return htmlResponse(setupView({ error: check.reason, pastedNsec, ...serverArgs }), {
@@ -450,7 +424,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           try {
             await bootReady(privateKey)
           } catch (err) {
-            // Bring-up failed (usually ASP/Boltz unreachable). Undo BOTH rows so
+            // Bring-up failed (usually the ASP unreachable). Undo BOTH rows so
             // the user retries from a clean DB. The just-generated (or pasted)
             // nsec is only in memory here — surface it in the error so a generate
             // run doesn't silently lose the key.
@@ -1057,7 +1031,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       // Manual refund of an atomic send whose T has passed (refund leaf,
-      // F+server — boltz not involved). PRG: redirect back with the outcome
+      // F+server — subdustd not involved). PRG: redirect back with the outcome
       // so a reload can't re-fire the spend.
       '/swaps/refund': {
         POST: async (req) => {

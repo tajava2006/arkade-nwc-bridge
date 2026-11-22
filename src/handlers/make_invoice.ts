@@ -41,12 +41,10 @@ export async function handleMakeInvoice(
     throw new NwcError('OTHER', 'description_hash must be a 32-byte hex SHA256')
   }
 
-  // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: a Boltz
-  // reverse swap ≥ dust, the atomic sub-dust receive below it. We return the
-  // invoice immediately; the row stays pending until settlement flips it —
-  // via onSwapCompleted → syncSwapToDb (boltz.ts) for the swap branch, via
-  // reconcileAtomicReceives (no swap object → no settlement event) for the
-  // sub-dust branch.
+  // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: an atomic
+  // receive against subdustd for every amount (D10). We return the invoice
+  // immediately; the row stays pending until reconcileAtomicReceives flips it
+  // (matched by payment hash — there is no settlement event of its own).
   if (!deps.lightning) throw new NwcError('NOT_IMPLEMENTED', 'this wallet has no Lightning rail configured')
   let issued: IssuedInvoice
   try {

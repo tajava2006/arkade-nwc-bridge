@@ -7,7 +7,6 @@ import type { NostrService } from '../../src/nostr/service'
 import type { OfferService } from '../../src/clink/offers'
 import type { OutboxWatcher } from '../../src/nostr/outbox'
 import { SseHub } from '../../src/lib/sse'
-import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { openTempDb, type TempDb } from '../helpers/db'
 import type { ProofSyncService } from '../../src/exit/sync_service'
 import type { ExitEngine } from '../../src/exit/engine'
@@ -21,7 +20,6 @@ import { ChainTxType } from '@arkade-os/sdk'
 import {
   emptyBalance,
   makeArkProviderStub,
-  makeSwapsStub,
   makeSwrCaches,
   makeWalletStub,
 } from '../helpers/mocks'
@@ -123,7 +121,6 @@ const STUB_OUTBOX: OutboxWatcher = {
 const CFG: Config = {
   network: 'bitcoin',
   arkServerUrl: 'https://stub',
-  boltzApiUrl: 'https://stub',
   esploraUrls: ['https://stub-esplora'],
   httpBind: '127.0.0.1',
   httpPort: 0,
@@ -139,9 +136,7 @@ function readyState(): AppStateRef {
     current: {
       mode: 'ready',
       arkServerUrl: 'https://stub',
-      boltzApiUrl: 'https://stub',
       wallet,
-      swaps: makeSwapsStub() as ArkadeSwaps,
       // The solver quotes 2500-sat invoices at a 5-sat fee.
       lightning: {
         solver: { client: { quote: async () => ({ give: { amount: 250_005n } }) } } as never,
@@ -420,17 +415,15 @@ describe('web server — setup mode', () => {
       // default (mainnet) URLs during tests. Rejection is covered separately.
       validateServer: async () => ({ ok: true }),
       bootReady: async (pk) => {
-        // Don't actually bring up wallet/boltz/nostr in tests — just record
+        // Don't actually bring up wallet/Lightning/nostr in tests — just record
         // the key the route handed us and flip mode like index.ts would.
         bootedWith = pk
         const wallet = makeWalletStub({ address: 'tark1stub' })
         state.current = {
           mode: 'ready',
           arkServerUrl: 'https://stub',
-          boltzApiUrl: 'https://stub',
           wallet,
-          swaps: makeSwapsStub() as ArkadeSwaps,
-          nostr: STUB_NOSTR,
+              nostr: STUB_NOSTR,
           offers: STUB_OFFERS,
           pool: STUB_POOL,
           caches: makeSwrCaches(wallet, emptyBalance()),
@@ -462,7 +455,7 @@ describe('web server — setup mode', () => {
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('Ark server URL')
-    expect(body).toContain('Boltz API URL')
+    expect(body).not.toContain('Boltz')
     expect(body).toContain('Generate new nsec')
   })
 

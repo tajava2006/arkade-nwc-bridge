@@ -14,7 +14,7 @@ function ago(sec: number): string {
 }
 
 /**
- * Status page for mode:'degraded' — the ASP/Boltz bring-up failed, which is
+ * Status page for mode:'degraded' — the ASP bring-up failed, which is
  * the scenario unilateral exit exists for. Everything shown here must hold
  * without the ASP: vault stats are local sqlite, the funding address is
  * derived from the nsec. The page reloads itself when the 60s boot retry
@@ -39,7 +39,7 @@ export function degradedView(args: { state: DegradedState; stats: VaultStats }):
     body: html`
       <div class="relay-panel" style="border-color:#c00;">
         <p>
-          <span class="bad">The Ark/Boltz service stack is unreachable.</span>
+          <span class="bad">The Ark server is unreachable.</span>
           Normal operation (NWC, sends, receives) is paused.
         </p>
         <p class="muted">

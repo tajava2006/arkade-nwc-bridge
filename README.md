@@ -5,9 +5,10 @@ wallet service that gives a nostr client (Amethyst, Damus, Primal,
 Alby, …) Lightning payments without needing to run a Lightning node.
 Clients **send** over NWC (`pay_invoice`); **receiving** is over a
 static [CLINK noffer](RECEIVE_DESIGN.md), not per-client NWC invoices.
-The Lightning side is handled via [Boltz](https://docs.boltz.exchange)
-submarine/reverse swaps against an [Ark Protocol](https://arkadeos.com)
-wallet.
+The Lightning side is handled by the Ark server operator's own swap
+services against an [Ark Protocol](https://arkadeos.com) wallet: an
+[intent solver](https://github.com/arkade-os/intent-solver) for sends,
+and `subdustd` (in this repo) for receives and sends below the dust limit.
 
 > [!WARNING]
 > **Proof-of-concept — not audited.** This wallet exists to demonstrate
@@ -17,7 +18,7 @@ wallet.
 > spending amounts.
 
 > **Status:** Personal mainnet alpha. Operates against alpha SDKs and
-> live Boltz/Arkade infrastructure.
+> live Arkade infrastructure.
 
 ## Who this is for
 
@@ -34,19 +35,22 @@ nostr client  ──┐
                 │   (NIP-47 over nostr relays)
                 ▼
        ╔══════════════════════╗      ┌────────────┐
-       ║  arkade-nwc-bridge   ║◄────►│   Boltz    │  ◄── Lightning
-       ║  (this repo, your    ║      └────────────┘
-       ║   machine, 24/7)     ║
+       ║  arkade-nwc-bridge   ║◄────►│ solver +   │  ◄── Lightning
+       ║  (this repo, your    ║      │ subdustd   │
+       ║   machine, 24/7)     ║      └────────────┘
        ║                      ║      ┌────────────┐
        ║                      ║◄────►│ Ark server │
        ╚══════════════════════╝      └────────────┘
 ```
 
-Funds live as VTXOs in your Ark wallet. Every Lightning send hands
-sats to Boltz over Ark in exchange for a Lightning payment; every
-Lightning receive does the reverse. Sends arrive over NWC
-(`pay_invoice`); receives come through the CLINK noffer. The bridge
-runs the swap state machine for you either way.
+Funds live as VTXOs in your Ark wallet. A Lightning send locks sats in
+a covenant the solver can claim only with the payment's preimage — so it
+gets them only by paying the invoice, and a failed payment comes back to
+you. A Lightning receive is the reverse, through subdustd's atomic swap
+(a shared VTXO with pre-signed spends), for any amount down to 1 sat.
+Sends arrive over NWC (`pay_invoice`); receives come through the CLINK
+noffer or NWC `make_invoice`. The bridge runs the swap state machines for
+you either way.
 
 ## Setup
 
@@ -67,18 +71,19 @@ bun run dev          # development (hot reload)
 
 On first boot the bridge creates `./data/bridge.sqlite`, applies
 migrations, and waits for setup. Open
-<http://127.0.0.1:4282/setup> in a browser: pick the **Ark + Boltz
-servers** (pre-filled with the operator's — leave them to use those,
-or point at your own matched mainnet pair), then either paste your
+<http://127.0.0.1:4282/setup> in a browser: pick the **Ark server**
+(pre-filled with the operator's — leave it to use that, or point at your
+own mainnet one), then either paste your
 existing `nsec1…` or click *Generate* to mint a fresh one. The nsec
 is stored in the local sqlite file and never leaves the machine.
 
 The server choice is **fresh-start only**: there is no multi-server
 wallet, so it locks once the account exists. To move to a different
-Ark/Boltz you drain the funds and start over from a fresh sqlite.
+Ark server you drain the funds and start over from a fresh sqlite.
 
-No `.env` file, no env vars to set. The Ark + Boltz servers are
-picked at `/setup` (pre-filled with the operator's). Other static
+No `.env` file, no env vars to set. The Ark server is picked at
+`/setup` (pre-filled with the operator's); Lightning is configured in
+`data/config.json` (below) — without it the bridge runs Ark-only. Other static
 defaults (network, bind address, port, db path, plus the bootstrap
 relay list and the
 pubkey whose [NIP-65 outbox](https://github.com/nostr-protocol/nips/blob/master/65.md)
@@ -92,8 +97,8 @@ docker port mapping enforcing loopback at the host.)
 ### Running in Docker
 
 Use this if you want the bridge inside an existing self-hosted stack
-(e.g. alongside a personal Ark server / Boltz instance running in the
-same compose network).
+(e.g. alongside a personal Ark server, intent solver and subdustd running
+in the same compose network).
 
 ```bash
 docker build -t arkade-nwc-bridge .
@@ -128,8 +133,8 @@ boot**:
 }
 ```
 
-Any field of `Config` (`network`, `arkServerUrl`, `boltzApiUrl`,
-`esploraUrls`, `httpBind`, `httpPort`, `dbPath`) can be overridden;
+Any field of `Config` (`network`, `arkServerUrl`, `esploraUrls`,
+`httpBind`, `httpPort`, `dbPath`) can be overridden;
 missing fields fall through to the static defaults in
 [`src/defaults.ts`](src/defaults.ts). The file is read once at boot.
 Outside of docker the file simply isn't there and the bridge stays
@@ -137,29 +142,30 @@ zero-config.
 
 ### Pointing at a different Ark server (advanced)
 
-The defaults point at the author's Ark server and Boltz instance —
-that's the whole reason `bun install && bun run dev` just works with no
-sample env to copy and edit. The same `config.json` override retargets
-them, but three things are worth knowing first:
+The default points at the author's Ark server — that's the whole reason
+`bun install && bun run dev` just works with no sample env to copy and
+edit. The same `config.json` override retargets it, but a few things are
+worth knowing first:
 
-- **`arkServerUrl` and `boltzApiUrl` are a set, not two knobs.** A
-  Boltz instance keeps its Ark-side liquidity in one wallet on one Ark
-  server, so it can only swap for that server. Pointing the bridge at
-  your own ASP while leaving Boltz at someone else's leaves no working
-  Lightning path at all. Change both to a pair that belong together,
-  or change neither.
+- **Lightning comes with the Ark server, not on its own.** The swap
+  services keep their Ark-side liquidity on one Ark server, so they can
+  only swap for that server. Lightning is the `lightning` block in
+  `config.json` — `solverUrl` + `solverCard` (or `solverCardPath`, the
+  solver's signed card), `subdustdUrl`, and `emulatorPubkey` (the
+  operator's covenant cosigner — never the SDK default, which belongs to
+  Ark Labs). All four come from the operator of that Ark server; the block
+  is parsed strictly and a malformed one refuses boot. Without it the
+  bridge runs Ark-only.
 - **Only on a fresh start.** VTXOs exist on one Ark server and mean
   nothing on another, and the unilateral-exit proof vault mirrors the
   tree of the server it synced from — stale proofs don't merely go
   useless, they describe an exit that isn't there. Drain the wallet
   first (cooperative offboard, or exit), then wipe `data/`. There is no
   in-place migration, and the bridge won't stop you from trying.
-- **Sub-dust Lightning won't work, but nothing breaks.** Those swaps
-  need endpoints that exist only in the operator's Boltz fork; against
-  stock Boltz they fail per payment and leave everything else alone.
-  Dust+ Lightning, on-chain, and unilateral exit behave normally —
-  exit in particular is pure SDK + Esplora and works against any Ark
-  server, which is the part most worth having on your own terms.
+- **Ark-only still covers what matters most.** Ark sends, on-chain
+  deposits and withdrawals, and unilateral exit work against any Ark
+  server — exit in particular is pure SDK + Esplora, which is the part
+  most worth having on your own terms.
 
 ## Connecting a nostr client
 
@@ -191,8 +197,8 @@ NIP-47 methods implemented:
 
 - `get_info`
 - `get_balance`
-- `make_invoice` (Lightning → Ark via Boltz reverse swap; sub-dust via the plain path)
-- `pay_invoice` (Ark → Lightning via Boltz submarine swap)
+- `make_invoice` (Lightning → Ark via subdustd's atomic receive, any amount)
+- `pay_invoice` (Ark → Lightning via the solver; below dust via subdustd's atomic send)
 - `lookup_invoice`
 - `list_transactions`
 
@@ -202,10 +208,10 @@ clients fall back to polling, which is fine for the zap use case.
 ### Receiving
 
 `make_invoice` and the static [CLINK noffer](RECEIVE_DESIGN.md) share one
-LN-receive core (`src/ln_receive.ts`) — a Boltz reverse swap at ≥330 sats,
-boltz's plain sub-dust path below — so a connected NWC client and a noffer
-payer get identical behavior, sub-dust included, and there's only one side
-to change when the Boltz config moves.
+LN-receive core (`src/ln_receive.ts`) — an atomic receive against subdustd
+for every amount, carrying a NIP-57 description hash when the payer zaps —
+so a connected NWC client and a noffer payer get identical behavior, a
+1-sat zap included.
 
 The noffer stays the public handle: shown on the dashboard alongside the
 Ark address (offchain L2) and the onchain boarding address, a payer scans
@@ -283,9 +289,10 @@ small marker slots. No client framework, no build step.
   mixes with. A refresh re-mints them into clean, spendable VTXOs —
   automatically over time, or at once via a consolidate-all refresh or a
   cooperative (onchain) offboard.
-- **Boltz takes a fee** on every Lightning send (currently ~0.1%
-  submarine, ~0.25% reverse). You'll see the gap as `fees_paid` in
-  the per-connection history.
+- **Lightning sends carry a fee** — the solver's quote (a percentage plus
+  a routing estimate), or a small share below dust; receives carry none.
+  You'll see it as `fees_paid` in the per-connection history, and on the
+  Send tab before you confirm.
 - **Backup the nsec separately.** Your Ark identity is the `nsec`
   stored in `accounts`. NWC connections, swap log, and other
   bookkeeping in the same sqlite file rebuild from on-chain/indexer
@@ -320,7 +327,8 @@ small marker slots. No client framework, no build step.
 
 - [arkade-os/ts-sdk](https://github.com/arkade-os/ts-sdk) — the Ark
   protocol TypeScript SDK this bridge builds on.
-- [Boltz Ark docs](https://docs.boltz.exchange) — the swap provider.
+- [arkade-os/intent-solver](https://github.com/arkade-os/intent-solver) —
+  the solver the operator runs for Lightning sends.
 
 ## Contributing
 

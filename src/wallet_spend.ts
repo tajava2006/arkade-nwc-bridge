@@ -30,7 +30,7 @@ export const HOT_POCKET_SATS = 5_000
 
 /**
  * How many pockets to keep. One was not enough: a sub-dust send spends its
- * coin WHOLE, and our change only comes back after boltz has paid the invoice
+ * coin WHOLE, and our change only comes back after subdustd has paid the invoice
  * and run the claim split — so for the length of an external LN payment the
  * wallet holds no hot coin at all, and a second zap fired in that window
  * (Amethyst zaps several people in one tap) had nothing left but cold.

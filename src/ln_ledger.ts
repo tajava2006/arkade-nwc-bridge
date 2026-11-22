@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import type { Swap } from '@arkade-os/swap'
+import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
 import { paidPreimage, type LnSendDeps } from './ln_send'
 import type { NotifyFn } from './nostr/notifier'
 
@@ -109,4 +110,48 @@ export function watchSolverSends(deps: Pick<LnSendDeps, 'lightning' | 'arkServer
   })
   replaying = false
   return unsubscribe
+}
+
+/**
+ * Crash-window reconcile for sub-dust sends (M1/R2): an atomic send whose NWC
+ * row is still pending — the handler never returned (restart), or answered
+ * "unresolved" — settles or fails from the atomic swap row, matched by payment
+ * hash. Solver sends have no atomic row and are the swap listener's job.
+ *
+ * R2: the settle books the reserved principal (amount_msat) into the 'never'
+ * budget counter in the same transaction as the flip, changes-gated so a
+ * re-entrant pass never double-counts.
+ */
+export function reconcileAtomicSendRows(db: Database): void {
+  const now = Math.floor(Date.now() / 1000)
+  const outgoing = db
+    .query<{ id: number; payment_hash: string; amount_msat: number }, []>(
+      `SELECT id, payment_hash, amount_msat FROM transactions WHERE type = 'outgoing' AND state = 'pending'`,
+    )
+    .all()
+  const repo = new SqliteAtomicSwapRepository(db)
+  for (const row of outgoing) {
+    const atomic = repo.getByPaymentHash(row.payment_hash)
+    if (!atomic || atomic.direction !== SwapDirection.Send) continue
+    if (atomic.state === 'claimed') {
+      db.transaction(() => {
+        const res = db
+          .query(
+            `UPDATE transactions SET state = 'settled', preimage = COALESCE(preimage, ?), settled_at = ?,
+                    fees_paid_msat = COALESCE(fees_paid_msat, 0)
+             WHERE id = ? AND state = 'pending'`,
+          )
+          .run(atomic.preimage ?? null, now, row.id)
+        if (res.changes > 0) {
+          db.query(
+            `UPDATE connections SET spent_msat = spent_msat + ?
+             WHERE id = (SELECT connection_id FROM transactions WHERE id = ?)`,
+          ).run(row.amount_msat, row.id)
+        }
+      })()
+    } else if (atomic.state === 'refunded' || atomic.state === 'failed' || atomic.state === 'cancelled') {
+      db.query(`UPDATE transactions SET state = 'failed', settled_at = ? WHERE id = ? AND state = 'pending'`).run(now, row.id)
+    }
+    // non-terminal → still in flight, leave pending
+  }
 }

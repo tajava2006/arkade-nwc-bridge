@@ -4,7 +4,6 @@ import { SimplePool, useWebSocketImplementation } from 'nostr-tools/pool'
 import { loadConfig, readServerOverrides } from './config'
 import {
   ARK_SERVER_URL,
-  BOLTZ_API_URL,
   NWC_RELAYS_FALLBACK,
   OUTBOX_BOOTSTRAP_RELAYS,
   OUTBOX_FALLBACK_PUBKEY,
@@ -16,13 +15,12 @@ import { loadAccount } from './account'
 import { resolveServerSet, getServerRow, setServerRow } from './server_config'
 import { EsploraProvider, OnchainWallet, RestArkProvider, SingleKey } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
-import { initBoltz, reconcilePendingIncoming, wholeScriptIndexer } from './boltz'
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendClinkAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
-import { watchSolverSends } from './ln_ledger'
+import { reconcileAtomicSendRows, watchSolverSends } from './ln_ledger'
 import type { LightningRails } from './ln_send'
 import { startSolverRail } from './solver_rail'
 import { sweepInterruptedWebSends } from './history'
@@ -61,14 +59,13 @@ async function main(): Promise<void> {
     .get()
   console.log(`  schema         v${migrationCount?.count ?? 0}`)
 
-  // ark/boltz come from the fresh-start row, not the process cfg: they resolve
+  // The Ark server comes from the fresh-start row, not the process cfg: it resolves
   // (config.json > bridge_server row > defaults) only after the DB is open, and
   // on a fresh install the row doesn't exist until /setup writes it — the
   // default shown then is exactly what /setup pre-fills. A config.json that
   // overrides a disagreeing row is warned inside resolveServerSet.
   const bootServer = resolveServerSet(db)
   console.log(`  ark server     ${bootServer.arkServerUrl}`)
-  console.log(`  boltz          ${bootServer.boltzApiUrl}`)
 
   const appState: AppStateRef = { current: { mode: 'setup' } }
   const sseHub = new SseHub()
@@ -191,7 +188,7 @@ async function main(): Promise<void> {
   }, RELAY_WATCHDOG_INTERVAL_MS)
 
   // Receive-side reconciler interval (CLINK acks + NWC sub-dust invoice rows)
-  // — assigned once bootReady runs (needs the account key + swaps). Cleared on
+  // — assigned once bootReady runs (needs the account key). Cleared on
   // shutdown.
   let receiveReconcilerInterval: ReturnType<typeof setInterval> | undefined
   // Onchain-deposit history watcher (src/boarding_history.ts) — recording
@@ -267,17 +264,17 @@ async function main(): Promise<void> {
     10 * 60 * 1000,
   )
 
-  // Lift the wallet/boltz/nostr bring-up into a function so it can run
+  // Lift the wallet/Lightning/nostr bring-up into a function so it can run
   // either at boot (if an account row exists) or post-setup from the web
   // handler (after the user submits /setup). Same path either way; mutates
   // appState in place so the web server's open closures see the new mode.
   const bootReady = async (privateKey: Uint8Array): Promise<void> => {
-    // ark/boltz for THIS bring-up come from the fresh-start row, resolved here
+    // The Ark server for THIS bring-up comes from the fresh-start row, resolved here
     // (not at process start): the row doesn't exist until /setup writes it, and
     // this runs on both boot paths. Precedence config.json > row > defaults
     // (src/server_config.ts). network/esplora/http stay from the process cfg.
     const server = resolveServerSet(db)
-    const bootCfg = { ...cfg, arkServerUrl: server.arkServerUrl, boltzApiUrl: server.boltzApiUrl }
+    const bootCfg = { ...cfg, arkServerUrl: server.arkServerUrl }
 
     // The account key is the bridge's own nostr identity (noffer pubkey,
     // NWC service pubkey). Make it the primary outbox target so relay
@@ -331,23 +328,10 @@ async function main(): Promise<void> {
         console.log('  lightning      not configured — Ark-only')
       }
 
-      const { swaps } = await initBoltz({
-        db,
-        wallet,
-        cfg: bootCfg,
-        notify,
-      })
-      undo.push(() => swaps.dispose())
-      const fees = await swaps.getFees()
-      console.log(
-        `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
-      )
-
       const nostr = await startNostrService({
         cfg: bootCfg,
         db,
         wallet,
-        swaps,
         lightning,
         pool,
         notify,
@@ -364,14 +348,11 @@ async function main(): Promise<void> {
       console.log(`  noffer         ${offers.snapshot().noffer}`)
       undo.push(() => offers.stop())
 
-      // Restart-safe receive reconcile, boot + every 30s. Two passes: CLINK
-      // acks the live onReverseSettled missed (swaps that settled while we
-      // were down) + sub-dust acks, and NWC make_invoice sub-dust rows — those
-      // have no settlement event at all (no swap object), so this poll is the
-      // only thing that ever flips them (see ln_receive.ts).
-      // arkd indexer for M3's landing verification (exact VHTLC-spend → our-coin
-      // txid binding) — same server the wallet trusts, never boltz.
-      const reconcileIndexer = wholeScriptIndexer(bootCfg.arkServerUrl)
+      // Restart-safe atomic reconcile, boot + every 30s: drive every receive
+      // (claim + settle) and flip its NWC row, publish pending CLINK receipts,
+      // resume interrupted sub-dust sends and settle their NWC rows (M1). The
+      // receives have no settlement event of their own, so this poll (and the
+      // subdustd push pokes) is the only thing that ever flips them.
       const ackDeps = { pool, db, secretKey: privateKey, notify }
       // Atomic swaps (every receive, sub-dust sends) live on subdustd; without
       // a configured Lightning block there is nothing to drive them against.
@@ -381,12 +362,10 @@ async function main(): Promise<void> {
         : undefined
       const runReconcilePasses = async (): Promise<void> => {
         const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
-        // M3 self-heal for dust+ reverse swaps: a boltz-reported success that
-        // wasn't confirmed on-Ark (or a swap that settled while we were down) is
-        // settled here on a later pass, once the vtxo visibly lands. This is also
-        // the (M1) crash-window reconcile for interrupted sub-dust sends.
-        const incoming = reconcilePendingIncoming(db, wallet, reconcileIndexer, notify)
-          .catch((err) => console.error('boltz: pending reconcile failed:', err))
+        // (M1) Crash-window reconcile for interrupted sub-dust sends.
+        const incoming = Promise.resolve()
+          .then(() => reconcileAtomicSendRows(db))
+          .catch((err) => console.error('ln: atomic send row reconcile failed:', err))
         const receives = (subdustdUrl
           ? reconcileAtomicReceives({ wallet, subdustdUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
           : Promise.resolve([] as string[]))
@@ -405,7 +384,7 @@ async function main(): Promise<void> {
           )
         // Send-side resume (§3.4 classifyResume): failed-but-pre-T rows are
         // unwound through the cancel leaf, post-T rows are refunded (the
-        // T-refund executor), crash-orphaned rows reconcile against boltz
+        // T-refund executor), crash-orphaned rows reconcile against subdustd
         // status. Blocktime lag counts as waiting — the next tick retries.
         const sends = (atomicDeps ? resumeAtomicSends(atomicDeps) : Promise.resolve(undefined))
           .then((r) => {
@@ -456,7 +435,7 @@ async function main(): Promise<void> {
       // Onchain-deposit watcher: record boarding deposits into the unified
       // history (pending on arrival, settled once the outpoint leaves the
       // boarding set). Own interval, NOT a reconcileReceives pass — that one
-      // is poked by the boltz ws for sub-dust settle latency, and a slow
+      // is poked by the subdustd ws for settle latency, and a slow
       // esplora read in its single-flight would delay those pokes. 60s
       // matches the VtxoManager poll that does the actual auto-settle.
       // History rows already terminal: web LN sends interrupted by the last
@@ -485,7 +464,7 @@ async function main(): Promise<void> {
       runBoardingPass()
       boardingHistoryInterval = setInterval(runBoardingPass, 60_000)
 
-      // Push channel: the boltz fork emits subdust transitions on its public
+      // Push channel: subdustd emits atomic swap transitions on its
       // swap.update ws — a poke re-runs the same reconcile passes immediately,
       // collapsing the 30s poll latency. Pure accelerator; a dead endpoint
       // degrades to the interval above.
@@ -643,12 +622,10 @@ async function main(): Promise<void> {
 
       appState.current = {
         mode: 'ready',
-        // the ASP pair this ready session is bound to — /send and /swaps/refund
-        // read these, since cfg no longer carries the runtime ark/boltz URLs
+        // the Ark server this ready session is bound to — /send and
+        // /swaps/refund read it, since cfg no longer carries the runtime URL
         arkServerUrl: bootCfg.arkServerUrl,
-        boltzApiUrl: bootCfg.boltzApiUrl,
         wallet,
-        swaps,
         lightning,
         nostr,
         offers,
@@ -692,13 +669,13 @@ async function main(): Promise<void> {
     }
   }
 
-  // Boot-path wrapper (EXIT_PLAN #07): the ASP or Boltz being down must not
+  // Boot-path wrapper (EXIT_PLAN #07): the ASP being down must not
   // keep the bridge from starting — that is exactly when the operator needs
   // the exit tab. Any bootReady failure lands in mode:'degraded' (vault +
   // esplora + nsec-derived onchain wallet still work, no ASP required) and
   // a 60s loop keeps re-attempting the full bring-up; success promotes to
   // ready in place and tells open tabs to reload. Whole-or-nothing on
-  // purpose: partial-ready (e.g. wallet up, boltz down) would fork the
+  // purpose: partial-ready (e.g. wallet up, a dependency down) would fork the
   // AppState into per-subsystem availability flags for a rare, transient
   // state the retry loop already heals.
   const BOOT_RETRY_MS = 60_000
@@ -754,8 +731,8 @@ async function main(): Promise<void> {
     // silently repoint an existing wallet. Skip when data/config.json pins the
     // URLs — that override is the source there and wins over the row anyway.
     const override = readServerOverrides()
-    if (!getServerRow(db) && !override.arkServerUrl && !override.boltzApiUrl) {
-      setServerRow(db, { arkServerUrl: ARK_SERVER_URL, boltzApiUrl: BOLTZ_API_URL })
+    if (!getServerRow(db) && !override.arkServerUrl) {
+      setServerRow(db, { arkServerUrl: ARK_SERVER_URL })
       console.log('  server         backfilled fresh-start row from defaults (grandfathered DB)')
     }
     // Before the boot attempt, not inside it — the first degraded
@@ -789,7 +766,6 @@ async function main(): Promise<void> {
     if (appState.current.mode === 'ready') {
       appState.current.offers.stop()
       await appState.current.nostr.stop()
-      await appState.current.swaps.dispose()
       await appState.current.lightning?.solver.dispose()
       // Wallet.dispose tears down the VtxoManager poll loop, ContractWatcher's
       // SSE subscription, and ArkProvider's settlement-event stream so the

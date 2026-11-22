@@ -13,7 +13,7 @@ import { canSpendOffchain, isSubdust, isVtxoExpiringSoon, type ExtendedVirtualCo
 //  - arkd's SETTLEMENT_MIN_EXPIRY_GAP (4d): a settle attempted earlier than
 //    this is deferred, so a larger window would just spam rejected intents;
 //  - the atomic sub-dust send gate. A funding VTXO must outlive the swap's T
-//    by 10 min, and T is capped by boltz's subdustSendWindow (90h). Refreshing
+//    by 10 min, and T is capped by subdustd's sendWindowSecs (90h). Refreshing
 //    at 4d-before-expiry keeps every VTXO above 90h10m with ~6h to spare (the
 //    10-min poll and the round itself eat a little of it), so no invoice —
 //    however long its route — can land in a window where nothing may fund it.

@@ -12,9 +12,7 @@ import { openTempDb, type TempDb } from '../helpers/db'
 import {
   INVOICE_2000_SAT,
   emptyBalance,
-  fakeInvoiceResponse,
   fakeSpendableVtxo,
-  makeSwapsStub,
   knownPreimageInvoice,
   makeLightningStub,
   stubSubdustdReceive,

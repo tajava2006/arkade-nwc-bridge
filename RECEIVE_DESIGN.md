@@ -1,5 +1,15 @@
 # RECEIVE_DESIGN.md — bridge-native receive
 
+> **2026-11 — Lightning moved off Boltz.** Every Lightning receive — NWC
+> `make_invoice` and the CLINK noffer, any amount — is now an atomic receive
+> against the operator's `subdustd` (decision D10: the solver's hold invoice
+> cannot carry a NIP-57 description hash), 1:1 with no fee. Sections that
+> describe Boltz reverse swaps, the ≥dust/sub-dust split or
+> `clink_offer_receipts` are history; CLINK receipts all go through
+> `sendClinkAck`. Onboarding, the boarding address and the noffer itself are
+> unchanged. Record: the operator workspace's `SOLVER_MIGRATION_PLAN.md`
+> (SM-44, SM-45).
+
 The bridge already *receives* through NWC `make_invoice`, but only on behalf of a
 connected Nostr client. This is the design for the bridge's own dashboard receive
 surface: the operator's wallet taking funds in over every rail, no NWC client in

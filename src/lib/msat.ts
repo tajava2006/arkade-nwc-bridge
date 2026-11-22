@@ -1,5 +1,5 @@
-// NWC uses millisatoshis end-to-end. The Ark wallet only knows sats. Boltz
-// also operates in sats. We round at the bridge boundary; non-multiple-of-1000
+// NWC uses millisatoshis end-to-end. The Ark wallet only knows sats, and so
+// do the swap rails. We round at the bridge boundary; non-multiple-of-1000
 // amounts coming in from clients are flagged so the caller can reject with
 // NIP-47 OTHER rather than silently truncate.
 

@@ -21,7 +21,7 @@ src/
   server_config.ts           — bridge_server single-row CRUD +
                                resolveServerSet (config.json > row >
                                defaults) + validateServerSet. The fresh-
-                               start ark/boltz choice, then immutable
+                               start Ark server choice, then immutable
   db.ts                      — bun:sqlite + WAL + append-only MIGRATIONS
   history.ts                 — unified wallet-history ledger (HISTORY_DESIGN.md):
                                one row per money event on every rail; mirrored
@@ -36,11 +36,27 @@ src/
                                baselines — no backfill), own-boarding-input
                                sweep suppression, esplora-confirmed settles
   wallet.ts                  — privateKey → SingleKey → Wallet (in-memory repos)
-  boltz.ts                   — ArkadeSwaps + SqliteSwapRepository,
-                               SwapManager auto-claim/refund + listener +
-                               boot-time reconcile for incoming swaps
-  boltz_repository.ts        — SqliteSwapRepository: rows keyed on swap.id,
-                               full BoltzSwap stashed as JSON blob
+  lightning_config.ts        — data/config.json `lightning` block (solver URL
+                               + card, subdustd URL, emulator key), strict;
+                               absent ⇒ Ark-only boot, LN methods refuse
+  solver_rail.ts             — @arkade-os/swap client pinned to OUR solver
+                               (card as the only discovery snapshot, HTTP,
+                               our emulator key, drive auto); funds through
+                               withSpendPolicy so coin policy still applies
+  swap_store.ts              — the swap client's SQLite backend on the bridge
+                               db (prefix swapclient_, tables it owns)
+  ln_send.ts                 — sendLightning: ≥ dust → solver pay, < dust →
+                               atomic send (subdustd); preimage hash-verified
+                               (record, else claim witness via arkd);
+                               LnSendUnresolved keeps the NWC row pending
+  ln_receive.ts              — issueInvoice: EVERY amount → atomic receive on
+                               subdustd (D10: the solver's hold invoice can't
+                               carry a NIP-57 description hash) + the
+                               reconcile that claims and flips NWC rows
+  ln_ledger.ts               — settle/failOutgoing (pending-gated, + budget
+                               counter), watchSolverSends (swap listener +
+                               boot replay = restart recovery, send DMs),
+                               reconcileAtomicSendRows (M1)
   exit/                      — unilateral exit (EXIT_DESIGN.md). ASP-free:
                                vault.ts (offline proof store — exit_proof_txs
                                + exit_vtxos incl. quarantine), proof_sync.ts +
@@ -68,16 +84,12 @@ src/
                                BIP-322/legacy signature proof of control,
                                exit_dest table — then an exact-fee no-change
                                send-all of the fuel P2TR, RBF-boostable)
-  atomic/boltz_ws.ts         — push channel for sub-dust swaps: subscribes
-                               the fork's swap.update ws (sidecar) by swap id
+  atomic/push_ws.ts          — push channel for atomic swaps: subscribes
+                               subdustd's swap.update ws (/v2/ws) by swap id
                                and pokes the reconciler on transitions. Pure
                                accelerator — the 30s reconciler stays the
                                backstop; dead endpoint degrades to polling.
-                               URL: config.boltzWsUrl > derived
-                               ws(s)://host/v2/ws — the SDK's own single-host
-                               path-split convention, already served by both
-                               the VPS nginx and the compose boltz-proxy, so
-                               no deployment needs to set anything
+                               URL derived from lightning.subdustdUrl
   polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
                                (bun async-ESM require trap) + EventSource shim
   index.ts                   — three-mode boot (setup / ready / degraded);
@@ -131,13 +143,13 @@ src/
     get_info.ts              — capabilities; no notifications advertised
     get_balance.ts           — (available + recoverable) × 1000 msat
     make_invoice.ts          — invoice via the shared LN-receive core
-                               (ln_receive.ts, same core as the CLINK noffer:
-                               reverse swap ≥ dust; sub-dust <330 → ATOMIC
-                               receive, issueAtomicReceive + driveAtomicReceives
-                               reconciler, see atomic_receive.ts / ATOMIC_SUBDUST_PLAN.md)
-    pay_invoice.ts           — submarine swap one-shot; amount stays the
-                               invoice nominal, fees_paid = our cost
-                               (+ sub-dust <330 → ATOMIC send, atomicSubdustSend, see ln_send.ts)
+                               (ln_receive.ts, same core as the CLINK noffer):
+                               an atomic receive on subdustd for any amount,
+                               1:1 (ATOMIC_SUBDUST_PLAN.md)
+    pay_invoice.ts           — via ln_send.ts (solver ≥ dust, atomic < dust);
+                               amount stays the invoice nominal, fees_paid =
+                               our cost; an unresolved outcome leaves the row
+                               pending (INTERNAL, do not retry)
     lookup_invoice.ts        — connection-scoped SELECT
     list_transactions.ts     — connection-scoped, from/until/limit/offset
   lib/
@@ -167,11 +179,13 @@ src/
                                layout.ts injects the SSE client JS
 subdustd/                    — separate service (own entrypoint + Dockerfile,
                                build context = this repo root): the server side
-                               of atomic sub-dust swaps, imports src/atomic so
+                               of the atomic swaps (every receive, sub-dust
+                               sends), imports src/atomic so
                                client and server share one protocol lib. Same
                                no-env rule: one strict JSON config (unknown keys
                                fail boot). See subdustd/README.md for the knob
-                               table carried over from the Boltz fork
+                               table carried over from the Boltz fork;
+                               float.ts renews its own float (SM-29)
 scripts/
   show-nsec.ts               — recovery: print npub/nsec from sqlite
   show-btc-key.ts            — recovery: same key as WIF + tr() descriptor
@@ -251,24 +265,26 @@ row exists. Logs go to stdout; when running in background pipe to
 ## Hot footguns
 
 - **No env vars.** Static defaults live in [`src/defaults.ts`](src/defaults.ts);
-  the nsec lives in the `accounts` sqlite table and the chosen ark/boltz
-  pair in the single-row `bridge_server` table — both written at `/setup`.
+  the nsec lives in the `accounts` sqlite table and the chosen Ark server
+  in the single-row `bridge_server` table — both written at `/setup`.
   Don't reintroduce `.env` parsing — it was deliberately removed so the
   bridge is "clone + `bun run dev`" with no setup ritual. The one
   opt-in override is `./data/config.json` (loaded by
   [`src/config.ts`](src/config.ts)) for the docker deployment case —
   any `Config` field present overrides the matching default, missing
-  fields fall through. For **ark/boltz specifically** the runtime value is
+  fields fall through. For **the Ark server specifically** the runtime value is
   `resolveServerSet` ([`src/server_config.ts`](src/server_config.ts)):
   `data/config.json` > `bridge_server` row > defaults, so a docker/regtest
   config.json still wins over the fresh-start row. The file is intentionally
   absent from a fresh clone; don't add it to defaults or examples checked
-  into the repo.
+  into the repo. Lightning is config.json-only (`lightning`: solver URL +
+  card, subdustd URL, emulator key — operator infrastructure, strictly
+  parsed); without it the bridge boots Ark-only.
 - **Two-phase boot.** [`src/index.ts`](src/index.ts) starts the web
   server first, then either calls `bootReady` immediately (account
   exists) or waits for POST `/setup` to call it. Don't reorder this
-  to "wallet first" — there's no nsec (nor a chosen ark/boltz) to hand
-  the wallet until setup completes. `bootReady` resolves ark/boltz from
+  to "wallet first" — there's no nsec (nor a chosen Ark server) to hand
+  the wallet until setup completes. `bootReady` resolves the Ark server from
   the `bridge_server` row at entry (not at process start — the row
   doesn't exist yet on a fresh boot) and stamps them into the ready
   AppState; POST `/setup` validates then writes the row + account
@@ -310,10 +326,10 @@ row exists. Logs go to stdout; when running in background pipe to
   `@arkade-os/swap` and the SDK declare and stops on a mismatch. Bump those
   four by hand only when swap bumps its own pin. (`@noble/hashes` 2.0.1 also
   sits in the tree via nostr-tools — off the ark signing path, left alone.)
-- **Boltz endpoint is *not* `api.ark.boltz.exchange`.** The d.ts
-  docstring lies; the real SDK default is `api.boltz.exchange` and
-  that's what the production wallet uses. Don't pass `swapProvider`
-  explicitly unless someone has a specific reason.
+- **The swap client must stay pinned to our own infrastructure.** Its
+  defaults reach Ark Labs (the discovery registry, the emulator key a
+  refund covenant depends on); solver_rail.ts overrides both — our card as
+  the only snapshot, our `emulatorPubkey`. Don't drop either override.
 - **`transactions.amount_msat` = the BOLT11 nominal, both
   directions; `fees_paid_msat` = our cost.** Wallet movement is
   derived (incoming credits amount − fees, outgoing debits
@@ -321,11 +337,9 @@ row exists. Logs go to stdout; when running in background pipe to
   in clients that render amount and fee side by side, and NIP-57
   receipt validation requires the bolt11 amount to equal the zap
   request's (a 21-sat zap must read 21). Invoices are never
-  inflated: the swap cut comes out of what lands on Ark — the
-  receiver's cost, not the payer's. Mind the SDK trap here:
-  `createLightningInvoice` result.amount is the **post-fee on-Ark
-  amount** (what lands), NOT the invoice nominal — don't record it
-  as `amount`. Rationale: DESIGN.md §5 "Amount semantics".
+  inflated; receives are 1:1 today (no fee on the atomic receive), and
+  any future receive fee comes out of what lands on Ark — the receiver's
+  cost, not the payer's. Rationale: DESIGN.md §5 "Amount semantics".
 - **`recoverable` balance is sub-dust VTXOs, not "broken funds".**
   Include it in `get_balance` responses.
 - **One subscription per connection, on `conn.relays`.** Each
@@ -378,8 +392,9 @@ row exists. Logs go to stdout; when running in background pipe to
   add handler under `src/handlers/`. NIP-47 spec: §10 of DESIGN.md.
 - *schema change* → [`src/db.ts`](src/db.ts) (append migration).
   TransactionRow shape lives in [`src/lib/transaction.ts`](src/lib/transaction.ts).
-- *swap lifecycle questions* → [`src/boltz.ts`](src/boltz.ts) for the
-  listener / reconcile, [DESIGN.md §5](DESIGN.md) for the flow.
+- *swap lifecycle questions* → [`src/ln_send.ts`](src/ln_send.ts) /
+  [`src/ln_receive.ts`](src/ln_receive.ts) / [`src/ln_ledger.ts`](src/ln_ledger.ts),
+  [DESIGN.md §5](DESIGN.md) for the flow.
 - *UI change* → [`src/web/views/`](src/web/views/); routes in
   [`src/web/server.ts`](src/web/server.ts).
 - *relay status / outbox behavior* → [`src/nostr/outbox.ts`](src/nostr/outbox.ts)

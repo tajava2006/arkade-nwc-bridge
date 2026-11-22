@@ -1,6 +1,5 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet } from '@arkade-os/sdk'
-import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
 import { NWCWalletInfo, NWCWalletRequest, NWCWalletResponse } from 'nostr-tools/kinds'
@@ -38,8 +37,7 @@ export interface NostrServiceDeps {
   cfg: Config
   db: Database
   wallet: Wallet
-  swaps: ArkadeSwaps
-  /** Lightning rails; undefined = Ark-only (pay_invoice refuses). */
+  /** Lightning rails; undefined = Ark-only (pay_invoice/make_invoice refuse). */
   lightning?: LightningRails
   /**
    * Shared SimplePool. Same instance the outbox watcher uses — so every

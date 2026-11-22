@@ -8,7 +8,6 @@ export type { Network } from './defaults'
 export interface Config {
   network: defaults.Network
   arkServerUrl: string
-  boltzApiUrl: string
   esploraUrls: readonly string[]
   /** Solver + subdustd + emulator key (data/config.json only); undefined = Ark-only. */
   lightning?: LightningConfig
@@ -39,7 +38,6 @@ export function loadConfig(): Config {
   return {
     network: overrides.network ?? defaults.NETWORK,
     arkServerUrl: overrides.arkServerUrl ?? defaults.ARK_SERVER_URL,
-    boltzApiUrl: overrides.boltzApiUrl ?? defaults.BOLTZ_API_URL,
     esploraUrls:
       overrides.esploraUrls && overrides.esploraUrls.length > 0
         ? overrides.esploraUrls
@@ -57,16 +55,14 @@ export function loadConfig(): Config {
 }
 
 /**
- * The ark/boltz endpoints set by data/config.json only (each undefined when the
- * file is absent or doesn't pin it). Kept separate from loadConfig so
- * resolveServerSet (src/server_config.ts) can layer this override *over* the
- * fresh-start DB row: config.json > row > defaults.ts. loadConfig's own
- * arkServerUrl/boltzApiUrl are unchanged — they stay the setup-mode display
- * fallback for a process that hasn't resolved the row yet.
+ * The Ark server set by data/config.json only (undefined when the file is
+ * absent or doesn't pin it). Kept separate from loadConfig so
+ * resolveServerSet (src/server_config.ts) can layer it over the fresh-start
+ * row: config.json > row > defaults.ts.
  */
-export function readServerOverrides(): { arkServerUrl?: string; boltzApiUrl?: string } {
+export function readServerOverrides(): { arkServerUrl?: string } {
   const { overrides } = readOverrides()
-  return { arkServerUrl: overrides.arkServerUrl, boltzApiUrl: overrides.boltzApiUrl }
+  return { arkServerUrl: overrides.arkServerUrl }
 }
 
 function readOverrides(): { overrides: Partial<Config>; baseDir: string } {

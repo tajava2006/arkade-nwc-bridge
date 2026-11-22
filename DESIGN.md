@@ -15,11 +15,14 @@ A NIP-47 [Nostr Wallet Connect (NWC)](https://github.com/nostr-protocol/nips/blo
 **wallet service** that bridges nostr clients to a self-custodial
 Lightning experience without running a Lightning node.
 
-The Lightning side is handled via [Boltz](https://docs.boltz.exchange)
-submarine/reverse swaps over [Ark Protocol](https://github.com/arkade-os/ts-sdk)
-VTXOs. The Ark client wallet ([arkade-os/wallet](https://github.com/arkade-os/wallet))
-uses the same plumbing, so this bridge is essentially "that wallet's
-Lightning path, exposed over NWC".
+The Lightning side is handled by the Ark server operator's own swap
+services over [Ark Protocol](https://github.com/arkade-os/ts-sdk) VTXOs:
+sends of dust and up through an [intent solver](https://github.com/arkade-os/intent-solver)
+via the `@arkade-os/swap` client, and every receive plus sends below dust
+through `subdustd` (`subdustd/`, the atomic shared-vtxo protocol in
+[ATOMIC_SUBDUST_PLAN.md](ATOMIC_SUBDUST_PLAN.md)). Until 2026-11 this was
+Boltz submarine/reverse swaps; the migration record is the operator
+workspace's `SOLVER_MIGRATION_PLAN.md`.
 
 Target user: someone who can keep a personal server (or laptop) up
 24/7 but doesn't want to run a Lightning node + manage inbound
@@ -39,7 +42,7 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 | Remote signer (NIP-46/Amber) delegation | **Rejected as infeasible** | See §6. |
 | VTXO renewal delegation (Fulmine) | **Not enabled** | Adding a `delegatorProvider` injects a delegation path into the offchain tapscript, which changes the Ark address even for the same key. The arkade.money wallet defaults to delegate=ON, so importing the same nsec there produced a different address — explicitly noted because we burned swap fees rediscovering this. We assume 24/7 uptime instead. |
 | HTTP exposure | **`127.0.0.1` bind, no auth** | All real outbound work goes through nostr relays (out-only). There's no inbound need; reverse proxy + auth would just complicate the threat model. |
-| Boltz endpoint | **SDK default** (no explicit override) | `ArkadeSwaps.create` defaults to `api.boltz.exchange`, the same endpoint the arkade.money production wallet uses, with lower submarine fees (0.1% vs 0.25%) than `api.ark.boltz.exchange`. The d.ts docstring incorrectly claims the latter is the default — we verified the actual default in the compiled SDK. |
+| Lightning infrastructure | **The operator's own solver + subdustd + emulator, from `data/config.json`** | The swap client's defaults reach Ark Labs — its discovery registry, and the emulator key a send's instant-refund covenant leaf depends on. Overridden: our solver's card is the only discovery snapshot, and `emulatorPubkey` is ours, so no refund path hangs on a third party. Receives go through subdustd for every amount because the solver's hold invoice cannot carry a NIP-57 description hash (D10). |
 
 ## 3. Architecture
 
@@ -63,9 +66,9 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 │  get_info / get_balance / make_invoice / pay_invoice │
 │  lookup_invoice / list_transactions                  │
 ├──────────────────────────────────────────────────────┤
-│  Wallet Layer   (@arkade-os/sdk + @arkade-os/boltz)  │
-│  ArkadeSwaps with SwapManager auto-claim/refund      │
-│  SqliteSwapRepository for resume-across-restarts     │
+│  Wallet Layer   (@arkade-os/sdk + @arkade-os/swap)   │
+│  swap client (solver sends, drive auto-refund) +     │
+│  atomic client (subdustd: receives, sub-dust sends)  │
 ├──────────────────────────────────────────────────────┤
 │  Storage Layer  (bun:sqlite + WAL)                   │
 └──────────────────────────────────────────────────────┘
@@ -79,8 +82,8 @@ liquidity. Main use case: zapping from a nostr client like Amethyst.
 ```
 
 All outbound:
-- ASP (`https://arkade.computer`)
-- Boltz mainnet (`api.boltz.exchange`)
+- ASP (the operator's arkd)
+- The operator's intent solver and subdustd (private network)
 - Nostr relays (`wss://…`)
 
 No inbound except local HTTP on loopback.
@@ -98,12 +101,12 @@ without a bridge restart.
 `nostr.outbox` → shared pool + DB (none). Subscribes on bootstrap
 relays, emits an outbox-change callback on every distinct 10002.
 
-`nostr.service` → shared pool + DB + handlers + boltz SDK. Takes the
-pool as a constructor parameter; doesn't construct its own.
+`nostr.service` → shared pool + DB + handlers + Lightning rails. Takes
+the pool as a constructor parameter; doesn't construct its own.
 
-`handlers` → DB + boltz SDK. Don't know about nostr/web.
+`handlers` → DB + `ln_send` / `ln_receive`. Don't know about nostr/web.
 
-`boltz` → DB (for the SwapRepository).
+`solver_rail` / `swap_store` → DB (the swap client's own tables).
 
 `index.ts` is the only place that owns the shared SimplePool. It
 wires `pool.onRelayConnectionSuccess/Failure` once, then dispatches
@@ -181,7 +184,7 @@ transactions (
   amount_msat         INTEGER NOT NULL,
   fees_paid_msat      INTEGER,
   description         TEXT,
-  swap_id             TEXT,                       -- BoltzSwap.id
+  swap_id             TEXT,                       -- solver swap id (rfq:…) or atomic swap id
   state               TEXT    NOT NULL,           -- pending|settled|failed|expired
   preimage            TEXT,
   error               TEXT,
@@ -199,11 +202,10 @@ processed_events (
   processed_at        INTEGER NOT NULL
 )
 
--- @arkade-os/boltz-swap's SwapRepository backing store. id/type/
--- status/created_at indexed; full BoltzSwap object is a JSON blob
--- in `data`. We never query swap internals from the bridge — the
--- SDK does — so normalizing per-variant fields would only couple us
--- to its data shape.
+-- Boltz era (until 2026-11): @arkade-os/boltz-swap's repository.
+-- Kept because migrations are append-only; nothing reads it now. The
+-- swap client's own tables (prefix swapclient_) are created by the
+-- client itself, outside the migrations (src/swap_store.ts).
 boltz_swaps (
   id          TEXT    PRIMARY KEY,
   type        TEXT    NOT NULL,    -- 'reverse' | 'submarine' | 'chain'
@@ -235,41 +237,34 @@ UI collapses these two buckets in its main balance number for the
 same reason.
 
 ### `make_invoice` (LN → Ark)
-> Dropped 2026-06-28 ("one receive path, less surface"), revived once the
-> receive core was extracted: `issueInvoice` (`src/ln_receive.ts`) serves both
-> the CLINK noffer and `make_invoice`, so the sub-dust branch exists exactly
-> once and the NWC entry point only adds its own bookkeeping.
+`issueInvoice` (`src/ln_receive.ts`) serves both the CLINK noffer and
+`make_invoice`, so the receive path exists exactly once and the NWC entry
+point only adds its own bookkeeping.
 
 1. msat → sat; reject non-multiple-of-1000. Optional `description_hash`
    (64-hex) passes through to the invoice — a client serving its own
-   LNURL/zap flow can commit its descriptionHash. A plaintext `description`
-   is dropped on the sub-dust branch (the atomic receive route takes only
-   amount/paymentHash/userPubkey/descriptionHash — same trade-off CLINK makes).
-2. `issueInvoice` — ≥330 sats: `swaps.createLightningInvoice` reverse swap
-   (BOLT11 + payment_hash + expiry; `result.amount` is the post-fee on-Ark
-   amount). <330 sats: POST `/v2/subdust/atomic/receive/init` against our
-   payment hash mints a **hold** invoice; on payment boltz funds a shared
-   4-leaf vtxo and pre-signs the claim, we verify it and claim `a` out of that
-   output as a split, revealing the preimage boltz needs to settle. Atomic in
+   LNURL/zap flow commits its descriptionHash. A plaintext `description`
+   becomes the memo when no hash is given (BOLT11 carries one or the other).
+2. `issueInvoice` — every amount: generate the preimage, POST
+   `/v2/subdust/atomic/receive/init` to subdustd with our payment hash; it
+   mints a **hold** invoice (503 when its float cannot fund the amount — no
+   unpayable invoice is ever issued). On payment subdustd funds a shared
+   4-leaf vtxo and pre-signs the claim; we verify it and claim `a` out of
+   that output, revealing the preimage subdustd needs to settle. Atomic in
    both directions — see [ATOMIC_SUBDUST_PLAN.md](ATOMIC_SUBDUST_PLAN.md).
+   (The solver's hold invoice was the alternative above dust; it has no
+   description hash, so zaps would lose their NIP-57 receipts — D10.)
 3. Write a pending `transactions` row with `amount_msat` = the BOLT11
    nominal (exactly what the client asked for — the invoice is never
-   inflated), `fees_paid_msat` = the swap provider's cut that will come
-   out of what lands on Ark (0 on the sub-dust branch), and `swap_id`
-   only on the swap branch — `swap_id IS NULL` is how the reconciler
-   recognizes sub-dust rows.
-4. Return the invoice immediately. Settlement is asynchronous:
-   - swap branch: Boltz drops a VHTLC once the LN side is paid; the
-     `SwapManager` auto-claims it; `onSwapCompleted` → `syncSwapToDb` flips
-     the row (boot backstop: `reconcilePendingIncoming`).
-   - sub-dust branch: no swap object → no settlement event, ever.
-     `reconcileAtomicReceives` (`src/ln_receive.ts`, same 30s cadence as the
-     CLINK ack reconciler) polls `/v2/subdust/atomic/receive/status` and
-     drives the swap forward: once boltz is funded and pre-signed, verify →
-     claim → settle, then row `settled` (+preimage, which was ours all
-     along); unsettled past the BOLT11 expiry (+15 min HTLC grace) →
-     `expired`. Clients observe it through `lookup_invoice` /
-     `list_transactions` polling (we advertise no notifications).
+   inflated), `fees_paid_msat` = 0 (receives are 1:1), `swap_id` NULL —
+   the reconciler matches the row by payment hash.
+4. Return the invoice immediately. Settlement is asynchronous: no swap
+   event exists, so `reconcileAtomicReceives` (30s, plus subdustd ws pokes)
+   polls `/receive/status` and drives the swap: once funded and
+   pre-signed, verify → claim → settle, then row `settled` (+preimage, ours
+   all along); unsettled past the BOLT11 expiry (+15 min HTLC grace) →
+   `expired`. Clients observe it through `lookup_invoice` /
+   `list_transactions` polling (we advertise no notifications).
 
 ### `pay_invoice` (Ark → LN)
 1. `decodeInvoice` for amount/payment_hash. Reject 0-amount invoices
@@ -280,18 +275,24 @@ same reason.
    concurrent requests can't jointly overshoot the cap.
 3. Insert pending `transactions` row with `amount_msat = invoiceMsat`
    — the BOLT11 nominal, final from the start.
-4. `sendLightning` (`src/ln_send.ts`, shared with the dashboard LN
-   rail): a submarine swap ≥ dust, the atomic sub-dust send below it
-   (fund a shared 4-leaf vtxo whole-input, hand boltz a pre-signed claim
-   it can only take by paying). Auto-refunds on failure via `SwapManager`
-   above dust, via the T-refund executor below it.
-5. On success: `UPDATE` `fees_paid_msat = paidMsat − invoiceMsat`
-   (everything we paid beyond the nominal: swap fee + any drain
-   residue); `amount_msat` stays the nominal. Bump
-   `connections.spent_msat` by `paidMsat` — the fee-inclusive wallet
-   movement — in the same sqlite transaction (the row leaving
-   'pending' and the counter gaining it must be atomic — see
-   pay_invoice.ts). Return preimage.
+4. `sendLightning` (`src/ln_send.ts`, shared with the dashboard LN rail):
+   - ≥ dust: the swap client pays through our solver — the wallet funds a
+     covenant the solver can claim only with the payment's preimage
+     (funded through our coin policy, `withSpendPolicy`). The client's
+     drive refunds a failed payment by itself (at once through our
+     emulator, or after the timelock). The preimage is the one the drive
+     hash-verified on the solver's claim, re-checked here, or read off the
+     claim witness via arkd — never the solver's word.
+   - < dust: the atomic send against subdustd (fund a shared 4-leaf vtxo
+     whole-input, hand it a pre-signed claim it can only take by paying).
+5. On success: `fees_paid_msat = paidMsat − invoiceMsat`, `amount_msat`
+   stays the nominal, and `connections.spent_msat` gains `paidMsat` in the
+   same sqlite transaction (`settleOutgoing`, `src/ln_ledger.ts`). On an
+   outcome that is not yet known (`needs_recovery`, or subdustd holding the
+   presigs without answering) the row **stays pending** — the money may
+   still move — and the client gets INTERNAL "do not retry". The swap
+   listener (solver) or the atomic reconcile (sub-dust) settles it later;
+   both run at boot too, so a payment interrupted by a restart is recorded.
 
 ### `lookup_invoice` / `list_transactions`
 Read-only against `transactions`. **Scoped to the calling connection**
@@ -304,7 +305,7 @@ disambiguates.
 
 `transactions.amount_msat` = **the BOLT11 nominal**, both directions:
 the number payer and payee agreed on. `fees_paid_msat` = what WE paid
-to move it — the Boltz cut plus any drain residue; always ours, never
+to move it — the solver's fee (or the sub-dust share); always ours, never
 the payer's. Wallet movement is derived, never stored:
 
 - outgoing: debit = amount + fees (fee paid on top of the nominal)
@@ -322,9 +323,9 @@ zap history: NIP-57 receipt validation requires the bolt11 amount to
 equal the zap request's, so a 21-sat zap must read 21, not 20 or 22.
 Changed at the 2026-07 schema-epoch reset, together with the fee side
 of receives: the invoice is never inflated above what the client asked
-for — the payer pays the agreed number, and the swap cost comes out of
-what lands on Ark (the receiver's cost of the LN → Ark move, exactly
-like a merchant eating the card fee).
+for — the payer pays the agreed number, and any receive cost comes out
+of what lands on Ark (the receiver's cost of the LN → Ark move, exactly
+like a merchant eating the card fee). Receives are 1:1 today.
 
 ## 6. Why NIP-46 delegation is rejected
 
@@ -381,9 +382,9 @@ edit the source to deviate. They are:
 
 - `NETWORK` / `HTTP_BIND` / `HTTP_PORT` / `DB_PATH` — boring single
   values.
-- `ARK_SERVER_URL` / `BOLTZ_API_URL` — the *fallback* ASP pair. The
-  effective pair is chosen once at `/setup` and then frozen (below);
-  these serve as the setup pre-fill and the last-resort default.
+- `ARK_SERVER_URL` — the *fallback* Ark server. The effective one is
+  chosen once at `/setup` and then frozen (below); this serves as the
+  setup pre-fill and the last-resort default.
 - `OUTBOX_DISCOVERY_PUBKEY` — the operator's nostr pubkey, whose
   NIP-65 (kind 10002) outbox list is the source of truth for which
   relays new NWC connections will use.
@@ -395,20 +396,19 @@ edit the source to deviate. They are:
   `OUTBOX_INITIAL_TIMEOUT_MS` at boot. Keeps the bridge usable
   even with every bootstrap relay down.
 
-The identity (`nsec`) and the ASP pair (ark + boltz) are *not*
-constants — both are captured at the first `/setup` and persisted
-(the `nsec` in `accounts`, the pair in the single-row `bridge_server`
-table). The pair is then **immutable**: there is no multi-server
-wallet, so changing it means draining funds and starting from a fresh
-sqlite. See §2 *Identity input*.
+The identity (`nsec`) and the Ark server are *not* constants — both are
+captured at the first `/setup` and persisted (the `nsec` in `accounts`,
+the server in the single-row `bridge_server` table, whose `boltz_url`
+column is a Boltz-era leftover written empty). The server is then
+**immutable**: there is no multi-server wallet, so changing it means
+draining funds and starting from a fresh sqlite. See §2 *Identity input*.
 
-Effective ark/boltz precedence: `data/config.json` > `bridge_server`
-row > `defaults.ts`. A `data/config.json` that pins a URL (the
-docker / regtest override) still wins over the fresh-start row, so
-that path is unchanged; a disagreement is logged. The Boltz endpoint
-is our own instance either way — never the SDK default (§2, and
-operating principle #2 in the workspace CLAUDE.md), so `swapProvider`
-stays explicit.
+Effective Ark server precedence: `data/config.json` > `bridge_server`
+row > `defaults.ts`. A `data/config.json` that pins the URL (the docker /
+regtest override) still wins over the fresh-start row; a disagreement is
+logged. Lightning is `data/config.json`-only (`lightning`: solver URL +
+card, subdustd URL, emulator key), parsed strictly; absent, the bridge
+boots Ark-only and the LN methods refuse.
 
 ### Two-phase boot
 
@@ -417,24 +417,24 @@ inspects the `accounts` table:
 
 - **No row** → start the web server in *setup mode*. Every route
   except `/setup` redirects there. POST `/setup` parses or generates
-  an nsec, then **validates the chosen ark/boltz** (arkd `getInfo`
-  network assert + boltz reachability) *before* writing anything —
+  an nsec, then **validates the chosen Ark server** (arkd `getInfo`
+  network assert) *before* writing anything —
   the choice is immutable, so a typo'd or wrong-network URL would
   brick the install (or strand funds on an unreachable chain). On
   success it writes the `bridge_server` row and the account row
   together and calls `bootReady` in-process to bring up wallet →
-  boltz → nostr. On `bootReady` failure BOTH rows are deleted so the
+  Lightning rails → nostr. On `bootReady` failure BOTH rows are deleted so the
   user can retry cleanly (the /setup response includes the generated
   nsec on failure so a generate-mode crash doesn't silently lose the
   key).
 - **Row exists** → call `bootReady` synchronously (it resolves
-  ark/boltz from the `bridge_server` row, backfilling it from
+  the Ark server from the `bridge_server` row, backfilling it from
   defaults for a pre-v4 DB), then start the web server in *ready
   mode*.
 
 The mutable handle lives in `AppStateRef` ([`src/web/server.ts`](src/web/server.ts)).
 Shutdown checks `state.current.mode` so SIGINT during setup mode
-skips wallet/boltz/nostr disposal (nothing to dispose yet).
+skips wallet/Lightning/nostr disposal (nothing to dispose yet).
 
 ## 9. Known footguns / known issues
 
@@ -443,21 +443,20 @@ skips wallet/boltz/nostr disposal (nothing to dispose yet).
   as it's running. Extended downtime → swept VTXOs → recoverable via
   `wallet.getVtxoManager().recoverVtxos()` (not currently surfaced
   through the UI). 24/7 uptime is the design assumption.
-- **Mainnet, alpha SDKs**: `@arkade-os/sdk` and Boltz Ark plumbing
-  are still alpha. Operate with small amounts.
+- **Mainnet, alpha SDKs**: `@arkade-os/sdk` and `@arkade-os/swap` are
+  still alpha. Operate with small amounts.
 - **`processed_events` retention**: grows monotonically. At zap-
   level volume this is fine for years; eventually a retention
   policy would matter.
 - **`db.exec` deprecation hint**: Bun's typings flag the current
   `db.exec(sql)` signature as deprecated. No runtime issue, just
   a hint to clean up when the replacement API stabilizes.
-- **Wallet-handler crash recovery for `pay_invoice`**: If the
-  process dies *after* `sendLightningPayment` settled on Boltz but
-  *before* our row UPDATE, the row stays `pending` and there's no
-  reconcile path for the outgoing side (only incoming). Recovery
-  would need to fetch the swap by payment_hash on boot — not
-  implemented because handler crashes mid-await are vanishingly
-  rare for a single-user bridge.
+- **Crash recovery for `pay_invoice`** (fixed 2026-11): a payment whose
+  handler never returned is settled at the next boot — the swap client
+  replays every known swap to the ledger listener (matched by swap id, or
+  by payment hash when the crash beat the link), and sub-dust sends are
+  matched to their atomic swap row (`reconcileAtomicSendRows`). Before,
+  only the sub-dust side had a reconcile.
 - **`@bitcoinerlab/descriptors-core` boot error**: rarely on boot
   Bun throws `require() async module ... unsupported` for that
   dep; retrying boots cleanly. Looks like a transient ESM/CJS

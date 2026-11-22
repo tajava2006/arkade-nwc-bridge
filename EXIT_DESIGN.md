@@ -19,7 +19,7 @@ a VTXO's escape route is a chain of pre-signed transactions the ASP hands out on
 request. Unilateral exit is: take that chain, broadcast it to the blockchain
 (unrolling the tree back to a leaf), wait out a CSV timelock, then spend to a
 plain address you alone control. The whole point is that it must work **with no
-ASP and no Boltz** — otherwise "self-custodial" is a promise the infrastructure
+ASP and no swap service** — otherwise "self-custodial" is a promise the infrastructure
 can't keep in the one moment it matters.
 
 Three facts shape everything:
@@ -299,10 +299,14 @@ exit tab works, and ready-only routes bounce to the status page. A 60s loop
 retries the full bring-up and promotes to ready in place; open tabs reload on a
 `mode-change` SSE event.
 
-**Whole-or-degraded, on purpose.** A partial-ready state (wallet up, Boltz down)
-would fork `AppState` into per-subsystem availability flags for a rare, transient
-condition the retry loop already heals — not worth the complexity. This also
-covers a Boltz-only outage: a transient Boltz failure alone used to crash boot.
+**Whole-or-degraded, on purpose.** A partial-ready state (wallet up, a swap
+service down) would fork `AppState` into per-subsystem availability flags for a
+rare, transient condition the retry loop already heals — not worth the
+complexity. The Lightning rails don't gate boot at all: the solver is not
+contacted at boot (its card is local config, the swap client's restore read is
+the bridge's own sqlite) and subdustd is only polled, so either one being down
+degrades Lightning, never the wallet. (A transient Boltz failure used to crash
+boot.)
 
 `bootReady` carries an **undo stack**: with a retry loop, a failure past
 `initArkWallet` would otherwise leak a `VtxoManager` poll + SSE watcher set per

@@ -72,11 +72,10 @@ export function connectionDetailView(args: {
       <p class="muted">
         Amount is the invoice's face value — the number both sides agreed
         on. Fee is the Ark ↔ Lightning swap service charge, paid by this
-        wallet to Boltz on both directions, never by the counterparty: a
-        send actually debits amount + fee, a receive actually credits
-        amount − fee. In exchange the swap service covers Lightning
-        routing on sends, and whoever pays your invoice pays exactly its
-        face value, nothing on top.
+        wallet, never by the counterparty: a send actually debits amount +
+        fee (the solver's quote, which covers Lightning routing); receives
+        carry no fee, so whoever pays your invoice pays exactly its face
+        value and that much lands here.
       </p>
       ${transactions.length === 0
         ? html`<p class="muted">No NWC activity on this connection yet.</p>`
