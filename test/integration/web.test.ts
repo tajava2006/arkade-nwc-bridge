@@ -142,6 +142,11 @@ function readyState(): AppStateRef {
       boltzApiUrl: 'https://stub',
       wallet,
       swaps: makeSwapsStub() as ArkadeSwaps,
+      // The solver quotes 2500-sat invoices at a 5-sat fee.
+      lightning: {
+        solver: { client: { quote: async () => ({ give: { amount: 250_005n } }) } } as never,
+        subdustdUrl: 'http://subdustd.invalid',
+      },
       nostr: STUB_NOSTR,
       offers: STUB_OFFERS,
       pool: STUB_POOL,
@@ -362,7 +367,8 @@ describe('web server', () => {
     expect(res.status).toBe(200)
     const body = await res.text()
     expect(body).toContain('Lightning payment')
-    expect(body).toContain('Swap fee')
+    expect(body).toContain('Fee')
+    expect(body).toContain('5 sats')
     expect(body).toContain('Total leaving wallet')
   })
 

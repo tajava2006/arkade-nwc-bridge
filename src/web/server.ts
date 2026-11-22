@@ -2,7 +2,6 @@ import type { Database } from 'bun:sqlite'
 import type { Wallet, WalletBalance, RestArkProvider } from '@arkade-os/sdk'
 import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import { decodeInvoice } from '../lib/bolt11'
-import { SqliteSwapRepository } from '../boltz_repository'
 
 import type { Config } from '../config'
 import { readServerOverrides } from '../config'
@@ -103,6 +102,8 @@ import {
   classifyDestination,
   classifyVtxos,
   lightningPreview,
+  quoteLightningTotal,
+  type LnPreview,
   offboardDustChange,
   offboardFeeSat,
   offboardMaxSat,
@@ -499,7 +500,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               arkAddress: r.ready.arkAddress,
               boardingAddress: r.ready.boardingAddress,
               onboardingFeeProgram: r.ready.onboardingFeeProgram,
-              reverseFeePct: r.ready.caches.sendData.snapshot().value?.fees.reverse.percentage ?? null,
               noffer: r.ready.offers.snapshot().noffer,
               offerRelay: r.ready.offers.getRelayStatus(),
               activeConnections: active.length,
@@ -1047,7 +1047,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             swapsView({
               swaps: new SqliteAtomicSwapRepository(db).list(),
-              dustSwaps: await new SqliteSwapRepository(db).getAllSwaps({ orderDirection: 'desc' }),
+              solverSends: r.ready.lightning
+                ? (await r.ready.lightning.solver.client.swaps()).filter((s) => s.route.take.corridor === 'lightning')
+                : [],
               nowSec: Math.floor(Date.now() / 1000),
               notice: msg ? { ok: url.searchParams.get('ok') === '1', text: msg } : undefined,
             }),
@@ -1169,15 +1171,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }
             if (!result.ok) return sendError('clink', clinkErrorMessage(result))
 
-            let clinkPreview
-            try {
-              clinkPreview = lightningPreview(result.bolt11, await ready.swaps.getFees())
-            } catch (err) {
-              return sendError('clink', `offer returned an invalid invoice: ${errMsg(err)}`)
-            }
-            if (!clinkPreview.amountSats || clinkPreview.amountSats <= 0) {
-              return sendError('clink', 'offer returned a 0-amount invoice')
-            }
+            const clinkPreview = await previewInvoice(ready, result.bolt11)
+            if (typeof clinkPreview === 'string') return sendError('clink', `offer invoice: ${clinkPreview}`)
             return htmlResponse(
               sendConfirmView({
                 title: 'CLINK offer (Lightning)',
@@ -1187,25 +1182,16 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 rows: [
                   { label: 'Payee', value: clinkPreview.payee ?? '—' },
                   { label: 'Description', value: clinkPreview.description || '—' },
-                  { label: 'Invoice amount', value: fmtSats(clinkPreview.amountSats) },
-                  { label: 'Swap fee', value: fmtSats(clinkPreview.feeSat) },
-                  { label: 'Total leaving wallet', value: fmtSats(clinkPreview.totalSat) },
+                  ...lnFeeRows(clinkPreview),
                 ],
-                note: 'Resolved from a CLINK noffer to a Lightning invoice. Confirm pays the invoice; LN routing is handled by Boltz out of the swap fee.',
+                note: `Resolved from a CLINK noffer to a Lightning invoice. Confirm pays the invoice. ${lnRailNote(clinkPreview)}`,
               }),
             )
           }
 
           if (rail === 'lightning') {
-            let preview
-            try {
-              preview = lightningPreview(destination, await ready.swaps.getFees())
-            } catch (err) {
-              return sendError('lightning', `invalid invoice: ${errMsg(err)}`)
-            }
-            if (!preview.amountSats || preview.amountSats <= 0) {
-              return sendError('lightning', '0-amount invoices are not supported')
-            }
+            const preview = await previewInvoice(ready, destination)
+            if (typeof preview === 'string') return sendError('lightning', preview)
             return htmlResponse(
               sendConfirmView({
                 title: 'Lightning payment',
@@ -1215,11 +1201,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 rows: [
                   { label: 'Payee', value: preview.payee ?? '—' },
                   { label: 'Description', value: preview.description || '—' },
-                  { label: 'Invoice amount', value: fmtSats(preview.amountSats) },
-                  { label: 'Swap fee', value: fmtSats(preview.feeSat) },
-                  { label: 'Total leaving wallet', value: fmtSats(preview.totalSat) },
+                  ...lnFeeRows(preview),
                 ],
-                note: 'LN routing is handled by Boltz out of this fee — the total above is what leaves your wallet.',
+                note: lnRailNote(preview),
               }),
             )
           }
@@ -1633,4 +1617,52 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     },
     url: `http://${cfg.httpBind}:${server.port}`,
   }
+}
+
+/**
+ * The /send confirm breakdown for a bolt11: decoded, then priced by the rail
+ * that would pay it — a live solver quote for dust and up (nothing funded),
+ * none for sub-dust (subdustd fixes its fee when the swap starts). A string is
+ * the user-facing refusal.
+ */
+async function previewInvoice(
+  ready: { lightning?: LightningRails; arkProvider: { getInfo(): Promise<{ dust: bigint }> } },
+  invoice: string,
+): Promise<LnPreview | string> {
+  if (!ready.lightning) return 'this wallet has no Lightning rail configured'
+  let dust: number
+  try {
+    dust = Number((await ready.arkProvider.getInfo()).dust)
+  } catch (err) {
+    return `could not read the ASP's dust limit: ${(err instanceof Error ? err.message : String(err))}`
+  }
+  let preview: LnPreview
+  try {
+    preview = lightningPreview(invoice, dust)
+  } catch (err) {
+    return `invalid invoice: ${(err instanceof Error ? err.message : String(err))}`
+  }
+  if (!preview.amountSats || preview.amountSats <= 0) return '0-amount invoices are not supported'
+  try {
+    const total = await quoteLightningTotal(ready.lightning.solver.client, invoice, dust)
+    return total === undefined ? preview : lightningPreview(invoice, dust, total)
+  } catch (err) {
+    return `the solver would not quote this invoice: ${(err instanceof Error ? err.message : String(err))}`
+  }
+}
+
+function lnFeeRows(p: LnPreview): Array<{ label: string; value: string }> {
+  if (p.feeSat === null || p.totalSat === null) {
+    return [{ label: 'Fee', value: 'set by subdustd when the swap starts (sub-dust rail)' }]
+  }
+  return [
+    { label: 'Fee', value: `${p.feeSat.toLocaleString()} sats` },
+    { label: 'Total leaving wallet', value: `${p.totalSat.toLocaleString()} sats` },
+  ]
+}
+
+function lnRailNote(p: LnPreview): string {
+  return p.rail === 'solver'
+    ? 'Paid through our solver: the fee is its live quote (a percentage plus a routing estimate), and the total above is what leaves your wallet. If the payment fails, the funds come back.'
+    : 'Below dust, paid through subdustd\'s atomic swap: the invoice amount plus a small fee leaves the wallet. If the payment fails, the funds come back.'
 }

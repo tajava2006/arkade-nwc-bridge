@@ -141,19 +141,12 @@ function onboardingFeeNote(program: string | undefined): string {
 }
 
 /**
- * The Lightning card's fee sentence, from the live Boltz fee table (reverse =
- * receive direction). Same idea as the boarding note: policy is 0% on receive,
- * but the sentence follows the config. `null` = fee table not fetched yet —
- * claim nothing rather than promising free.
+ * The Lightning card's fee sentence. Receives are 1:1 — every receive is an
+ * atomic receive against the operator's subdustd, which charges nothing on
+ * that leg (D10) — so there is no fee table to follow any more.
  */
-function lnReceiveFeeNote(reverseFeePct: number | null): string {
-  if (reverseFeePct === 0) {
-    return 'Fee: none — the invoiced amount lands on Ark in full. The sender covers their own Lightning routing fee (variable), as with any LN payment.'
-  }
-  if (reverseFeePct === null) {
-    return 'The sender covers their own Lightning routing fee (variable), as with any LN payment.'
-  }
-  return `Fee: a ${reverseFeePct}% swap fee comes out of what lands on Ark, plus Lightning routing the sender pays (variable).`
+function lnReceiveFeeNote(): string {
+  return 'Fee: none — the invoiced amount lands on Ark in full. The sender covers their own Lightning routing fee (variable), as with any LN payment.'
 }
 
 export function dashboardView(args: {
@@ -162,8 +155,6 @@ export function dashboardView(args: {
   arkAddress: string
   boardingAddress: string
   onboardingFeeProgram?: string
-  /** Boltz reverse-swap (receive) fee %, from the send-data cache; null until fetched. */
-  reverseFeePct: number | null
   noffer: string
   offerRelay: RelayStatus
   activeConnections: number
@@ -202,7 +193,7 @@ export function dashboardView(args: {
           <h3>Lightning (CLINK noffer)</h3>
           <div class="qr-box">${raw(qrSvg(args.noffer))}</div>
           <pre>${args.noffer}</pre>
-          <p class="muted">Static, Nostr-native — no web server, no Lightning Address domain. A CLINK payer scans it, names an amount, and the invoice settles onto Ark. ${lnReceiveFeeNote(args.reverseFeePct)}</p>
+          <p class="muted">Static, Nostr-native — no web server, no Lightning Address domain. A CLINK payer scans it, names an amount, and the invoice settles onto Ark. ${lnReceiveFeeNote()}</p>
           <p class="muted">Relay <code>${relay.url}</code> ${relayBadge} — the code embeds this one relay. If it keeps dropping, regenerate to mint a fresh one from your current outbox relay (this invalidates the code above, so update wherever you shared it).</p>
           <form method="post" action="/noffer/regenerate" onsubmit="return confirm('Regenerate the noffer? The current code will stop working.');">
             <button type="submit">Regenerate noffer</button>

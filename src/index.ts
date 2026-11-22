@@ -509,20 +509,16 @@ async function main(): Promise<void> {
           fetcher: () => wallet.getBalance(),
           minIntervalMs: 2000,
         }),
-        // /send's breakdown needs ArkInfo (dust + fee programs), the full VTXO
-        // set and the boltz fee table (LN drain hint) together — fetched in
-        // parallel so the page renders from a snapshot instead of blocking on
-        // sequential round-trips. The set churns, but we push the whole table
-        // fragment over SSE (no diffing).
+        // /send's breakdown needs ArkInfo (dust + fee programs) and the full
+        // VTXO set together — fetched in parallel so the page renders from a
+        // snapshot instead of blocking on sequential round-trips. The set
+        // churns, but we push the whole table fragment over SSE (no diffing).
+        // LN fees aren't here: the solver quotes each invoice at preview.
         sendData: new AsyncCache<SendData>({
           label: 'send-data',
           fetcher: async () => {
-            const [arkInfo, vtxos, fees] = await Promise.all([
-              arkProvider.getInfo(),
-              wallet.getVtxos({ withRecoverable: true }),
-              swaps.getFees(),
-            ])
-            return { arkInfo, vtxos, fees }
+            const [arkInfo, vtxos] = await Promise.all([arkProvider.getInfo(), wallet.getVtxos({ withRecoverable: true })])
+            return { arkInfo, vtxos }
           },
           minIntervalMs: 2000,
         }),
@@ -638,8 +634,7 @@ async function main(): Promise<void> {
         // CEL program for the onchain-input intent fee (onboarding); flat
         // configs look like "1000.0", rendered best-effort on the dashboard.
         onboardingFeeProgram = arkInfo.fees?.intentFee?.onchainInput
-        // `fees` reuses the boot-time getFees read from above.
-        caches.sendData.seed({ arkInfo, vtxos, fees })
+        caches.sendData.seed({ arkInfo, vtxos })
       } catch (err) {
         console.warn(
           `boot: send-data prefetch failed (onboarding fee + /send breakdown lazy-load): ${err instanceof Error ? err.message : err}`,

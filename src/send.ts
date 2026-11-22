@@ -8,7 +8,7 @@ import {
   type ExtendedVirtualCoin,
   type OperatorInfo,
 } from '@arkade-os/sdk'
-import type { FeesResponse } from '@arkade-os/boltz-swap'
+import type { SwapClient } from '@arkade-os/swap'
 import { decodeInvoice } from './lib/bolt11'
 import { decode as decodeBolt11 } from 'light-bolt11-decoder'
 
@@ -44,13 +44,13 @@ export function classifyDestination(raw: string): Rail | null {
 }
 
 /**
- * The reads the /send breakdown needs, fetched together: the two ark-side ones
- * plus the boltz fee table (for the LN drain hint — see lnDrainInvoiceSat).
+ * The reads the /send breakdown needs, fetched together. No Lightning fee
+ * table: the solver prices each invoice when asked (its fee includes a live
+ * routing estimate), so LN fees come from a quote at preview time.
  */
 export interface SendData {
   arkInfo: OperatorInfo
   vtxos: ExtendedVirtualCoin[]
-  fees: FeesResponse
 }
 
 export interface VtxoBuckets {
@@ -187,69 +187,53 @@ export function offboardDustChange(
   return { changeSat, maxKeepingChangeSat: candidate > 0 ? candidate : null }
 }
 
-/**
- * Boltz submarine-swap fee for paying a `amountSats` invoice. Deterministic:
- * the LN routing cost is Boltz's (covered by its margin / our boltz.conf
- * `swapInFee`), not charged to us per-route — we pay invoice + this fee up
- * front and Boltz takes responsibility for delivery. Matches the PWA's
- * calcSubmarineSwapFee. Ceil per Boltz's own rounding.
- */
-export function submarineFeeSat(fees: FeesResponse, amountSats: number): number {
-  const { percentage, minerFees } = fees.submarine
-  return Math.ceil((amountSats * percentage) / 100 + minerFees)
-}
-
-/**
- * Invoice amount whose LN-send total (invoice + Boltz fee) lands as close to
- * `targetSat` as possible without exceeding it — the number to show for
- * "empty this wallet over Lightning". Mirrors boltz's expectedAmount
- * arithmetic (`invoice + ceil(pct·invoice) + baseFee`; baseFee is 0 on ARK
- * but kept for formula fidelity). Because the fee is a ceil, some targets are
- * unreachable exactly — and the server's own ceil can disagree with ours by
- * ±1 sat at float boundaries — so this number is advisory: execution funds
- * the swap all-in and folds a residue of up to DRAIN_SLACK_SATS into the
- * swap margin (see ln_send.ts), never stranding it as sub-dust change.
- * Null when no positive invoice amount fits under the target.
- */
-export function lnDrainInvoiceSat(fees: FeesResponse, targetSat: number): number | null {
-  const p = fees.submarine.percentage / 100
-  const base = fees.submarine.minerFees
-  const total = (x: number) => x + Math.ceil(p * x) + base
-  let x = Math.floor((targetSat - base) / (1 + p))
-  if (x <= 0) return null
-  // Float estimate can land a step off in either direction; walk to the
-  // largest x whose total still fits.
-  while (total(x + 1) <= targetSat) x++
-  while (x > 0 && total(x) > targetSat) x--
-  return x > 0 ? x : null
-}
-
 export interface LnPreview {
   amountSats: number
   description: string
   paymentHash: string
   payee: string | undefined
-  feeSat: number
-  totalSat: number
+  /** Which rail pays it: our solver (dust and up) or subdustd (below dust). */
+  rail: 'solver' | 'subdust'
+  /** null when not known before sending (sub-dust: subdustd fixes it at init). */
+  feeSat: number | null
+  totalSat: number | null
 }
 
 /**
- * Pre-send breakdown for a bolt11 invoice: what's billed (invoice amount),
- * the Boltz swap fee, and the total that leaves the wallet. `decodeInvoice`
- * gives the typed amount/description/hash; the payee node key isn't in that
- * shape, so pull it best-effort from light-bolt11-decoder's raw sections.
+ * Pre-send breakdown for a bolt11 invoice: what's billed (invoice amount), the
+ * fee and the total that leaves the wallet. `quotedTotalSat` is the solver
+ * quote's give (fee included) for dust-and-up invoices; sub-dust ones have no
+ * quote — subdustd sets its fee when the swap starts. The payee node key isn't
+ * in decodeInvoice's shape, so it's pulled best-effort from the raw sections.
  */
-export function lightningPreview(invoice: string, fees: FeesResponse): LnPreview {
+export function lightningPreview(invoice: string, dust: number, quotedTotalSat?: number): LnPreview {
   const decoded = decodeInvoice(invoice)
-  const feeSat = submarineFeeSat(fees, decoded.amountSats)
+  const known = quotedTotalSat !== undefined
   return {
     amountSats: decoded.amountSats,
     description: decoded.description,
     paymentHash: decoded.paymentHash,
     payee: payeeNodeKey(invoice),
-    feeSat,
-    totalSat: decoded.amountSats + feeSat,
+    rail: decoded.amountSats < dust ? 'subdust' : 'solver',
+    feeSat: known ? quotedTotalSat - decoded.amountSats : null,
+    totalSat: known ? quotedTotalSat : null,
   }
+}
+
+/**
+ * The solver's quoted total (invoice + fee) for paying `invoice`, without
+ * accepting it — an RFQ to our own solver, nothing funded. Undefined below
+ * dust (that rail is subdustd's). Throws the solver's refusal (out of limits,
+ * no route) so the preview can show it before anything moves.
+ */
+export async function quoteLightningTotal(
+  client: Pick<SwapClient, 'quote'>,
+  invoice: string,
+  dust: number,
+): Promise<number | undefined> {
+  if ((decodeInvoice(invoice).amountSats ?? 0) < dust) return undefined
+  const q = await client.quote({ to: invoice })
+  return Number(q.give.amount)
 }
 
 function payeeNodeKey(invoice: string): string | undefined {

@@ -1,5 +1,4 @@
 import type { OperatorInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
-import type { FeesResponse } from '@arkade-os/boltz-swap'
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import { copyable, localTime } from './ui'
@@ -7,7 +6,6 @@ import type { OffboardRow } from '../../offboards'
 import {
   classifyVtxos,
   isExpiringSoon,
-  lnDrainInvoiceSat,
   offboardFeeSat,
   offboardMaxSat,
   type SendData,
@@ -119,13 +117,12 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
  * Standing "how do I empty this wallet" guidance, independent of the Max
  * button. Onchain: the offboard rail is the one path that always works — a
  * settlement round consumes sub-dust and swept/expired VTXOs directly, no
- * Refresh needed. Lightning: the drain works by making the invoice amount
- * fit the balance (lnDrainInvoiceSat) and needs a Refresh first whenever
- * sub-dust/swept funds exist, since those can't back an offchain send.
- * Amounts are computed from arkInfo + the boltz fee table, never hardcoded:
- * either fee config can change without this copy going stale.
+ * Refresh needed. Lightning: no exact drain amount any more — the solver's
+ * fee includes a live routing estimate, known only from a quote for a real
+ * invoice — so the copy says how to read the quote instead of promising a
+ * number. Amounts come from arkInfo, never hardcoded.
  */
-function drainHint(arkInfo: OperatorInfo, fees: FeesResponse, buckets: VtxoBuckets): RawHtml {
+function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets): RawHtml {
   if (buckets.roundTotalSat === 0) return html``
   const fee = offboardFeeSat(arkInfo, buckets.roundTotalSat)
   const dust = Number(arkInfo.dust)
@@ -149,28 +146,17 @@ function drainHint(arkInfo: OperatorInfo, fees: FeesResponse, buckets: VtxoBucke
             of 1–${(dust - 1).toLocaleString()} sats is rejected before anything moves.
           </p>`
 
-  // LN drain targets the full balance (Refresh is a free round, so the total
-  // is unchanged by it — the same invoice amount stays valid before/after).
-  const lnInvoice = lnDrainInvoiceSat(fees, buckets.roundTotalSat)
   const needsRefresh = buckets.subdustSat + buckets.recoverableSat > 0
-  const ln =
-    lnInvoice === null
-      ? html``
-      : needsRefresh
-        ? html`
-            <p class="muted">
-              <strong>Emptying the wallet — Lightning:</strong> hit Refresh first (free, the
-              total doesn't change), then pay a self-made invoice of exactly
-              <strong>${fmtSats(lnInvoice)}</strong>. Sub-dust/swept funds can't back an LN
-              send, so skipping the Refresh just fails cleanly before anything moves.
-            </p>`
-        : html`
-            <p class="muted">
-              <strong>Emptying the wallet — Lightning:</strong> pay a self-made invoice of
-              exactly <strong>${fmtSats(lnInvoice)}</strong> — the bridge funds the swap with
-              the entire balance, so nothing is left behind (a rounding residue of up to 2 sats
-              is folded into the swap fee instead of stranding as sub-dust).
-            </p>`
+  const ln = html`
+    <p class="muted">
+      <strong>Emptying the wallet — Lightning:</strong> ${needsRefresh
+        ? html`hit Refresh first (free, the total doesn't change) — sub-dust/swept funds can't back
+            an LN send. Then `
+        : html``}paste a self-made invoice: the confirm page shows the solver's live quote. A total
+      equal to your balance (or up to 2 sats under it) empties the wallet — those 2 sats stay as
+      recoverable sub-dust. A total that would leave 3–${(dust - 1).toLocaleString()} sats is
+      refused before anything moves; adjust the invoice amount by that difference.
+    </p>`
 
   return html`${onchain}${ln}`
 }
@@ -184,7 +170,7 @@ function drainHint(arkInfo: OperatorInfo, fees: FeesResponse, buckets: VtxoBucke
 export function renderBreakdownFragment(value: SendData | null): RawHtml {
   if (!value) return html`<p class="muted">Loading…</p>`
   const buckets = classifyVtxos(value.vtxos, value.arkInfo.dust)
-  return html`${breakdownTable(buckets)}${drainHint(value.arkInfo, value.fees, buckets)}`
+  return html`${breakdownTable(buckets)}${drainHint(value.arkInfo, buckets)}`
 }
 
 export function sendView(args: {
