@@ -1,14 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, getPublicKey, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
-import {
-  NetworkError,
-  isReverseFinalStatus,
-  isReverseSuccessStatus,
-  type ArkadeSwaps,
-  type BoltzReverseSwap,
-  type BoltzSwapStatus,
-} from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
 
 import { npubEncode } from 'nostr-tools/nip19'
@@ -21,7 +13,6 @@ import { SqliteAtomicSwapRepository, SwapDirection } from '../atomic'
 import { decryptContent, encryptContent } from '../nostr/crypto'
 import { openPersistentSub, type PersistentSub } from '../nostr/persistent_sub'
 import { normalizeRelayUrl, type OutboxWatcher } from '../nostr/outbox'
-import { confirmReverseLanded, type VtxoIndexer } from '../boltz'
 import type { RelayStatus } from '../lib/relay_status'
 import { nofferEncode, nofferDecode, OfferPriceType } from './nip19_offer'
 import { validateZapRequest, zapDescriptionHash, publishZapReceipt } from './zap'
@@ -89,7 +80,7 @@ export interface OfferServiceDeps {
   wallet: Wallet
   /** subdustd's API base; undefined = no Lightning rail (offers answer Temporary Failure). */
   subdustdUrl?: string
-  /** ASP (arkd) REST base — the atomic sub-dust receive needs server params. */
+  /** ASP (arkd) REST base — the receive's claim needs server params. */
   arkServerUrl: string
 }
 
@@ -254,12 +245,10 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
       ? payload.description
       : undefined
 
-  // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: a Boltz
-  // reverse swap ≥ dust (auto-claimed by the SwapManager; tracked in
-  // boltz_swaps, so the ack reconciler can look it up — no transactions row),
-  // the atomic sub-dust receive below it (no swap object — driven by
-  // reconcileAtomicReceives). Which branch we got decides where the ack
-  // bookkeeping lands.
+  // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: an atomic
+  // receive against subdustd for every amount (D10). There is no swap object
+  // to hang the ack on, so it is keyed on the payment hash and the reconcile
+  // pass sends it once the swap is settled locally.
   let issued: IssuedInvoice
   try {
     if (!ctx.subdustdUrl) throw new Error('no Lightning rail configured')
@@ -276,67 +265,29 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
     return
   }
 
-  if (issued.kind === 'subdust') {
-    // No swap to key the ack on — persist it on the invoice payment hash;
-    // reconcileClinkAcks asks boltz whether it settled and sends the CLINK
-    // receipt (with preimage).
-    ctx.db
-      .query(
-        `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING`,
-      )
-      .run(
-        issued.paymentHash,
-        event.pubkey,
-        event.id,
-        ctx.relay,
-        zap?.request ?? null,
-        zap ? issued.invoice : null,
-        Math.floor(Date.now() / 1000),
-      )
-  } else {
-    // Remember whom to ack once this swap settles (CLINK Payment Receipt).
-    // Keyed on swap id; the settlement hook (sendOfferReceipt) consumes it.
-    ctx.db
-      .query(
-        `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(swap_id) DO NOTHING`,
-      )
-      .run(
-        issued.swapId,
-        event.pubkey,
-        event.id,
-        ctx.relay,
-        zap?.request ?? null,
-        zap ? issued.invoice : null,
-        Math.floor(Date.now() / 1000),
-      )
-  }
+  // Persisted before the invoice goes out, so a payment that settles while we
+  // are down still gets its receipt (reconcileClinkAcks).
+  ctx.db
+    .query(
+      `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING`,
+    )
+    .run(
+      issued.paymentHash,
+      event.pubkey,
+      event.id,
+      ctx.relay,
+      zap?.request ?? null,
+      zap ? issued.invoice : null,
+      Math.floor(Date.now() / 1000),
+    )
 
   await respond(ctx, event, { bolt11: issued.invoice })
   console.log(
-    `clink: issued ${issued.kind === 'subdust' ? 'sub-dust ' : ''}invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`,
+    `clink: issued invoice for ${amount} sats to ${event.pubkey.slice(0, 8)}…`,
   )
 }
 
-interface ReceiptRow {
-  payer_pubkey: string
-  request_id: string
-  relay: string
-  // Present only for zap requests: the exact 9734 string + the BOLT11 it was
-  // committed into, needed to publish the 9735 receipt on settlement.
-  zap_request: string | null
-  zap_invoice: string | null
-}
-
-/**
- * Publish the spec's optional CLINK Payment Receipt (kind 21001
- * {res:'ok',preimage}) once an offer-originated reverse swap settles. Wired
- * to boltz's onReverseSettled (see index.ts). Looks the swap up in
- * clink_offer_receipts; if it's not one of ours (e.g. an NWC make_invoice
- * swap) it's a no-op. Best-effort: a down relay means the ack is lost, which
- * is fine — the payer's own wallet already confirmed the LN payment.
- */
 /**
  * Publish a CLINK Payment Receipt (kind 21001) to the payer on the relay their
  * request arrived on. Best-effort: a down relay just drops the ack (the payer's
@@ -370,7 +321,7 @@ async function publishReceipt(
 // Operator-DM line for a CLINK receive. Runs inside the notify thunk, so
 // JSON.parse/npubEncode throwing is the notifier's problem, never the ack
 // path's. Zaps override payer/amount from the 9734 (its `amount` is msat)
-// and carry the comment; plain offer payments fall back to the row + swap.
+// and carry the comment; plain offer payments fall back to the swap amount.
 function describeClinkReceive(
   row: { payer_pubkey: string; zap_request: string | null },
   amountSats: number | undefined,
@@ -411,123 +362,40 @@ function nofferHistoryDescription(row: { payer_pubkey: string; zap_request: stri
   }
 }
 
-export async function sendOfferReceipt(
-  deps: { pool: SimplePool; db: Database; secretKey: Uint8Array; notify?: NotifyFn },
-  swap: BoltzReverseSwap,
-): Promise<void> {
-  const row = deps.db
-    .query<ReceiptRow, [string]>(
-      'SELECT payer_pubkey, request_id, relay, zap_request, zap_invoice FROM clink_offer_receipts WHERE swap_id = ?',
-    )
-    .get(swap.id)
-  if (!row) return // not an offer swap (or already acked)
-
-  // Ledger row before the publish: a failed publish keeps the receipt row and
-  // reruns this funnel, so the (kind, ref) conflict clause absorbs retries —
-  // recording after would instead lose the row if the publish throws.
-  // fee = nominal − what lands on Ark (the reverse-swap cut), when known.
-  try {
-    const nominal = swap.request.invoiceAmount
-    const onArk = swap.response.onchainAmount
-    recordNofferReceive(deps.db, {
-      ref: swap.id,
-      amountSats: nominal,
-      feesMsat: typeof onArk === 'number' ? Math.max(0, nominal - onArk) * 1000 : null,
-      description: nofferHistoryDescription(row),
-    })
-  } catch (err) {
-    console.warn('clink: history record failed (non-fatal):', err)
-  }
-
-  // Single funnel for live (onReverseSettled) and boot/periodic reconcile —
-  // the row DELETE below is the existing dedup, so this fires once per swap.
-  deps.notify?.(
-    'recv-noffer',
-    () => `${describeClinkReceive(row, swap.request.invoiceAmount)} [swap ${swap.id.slice(0, 8)}]`,
-  )
-
-  await publishReceipt(deps, row, swap.preimage)
-  if (row.zap_request && row.zap_invoice) {
-    await publishZapReceipt(deps, row.zap_request, row.zap_invoice, swap.preimage)
-  }
-  deps.db.query('DELETE FROM clink_offer_receipts WHERE swap_id = ?').run(swap.id)
-  console.log(`clink: sent payment receipt to ${row.payer_pubkey.slice(0, 8)}… for swap ${swap.id.slice(0, 8)}…`)
-}
-
-interface SubdustReceiptRow {
+interface PendingReceiptRow {
   payment_hash: string
   payer_pubkey: string
   request_id: string
   relay: string
+  // Present only for zap requests: the exact 9734 string + the BOLT11 it was
+  // committed into, needed to publish the 9735 receipt on settlement.
   zap_request: string | null
   zap_invoice: string | null
   created_at: number
 }
 
-// Drop sub-dust pending acks the payer never paid (open invoices that expired or
-// were abandoned). The status endpoint only reports `settled`, so age is the
+// Drop pending acks the payer never paid (open invoices that expired or were
+// abandoned). The status endpoint only reports `settled`, so age is the
 // backstop. Generous so a still-payable invoice is never dropped early.
-const SUBDUST_ACK_TTL_SECONDS = 24 * 60 * 60
+const ACK_TTL_SECONDS = 24 * 60 * 60
 
 /**
- * Boot + periodic CLINK ack reconciler — makes acks restart-safe for BOTH
- * directions, since the SDK only fires onReverseSettled live (a swap that
- * settles while the bridge is down never gets its ack otherwise).
+ * Boot + periodic CLINK ack reconciler — makes receipts restart-safe: a
+ * receive that settles while the bridge is down (or whose live ack was lost)
+ * is acked here. Reads the local atomic_swaps row, which
+ * reconcileAtomicReceives drives to 'settled' — we already hold the preimage,
+ * subdustd is never asked. Settled → publish the receipt (+ preimage, + 9735
+ * for zaps) and delete the row; past the TTL → drop it.
  *
- *  - ≥dust (clink_offer_receipts): the swap is in the SDK's boltz_swaps mirror
- *    (re-synced from boltz on boot). Terminal-success → sendOfferReceipt (which
- *    publishes + deletes the row); terminal-failure → just drop the row.
- *  - sub-dust (clink_subdust_receipts): no swap object, so read the local
- *    atomic_swaps row (reconcileAtomicReceives drives it to 'settled' and we
- *    already hold the preimage — boltz is never asked). Settled → publish
- *    receipt (+ preimage) and delete; past TTL → drop.
- *
- * Best-effort and idempotent: rows that the live path already acked are gone, so
+ * Best-effort and idempotent: rows the live path already acked are gone, so
  * they're skipped; one row failing doesn't abort the rest.
  */
 export async function reconcileClinkAcks(deps: {
   pool: SimplePool
   db: Database
   secretKey: Uint8Array
-  boltzApiUrl: string
-  wallet: Wallet
-  /** arkd indexer — the M3 landing verification binds the swap's VHTLC spend to our wallet by txid. */
-  indexer: VtxoIndexer
   notify?: NotifyFn
 }): Promise<void> {
-  // ≥dust: drive off the small receipts table, PK-lookup boltz_swaps per row.
-  const offerRows = deps.db
-    .query<{ swap_id: string }, []>('SELECT swap_id FROM clink_offer_receipts')
-    .all()
-  for (const { swap_id } of offerRows) {
-    try {
-      const sw = deps.db
-        .query<{ status: string; data: string }, [string]>(
-          'SELECT status, data FROM boltz_swaps WHERE id = ?',
-        )
-        .get(swap_id)
-      if (!sw || !isReverseFinalStatus(sw.status as BoltzSwapStatus)) continue
-      if (isReverseSuccessStatus(sw.status as BoltzSwapStatus)) {
-        // M3: hold the receipt until the Ark vtxo has actually landed — boltz
-        // claiming success isn't enough. The atomic/sub-dust path is already
-        // verified (we hold the preimage), so this only applies to dust+ swaps.
-        const swap = JSON.parse(sw.data) as BoltzReverseSwap
-        if (!(await confirmReverseLanded(deps.wallet, deps.indexer, swap))) {
-          console.warn(
-            `clink: swap ${swap_id.slice(0, 8)} terminal-settled but Ark vtxo not confirmed (M3) — deferring receipt`,
-          )
-          continue
-        }
-        await sendOfferReceipt(deps, swap)
-      } else {
-        deps.db.query('DELETE FROM clink_offer_receipts WHERE swap_id = ?').run(swap_id)
-      }
-    } catch (err) {
-      console.warn(`clink: ack reconcile failed for swap ${swap_id.slice(0, 8)}…:`, err)
-    }
-  }
-
-  // sub-dust: publish acks for anything already settled; TTL-drop the rest.
   const now = Math.floor(Date.now() / 1000)
   const subRows = deps.db
     .query<{ payment_hash: string; created_at: number }, []>(
@@ -536,33 +404,33 @@ export async function reconcileClinkAcks(deps: {
     .all()
   for (const row of subRows) {
     try {
-      const acked = await sendSubdustAck(deps, row.payment_hash)
-      if (!acked && now - row.created_at > SUBDUST_ACK_TTL_SECONDS) {
+      const acked = await sendClinkAck(deps, row.payment_hash)
+      if (!acked && now - row.created_at > ACK_TTL_SECONDS) {
         deps.db.query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?').run(row.payment_hash)
       }
     } catch (err) {
       // transient — leave the row, retry next pass
-      console.warn(`clink: sub-dust ack reconcile failed for ${row.payment_hash.slice(0, 8)}…:`, err)
+      console.warn(`clink: ack reconcile failed for ${row.payment_hash.slice(0, 8)}…:`, err)
     }
   }
 }
 
 /**
- * Publish the CLINK receipt (+9735 for zaps) for ONE settled sub-dust receive,
- * keyed by payment hash. The targeted twin of the reconcile loop above, so a
- * settle detected live (reconcileAtomicReceives' return, or a boltz ws poke)
- * acks immediately instead of waiting a tick — the swap must already be
- * `settled` locally (we publish with OUR stored preimage, boltz is never
- * asked). No-op when there's no pending row (NWC-originated, or already
+ * Publish the CLINK receipt (+9735 for zaps) for ONE settled receive, keyed by
+ * payment hash — the single receipt funnel. The reconcile loop above calls it
+ * per pending row; a settle detected live (reconcileAtomicReceives' return, or
+ * a subdustd ws poke) calls it directly so the ack doesn't wait a tick. The
+ * swap must already be `settled` locally (we publish with OUR stored
+ * preimage). No-op when there's no pending row (NWC-originated, or already
  * acked) or the swap isn't settled yet. Returns true once the ack went out;
- * the row DELETE is the dedup, same as the ≥dust funnel.
+ * the row DELETE is the dedup.
  */
-export async function sendSubdustAck(
+export async function sendClinkAck(
   deps: { pool: SimplePool; db: Database; secretKey: Uint8Array; notify?: NotifyFn },
   paymentHash: string,
 ): Promise<boolean> {
   const row = deps.db
-    .query<SubdustReceiptRow, [string]>(
+    .query<PendingReceiptRow, [string]>(
       'SELECT payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at FROM clink_subdust_receipts WHERE payment_hash = ?',
     )
     .get(paymentHash)
@@ -571,14 +439,15 @@ export async function sendSubdustAck(
   const swap = new SqliteAtomicSwapRepository(deps.db).getByPaymentHash(paymentHash)
   if (swap?.direction !== SwapDirection.Receive || swap.state !== 'settled') return false
 
-  // Same before-publish placement + conflict-dedup rationale as the ≥dust
-  // funnel above. Sub-dust is 1:1 (no swap fee on the atomic path).
+  // Ledger row before the publish: a failed publish keeps the receipt row and
+  // reruns this funnel, so the (kind, ref) conflict clause absorbs retries —
+  // recording after would lose the row if the publish throws. 1:1, no fee.
   try {
     recordNofferReceive(deps.db, {
       ref: row.payment_hash,
       amountSats: swap.amount,
       feesMsat: 0,
-      description: `${nofferHistoryDescription(row)} (sub-dust)`,
+      description: nofferHistoryDescription(row),
     })
   } catch (err) {
     console.warn('clink: history record failed (non-fatal):', err)
@@ -586,14 +455,14 @@ export async function sendSubdustAck(
 
   deps.notify?.(
     'recv-noffer',
-    () => `${describeClinkReceive(row, swap.amount)} (sub-dust) [hash ${row.payment_hash.slice(0, 8)}]`,
+    () => `${describeClinkReceive(row, swap.amount)} [hash ${row.payment_hash.slice(0, 8)}]`,
   )
   await publishReceipt(deps, row, swap.preimage ?? undefined)
   if (row.zap_request && row.zap_invoice) {
     await publishZapReceipt(deps, row.zap_request, row.zap_invoice, swap.preimage ?? undefined)
   }
   deps.db.query('DELETE FROM clink_subdust_receipts WHERE payment_hash = ?').run(row.payment_hash)
-  console.log(`clink: sent sub-dust payment receipt to ${row.payer_pubkey.slice(0, 8)}…`)
+  console.log(`clink: sent payment receipt to ${row.payer_pubkey.slice(0, 8)}…`)
   return true
 }
 

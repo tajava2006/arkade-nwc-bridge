@@ -48,7 +48,7 @@ export interface AtomicReceiveDeps {
   notify?: NotifyFn
 }
 
-// CLINK-originated sub-dust receives are notified by reconcileClinkAcks with
+// CLINK-originated receives are notified by the CLINK ack funnel with
 // payer/zap detail — only NWC make_invoice ones are announced here. The gate
 // read is fenced so a db hiccup can't leak into the claim/settle path.
 function notifyReceiveSettled(
@@ -60,13 +60,9 @@ function notifyReceiveSettled(
       .query('SELECT 1 FROM clink_subdust_receipts WHERE payment_hash = ?')
       .get(swap.paymentHash)
     if (clinkOwned) return
-    deps.notify?.(
-      'recv-subdust',
-      () =>
-        `recv: LN invoice settled — ${swap.amount} sats (sub-dust) [hash ${swap.paymentHash.slice(0, 8)}]`,
-    )
+    deps.notify?.('recv-ln', () => `recv: LN invoice settled — ${swap.amount} sats [hash ${swap.paymentHash.slice(0, 8)}]`)
   } catch (err) {
-    console.warn('notifier: recv-subdust gate check failed:', err)
+    console.warn('notifier: recv-ln gate check failed:', err)
   }
 }
 

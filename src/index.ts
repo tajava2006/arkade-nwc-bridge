@@ -20,7 +20,7 @@ import { initBoltz, reconcilePendingIncoming, wholeScriptIndexer } from './boltz
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
-import { startOfferService, sendOfferReceipt, sendSubdustAck, reconcileClinkAcks } from './clink/offers'
+import { startOfferService, sendClinkAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
 import { watchSolverSends } from './ln_ledger'
 import type { LightningRails } from './ln_send'
@@ -336,31 +336,6 @@ async function main(): Promise<void> {
         wallet,
         cfg: bootCfg,
         notify,
-        // When an offer-originated reverse swap settles, ack the payer with a
-        // CLINK Payment Receipt. No-op for NWC make_invoice swaps.
-        onReverseSettled: (swap) => {
-          try {
-            // Offer-originated settles are notified by sendOfferReceipt with
-            // payer/zap detail; only the non-CLINK ones (NWC make_invoice)
-            // are ours. The receipt row still exists here — it's deleted
-            // after the receipt publishes.
-            const offerOwned = db
-              .query('SELECT 1 FROM clink_offer_receipts WHERE swap_id = ?')
-              .get(swap.id)
-            if (!offerOwned) {
-              notify(
-                'recv-ln',
-                () =>
-                  `recv: LN invoice settled — ${swap.request.invoiceAmount} sats [swap ${swap.id.slice(0, 8)}]`,
-              )
-            }
-          } catch (err) {
-            console.warn('notifier: recv-ln gate check failed:', err)
-          }
-          sendOfferReceipt({ pool, db, secretKey: privateKey, notify }, swap).catch((err) =>
-            console.error('clink: receipt send failed:', err),
-          )
-        },
       })
       undo.push(() => swaps.dispose())
       const fees = await swaps.getFees()
@@ -397,7 +372,7 @@ async function main(): Promise<void> {
       // arkd indexer for M3's landing verification (exact VHTLC-spend → our-coin
       // txid binding) — same server the wallet trusts, never boltz.
       const reconcileIndexer = wholeScriptIndexer(bootCfg.arkServerUrl)
-      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, wallet, indexer: reconcileIndexer, notify }
+      const ackDeps = { pool, db, secretKey: privateKey, notify }
       // Atomic swaps (every receive, sub-dust sends) live on subdustd; without
       // a configured Lightning block there is nothing to drive them against.
       const subdustdUrl = lightning?.subdustdUrl
@@ -420,8 +395,8 @@ async function main(): Promise<void> {
             // (+9735) waits for the NEXT reconcile tick, because the ack pass
             // above was dispatched before this one settled the swap.
             for (const hash of settledHashes) {
-              void sendSubdustAck(ackDeps, hash).catch((err) =>
-                console.error('clink: inline sub-dust ack failed:', err),
+              void sendClinkAck(ackDeps, hash).catch((err) =>
+                console.error('clink: inline ack failed:', err),
               )
             }
           })

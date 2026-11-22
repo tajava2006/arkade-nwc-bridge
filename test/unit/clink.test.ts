@@ -14,9 +14,8 @@ import {
   validateZapRequest,
   zapDescriptionHash,
 } from '../../src/clink/zap'
-import { sendOfferReceipt, sendSubdustAck } from '../../src/clink/offers'
+import { sendClinkAck } from '../../src/clink/offers'
 import { SqliteAtomicSwapRepository, SwapDirection } from '../../src/atomic'
-import type { BoltzReverseSwap } from '@arkade-os/boltz-swap'
 import { openTempDb } from '../helpers/db'
 
 // The noffer codec is vendored TLV/bech32 framing (the error-prone part) and
@@ -177,94 +176,7 @@ describe('publishZapReceipt (NIP-57 Appendix E)', () => {
   })
 })
 
-describe('sendOfferReceipt operator DM', () => {
-  const stubPool = (): SimplePool =>
-    ({
-      publish: (relays: string[]) => relays.map(() => Promise.resolve('ok')),
-    }) as unknown as SimplePool
-
-  const SWAP = {
-    id: 'swap-dm-1',
-    preimage: 'aa'.repeat(32),
-    request: { invoiceAmount: 500 },
-  } as unknown as BoltzReverseSwap
-
-  function insertReceiptRow(
-    db: import('bun:sqlite').Database,
-    over: { zapRequest?: string | null; zapInvoice?: string | null } = {},
-  ): void {
-    db.query(
-      `INSERT INTO clink_offer_receipts (swap_id, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      SWAP.id,
-      PAYER_PUB,
-      'req-1',
-      'wss://r',
-      over.zapRequest ?? null,
-      over.zapInvoice ?? null,
-      Math.floor(Date.now() / 1000),
-    )
-  }
-
-  test('zap: payer npub + 9734 amount (msat→sat) + comment, exactly once', async () => {
-    const temp = openTempDb()
-    try {
-      insertReceiptRow(temp.db, {
-        zapRequest: JSON.stringify({
-          pubkey: PAYER_PUB,
-          content: 'gm',
-          tags: [['amount', '21000']],
-        }),
-        zapInvoice: 'lnbc21fake',
-      })
-      const calls: Array<{ kind: string; text: string }> = []
-      const deps = {
-        pool: stubPool(),
-        db: temp.db,
-        secretKey: SERVICE_SK,
-        notify: (kind: string, build: () => string) => calls.push({ kind, text: build() }),
-      }
-      await sendOfferReceipt(deps as never, SWAP)
-      expect(calls.length).toBe(1)
-      expect(calls[0]!.kind).toBe('recv-noffer')
-      expect(calls[0]!.text).toContain('zap 21 sats')
-      expect(calls[0]!.text).toContain('"gm"')
-      expect(calls[0]!.text).toContain('npub1')
-
-      // The row DELETE is the dedup — a reconcile pass re-running the same
-      // swap finds nothing and stays silent.
-      await sendOfferReceipt(deps as never, SWAP)
-      expect(calls.length).toBe(1)
-    } finally {
-      temp.cleanup()
-    }
-  })
-
-  test('plain noffer payment falls back to the swap invoice amount', async () => {
-    const temp = openTempDb()
-    try {
-      insertReceiptRow(temp.db)
-      const calls: Array<{ kind: string; text: string }> = []
-      await sendOfferReceipt(
-        {
-          pool: stubPool(),
-          db: temp.db,
-          secretKey: SERVICE_SK,
-          notify: ((kind: string, build: () => string) =>
-            calls.push({ kind, text: build() })) as never,
-        },
-        SWAP,
-      )
-      expect(calls.length).toBe(1)
-      expect(calls[0]!.text).toContain('noffer payment 500 sats')
-    } finally {
-      temp.cleanup()
-    }
-  })
-})
-
-describe('sendSubdustAck (targeted, same-pass ack)', () => {
+describe('sendClinkAck (the single receipt funnel)', () => {
   const HASH = 'cd'.repeat(32)
 
   const stubPool = (published: unknown[] = []): SimplePool =>
@@ -308,13 +220,13 @@ describe('sendSubdustAck (targeted, same-pass ack)', () => {
       const published: unknown[] = []
       const deps = { pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }
 
-      expect(await sendSubdustAck(deps, HASH)).toBe(true)
+      expect(await sendClinkAck(deps, HASH)).toBe(true)
       expect(published.length).toBe(1) // CLINK receipt (no zap on this row)
       const left = temp.db.query('SELECT 1 FROM clink_subdust_receipts').get()
       expect(left).toBeNull()
 
       // Row gone → second call is a no-op (the reconcile loop can't double-ack).
-      expect(await sendSubdustAck(deps, HASH)).toBe(false)
+      expect(await sendClinkAck(deps, HASH)).toBe(false)
       expect(published.length).toBe(1)
     } finally {
       temp.cleanup()
@@ -328,10 +240,60 @@ describe('sendSubdustAck (targeted, same-pass ack)', () => {
       plantReceiptRow(temp.db)
       const published: unknown[] = []
       expect(
-        await sendSubdustAck({ pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }, HASH),
+        await sendClinkAck({ pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }, HASH),
       ).toBe(false)
       expect(published.length).toBe(0)
       expect(temp.db.query('SELECT 1 FROM clink_subdust_receipts').get()).not.toBeNull()
+    } finally {
+      temp.cleanup()
+    }
+  })
+
+  function plantZapRow(db: import('bun:sqlite').Database, zapRequest: string | null): void {
+    db.query(
+      `INSERT INTO clink_subdust_receipts (payment_hash, payer_pubkey, request_id, relay, zap_request, zap_invoice, created_at)
+       VALUES (?, ?, 'req-1', 'wss://r', ?, ?, ?)`,
+    ).run(HASH, PAYER_PUB, zapRequest, zapRequest ? 'lnbc21fake' : null, Math.floor(Date.now() / 1000))
+  }
+
+  test('operator DM, zap: payer npub + 9734 amount (msat→sat) + comment, exactly once', async () => {
+    const temp = openTempDb()
+    try {
+      plantReceive(temp.db, 'settled')
+      plantZapRow(temp.db, JSON.stringify({ pubkey: PAYER_PUB, content: 'gm', tags: [['amount', '21000']] }))
+      const calls: Array<{ kind: string; text: string }> = []
+      const deps = {
+        pool: stubPool(),
+        db: temp.db,
+        secretKey: SERVICE_SK,
+        notify: ((kind: string, build: () => string) => calls.push({ kind, text: build() })) as never,
+      }
+      expect(await sendClinkAck(deps, HASH)).toBe(true)
+      expect(calls).toHaveLength(1)
+      expect(calls[0]!.kind).toBe('recv-noffer')
+      expect(calls[0]!.text).toContain('zap 21 sats')
+      expect(calls[0]!.text).toContain('"gm"')
+      expect(calls[0]!.text).toContain('npub1')
+      expect(calls[0]!.text).not.toContain('sub-dust')
+      // The row DELETE is the dedup — a reconcile pass finds nothing and stays silent.
+      expect(await sendClinkAck(deps, HASH)).toBe(false)
+      expect(calls).toHaveLength(1)
+    } finally {
+      temp.cleanup()
+    }
+  })
+
+  test('operator DM, plain noffer payment: the swap amount', async () => {
+    const temp = openTempDb()
+    try {
+      plantReceive(temp.db, 'settled')
+      plantZapRow(temp.db, null)
+      const calls: Array<{ kind: string; text: string }> = []
+      await sendClinkAck(
+        { pool: stubPool(), db: temp.db, secretKey: SERVICE_SK, notify: ((kind: string, build: () => string) => calls.push({ kind, text: build() })) as never },
+        HASH,
+      )
+      expect(calls[0]!.text).toContain('noffer payment 21 sats')
     } finally {
       temp.cleanup()
     }
@@ -343,7 +305,7 @@ describe('sendSubdustAck (targeted, same-pass ack)', () => {
       plantReceive(temp.db, 'settled')
       const published: unknown[] = []
       expect(
-        await sendSubdustAck({ pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }, HASH),
+        await sendClinkAck({ pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }, HASH),
       ).toBe(false)
       expect(published.length).toBe(0)
     } finally {

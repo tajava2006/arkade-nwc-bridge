@@ -21,14 +21,13 @@ import { publishToRelays } from './publish'
  * implementation plan; kept here as the one list to extend.
  */
 export const NOTIFY_KINDS = [
-  'recv-ln', //       dust+ invoice settled (reverse swap)
+  'recv-ln', //       NWC invoice settled (atomic receive, any amount — D10)
   'recv-noffer', //   CLINK noffer/zap settled
-  'recv-subdust', //  atomic sub-dust receive settled
   'onboard', //       onchain boarding deposit detected / settled (boarding_history.ts)
-  'send-ln', //       dust+ invoice paid (submarine swap)
+  'send-ln', //       dust+ invoice paid (solver)
   'send-subdust', //  atomic sub-dust paid / claim recovered
   'send-fail', //     a send failed after its swap existed
-  'refund', //        atomic or submarine refund landed
+  'refund', //        atomic or solver-lockup refund landed
   'offboard', //      onchain offboard settled/failed
   'health-asp', //    proof sync failing/recovered (ASP reachability)
   'health-vault', //  vtxo quarantined / expired-unrefreshed batch
