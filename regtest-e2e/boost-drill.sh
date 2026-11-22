@@ -72,6 +72,51 @@ fee_of() { rpc getmempoolentry "$1" | jq -r '.fees.base'; }
 step "0. preflight — kill any leftover bridge"
 stop_bridge
 
+# Steps 13-16: the final send — prove control of a destination with BIP-322,
+# then move everything on the fuel P2TR there. FINAL_SEND_ONLY=1 runs just this
+# stage against the runtime a previous drill left behind (bridge restarted).
+final_send_stage() {
+  step "13. final send — challenge a destination we control"
+  read -r DEST_PRIV DEST_ADDR <<<"$(cd "$BRIDGE_REPO" && bun regtest-e2e/bip322-sign.ts new)"
+  curl -fsS -X POST --data-urlencode "address=$DEST_ADDR" -o /dev/null "$BRIDGE_URL/exit/dest"
+  CHALLENGE=$(sq "SELECT challenge FROM exit_dest WHERE id=1;")
+  [ -n "$CHALLENGE" ] || die "no challenge issued"
+  echo "  challenge: $CHALLENGE"
+
+  step "14. prove control (BIP-322 key-path) → verified"
+  SIG=$(cd "$BRIDGE_REPO" && bun regtest-e2e/bip322-sign.ts sign "$DEST_PRIV" "$CHALLENGE")
+  curl -fsS -X POST --data-urlencode "signature=$SIG" -o /dev/null "$BRIDGE_URL/exit/dest/verify" || die "verify rejected"
+  [ -n "$(sq "SELECT verified_at FROM exit_dest WHERE id=1;")" ] || die "signature not accepted"
+  echo "  ✅ verified ($(sq "SELECT scheme FROM exit_dest WHERE id=1;"))"
+
+  step "15. final send — everything on the fuel P2TR to the verified destination"
+  FUEL_ADDR=${FUEL_ADDR:-$(curl -fsS "$BRIDGE_URL/exit" | grep -oE 'bcrt1p[a-z0-9]{38,}' | head -1)}
+  FUEL_BEFORE=$(curl -fsS "${ESPLORA_URL}/address/${FUEL_ADDR}/utxo" | jq '[.[].value] | add // 0')
+  [ "$FUEL_BEFORE" -gt 0 ] || die "fuel P2TR is empty — nothing to send"
+  HTTP=$(curl -sS -X POST -o "${RUNTIME_DIR}/final-send-response.html" -w '%{http_code}' "$BRIDGE_URL/exit/final-send")
+  [ "$HTTP" = 303 ] || die "final send answered $HTTP: $(sed -e 's/<[^>]*>//g' "${RUNTIME_DIR}/final-send-response.html" | grep -v '^\s*$' | head -5)"
+  SEND_TXID=$(sq "SELECT send_txid FROM exit_dest WHERE id=1;")
+  [ -n "$SEND_TXID" ] || die "no send txid recorded"
+  echo "  broadcast ${SEND_TXID:0:16}… ($FUEL_BEFORE sats on the fuel P2TR)"
+
+  step "16. confirm — the destination holds it all, less one exact fee; fuel is empty"
+  regtest mine 1
+  wait_until 30 "destination funded" "curl -fsS '${ESPLORA_URL}/address/${DEST_ADDR}/utxo' | jq -e '.[0].status.confirmed'"
+  DEST_GOT=$(curl -fsS "${ESPLORA_URL}/address/${DEST_ADDR}/utxo" | jq '[.[].value] | add')
+  FUEL_AFTER=$(curl -fsS "${ESPLORA_URL}/address/${FUEL_ADDR}/utxo" | jq '[.[].value] | add // 0')
+  FEE=$((FUEL_BEFORE - DEST_GOT))
+  [ "$FUEL_AFTER" = 0 ] || die "fuel still holds $FUEL_AFTER sats — not a send-all"
+  [ "$FEE" -gt 0 ] && [ "$FEE" -lt 10000 ] || die "implausible fee $FEE"
+  echo "  ✅ destination $DEST_ADDR got $DEST_GOT sats (fee $FEE), no change output"
+}
+
+if [ "${FINAL_SEND_ONLY:-}" = 1 ]; then
+  start_bridge
+  final_send_stage
+  echo; echo "✅ FINAL SEND STAGE PASSED"
+  exit 0
+fi
+
 step "1. stack up (blocks mode: auto-miner OFF, CSV = 20 blocks)"
 "${BRIDGE_REPO}/regtest-e2e/up.sh"
 
@@ -191,6 +236,9 @@ regtest mine 1
 rpc gettxout "$NEW_SWEEP" 0 | jq -e '.value' >/dev/null || die "swept output not found onchain"
 echo "  swept output confirmed: $(rpc gettxout "$NEW_SWEEP" 0 | jq -r '.value') BTC on the fuel/dest P2TR"
 
+final_send_stage
+
 echo
-echo "✅✅ BOOST DRILL PASSED — real bitcoind accepted both RBF replacements."
+echo "✅✅ BOOST DRILL PASSED — real bitcoind accepted both RBF replacements, and the"
+echo "   final send moved the swept funds to a challenge-verified destination."
 echo "   Tear down: lsof -ti tcp:4282 | xargs kill; regtest-e2e/down.sh --clean"

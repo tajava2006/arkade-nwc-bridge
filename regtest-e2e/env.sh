@@ -54,15 +54,35 @@ fi
 if [ -z "${ARKD_IMAGE:-}" ]; then
   for cand in \
     "${BRIDGE_REPO}/../../docker-compose.yml" \
-    "${BRIDGE_REPO}/../../../docker-compose.yml"; do
+    "${BRIDGE_REPO}/../../../docker-compose.yml" \
+    "${BRIDGE_REPO}/../../../../docker-compose.yml"; do
     [ -f "${cand}" ] || continue
-    _arkd_tag="$(grep -oE 'image: arkd:v[0-9][0-9A-Za-z.+-]*' "${cand}" | head -1)"; _arkd_tag="${_arkd_tag##*:}"
     _fulmine_tag="$(grep -oE 'arklabshq/fulmine:v[0-9][0-9A-Za-z.+-]*' "${cand}" | head -1)"; _fulmine_tag="${_fulmine_tag##*:}"
+    # The operator runs locally built fork images (arkd-custom:subdust-anchor,
+    # plus wallet and signer) — build them with test-script/regtest-atomic.sh
+    # build arkd. A pin that silently misses them falls back to the submodule's
+    # stale arkd, which is how the atomic drill once ran the wrong ASP for months.
+    if grep -qE 'image: arkd-custom:subdust-anchor$' "${cand}"; then
+      for img in arkd-custom arkd-wallet-custom arkd-signer-custom; do
+        docker image inspect "${img}:subdust-anchor" >/dev/null 2>&1 || {
+          echo "✗ ${img}:subdust-anchor not built — run test-script/regtest-atomic.sh build arkd first" >&2; exit 1; }
+      done
+      export ARKD_IMAGE="arkd-custom:subdust-anchor"
+      export ARKD_WALLET_IMAGE="arkd-wallet-custom:subdust-anchor"
+      export ARKD_SIGNER_IMAGE="arkd-signer-custom:subdust-anchor"
+      _arkd_tag="fork subdust-anchor"
+    else
+      _arkd_tag="$(grep -oE 'image: arkd:v[0-9][0-9A-Za-z.+-]*' "${cand}" | head -1)"; _arkd_tag="${_arkd_tag##*:}"
+      if [ -n "${_arkd_tag}" ]; then
+        export ARKD_IMAGE="ghcr.io/arkade-os/arkd:${_arkd_tag}"
+        export ARKD_WALLET_IMAGE="ghcr.io/arkade-os/arkd-wallet:${_arkd_tag}"
+      fi
+    fi
     if [ -n "${_arkd_tag}" ]; then
-      export ARKD_IMAGE="ghcr.io/arkade-os/arkd:${_arkd_tag}"
-      export ARKD_WALLET_IMAGE="ghcr.io/arkade-os/arkd-wallet:${_arkd_tag}"
       [ -n "${_fulmine_tag}" ] && export FULMINE_IMAGE="ghcr.io/arklabshq/fulmine:${_fulmine_tag}"
       echo "▶ pinned to the operator workspace: arkd ${_arkd_tag}, fulmine ${_fulmine_tag:-<default>}" >&2
+    else
+      echo "⚠ ${cand} names no arkd image this script recognizes — using arkade-regtest's default arkd" >&2
     fi
     break
   done
