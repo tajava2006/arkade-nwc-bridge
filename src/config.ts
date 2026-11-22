@@ -9,18 +9,6 @@ export interface Config {
   network: defaults.Network
   arkServerUrl: string
   boltzApiUrl: string
-  /**
-   * boltz `swap.update` WebSocket endpoint (the Rust sidecar). Unset =
-   * derived from the resolved boltzApiUrl as ws(s)://host/v2/ws — the same
-   * single-host path-split convention @arkade-os/boltz-swap already imposes
-   * for its own ws, so every deployment that serves the SDK (public
-   * boltz.exchange, the operator's VPS nginx, the compose-internal
-   * boltz-proxy) already routes /v2/ws to the sidecar and the derivation
-   * just works with no setting anywhere. This override is the escape hatch
-   * for a topology that breaks that convention. Wrong/absent endpoint just
-   * means no push — the 30s reconciler still covers.
-   */
-  boltzWsUrl?: string
   esploraUrls: readonly string[]
   /** Solver + subdustd + emulator key (data/config.json only); undefined = Ark-only. */
   lightning?: LightningConfig
@@ -52,7 +40,6 @@ export function loadConfig(): Config {
     network: overrides.network ?? defaults.NETWORK,
     arkServerUrl: overrides.arkServerUrl ?? defaults.ARK_SERVER_URL,
     boltzApiUrl: overrides.boltzApiUrl ?? defaults.BOLTZ_API_URL,
-    boltzWsUrl: overrides.boltzWsUrl,
     esploraUrls:
       overrides.esploraUrls && overrides.esploraUrls.length > 0
         ? overrides.esploraUrls

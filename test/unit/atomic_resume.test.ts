@@ -39,7 +39,7 @@ const deps: AtomicSendDeps = {
   wallet: {} as Wallet, // never reached — refund is injected, status is fetch
   arkServerUrl: 'http://ark',
   db: undefined as never, // set in makeDeps
-  boltzApiUrl: 'http://boltz',
+  subdustdUrl: 'http://boltz',
 }
 const makeDeps = (): AtomicSendDeps => ({ ...deps, db })
 

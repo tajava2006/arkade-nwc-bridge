@@ -92,7 +92,7 @@ async function main(): Promise<void> {
   const idB = SingleKey.fromPrivateKey(randomBytes(32))
   const bridgeBXOnly = toXOnly(await idB.xOnlyPublicKey())
   const bridgeBAddr = new DefaultVtxo.Script({ pubKey: bridgeBXOnly, serverPubKey: serverXOnly, csvTimelock: tl }).address(HRP, serverXOnly)
-  const depsB = { identity: idB, arkServerUrl: ARKD_URL, db: dbB, boltzApiUrl: BOLTZ_URL }
+  const depsB = { identity: idB, arkServerUrl: ARKD_URL, db: dbB, subdustdUrl: BOLTZ_URL }
 
   // fund boltz's mini-wallet (boltz = funder on receive)
   const boltzKey = SingleKey.fromPrivateKey(hex.decode(BOLTZ_KEY))
@@ -141,7 +141,7 @@ async function main(): Promise<void> {
 
   // A sends to an EXTERNAL lnd invoice (not B — that would be boltz-lnd self-pay)
   const invoice = JSON.parse(lnd('addinvoice', '--amt', String(a))).payment_request as string
-  const sendRes = await atomicSubdustSend({ wallet: walletA, arkServerUrl: ARKD_URL, db: dbA, boltzApiUrl: BOLTZ_URL }, invoice, a)
+  const sendRes = await atomicSubdustSend({ wallet: walletA, arkServerUrl: ARKD_URL, db: dbA, subdustdUrl: BOLTZ_URL }, invoice, a)
   check(sendRes.amount === a && !!sendRes.preimage, `atomicSubdustSend claimed (a=${sendRes.amount}, preimage revealed)`)
 
   const sentRow = repoA.list().find((s) => s.direction === 'send')

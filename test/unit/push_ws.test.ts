@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { SqliteAtomicSwapRepository, SwapDirection } from '../../src/atomic'
-import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from '../../src/atomic/boltz_ws'
+import { startPushWs, derivePushWsUrl, type PushWs } from '../../src/atomic/push_ws'
 
 // Mock of the boltz sidecar's swap.update ws: records subscribe/unsubscribe
 // ops and lets tests push update events to every connection.
@@ -75,7 +75,7 @@ async function waitFor(pred: () => boolean, ms = 3000): Promise<void> {
 
 let db: Database
 let repo: SqliteAtomicSwapRepository
-let client: BoltzWs | undefined
+let client: PushWs | undefined
 
 beforeEach(() => {
   db = new Database(':memory:')
@@ -99,21 +99,21 @@ function plantReceive(id: string): void {
   })
 }
 
-describe('deriveBoltzWsUrl', () => {
+describe('derivePushWsUrl', () => {
   test('http→ws, https→wss, /v2/ws appended, garbage → undefined', () => {
-    expect(deriveBoltzWsUrl('http://boltz:9001')).toBe('ws://boltz:9001/v2/ws')
-    expect(deriveBoltzWsUrl('https://boltz.example/')).toBe('wss://boltz.example/v2/ws')
-    expect(deriveBoltzWsUrl('not a url')).toBeUndefined()
+    expect(derivePushWsUrl('http://boltz:9001')).toBe('ws://boltz:9001/v2/ws')
+    expect(derivePushWsUrl('https://boltz.example/')).toBe('wss://boltz.example/v2/ws')
+    expect(derivePushWsUrl('not a url')).toBeUndefined()
   })
 })
 
-describe('startBoltzWs', () => {
+describe('startPushWs', () => {
   test('subscribes pending swaps, pokes on update, unsubscribes terminal', async () => {
     const PORT = 48930
     const relay = startMockBoltzWs(PORT)
     plantReceive('swap-a')
     const pokes: number[] = []
-    client = startBoltzWs({
+    client = startPushWs({
       url: `ws://127.0.0.1:${PORT}`,
       db,
       onPoke: () => pokes.push(Date.now()),
@@ -151,7 +151,7 @@ describe('startBoltzWs', () => {
     const PORT = 48931
     const relay = startMockBoltzWs(PORT)
     plantReceive('swap-r')
-    client = startBoltzWs({
+    client = startPushWs({
       url: `ws://127.0.0.1:${PORT}`,
       db,
       onPoke: () => {},
@@ -174,7 +174,7 @@ describe('startBoltzWs', () => {
   })
 
   test('undefined url is a no-op handle', () => {
-    client = startBoltzWs({ url: undefined, db, onPoke: () => {}, log: () => {} })
+    client = startPushWs({ url: undefined, db, onPoke: () => {}, log: () => {} })
     client.stop()
   })
 })

@@ -2,14 +2,14 @@ import { SwapDirection } from './params'
 
 // Bridge-side swap state machine (ATOMIC_SUBDUST_PLAN.md §3.4). The bridge is F
 // on send (funds + presigns, refunds after T) and C on receive (holds the
-// preimage, claims, drives settle). These are the bridge's own states; boltz
+// preimage, claims, drives settle). These are the bridge's own states; subdustd
 // runs its mirror on pg (#08/#09). Pure logic — no DB, no network.
 
 export const SEND_STATES = [
   'init', // swap row created, nothing funded yet
-  'funded', // shared vtxo funded + presig handed to boltz
-  'ln_inflight', // boltz verified + is paying the LN invoice
-  'claimed', // boltz claimed a (LN settled) — terminal success
+  'funded', // shared vtxo funded + presig handed to subdustd
+  'ln_inflight', // subdustd verified + is paying the LN invoice
+  'claimed', // subdustd claimed a (LN settled) — terminal success
   'refund_wait', // LN failed/timed out; waiting for T to refund
   'refunded', // F reclaimed the full V after T — terminal
   'cancelled', // cooperative F+C+server unwind — terminal
@@ -19,11 +19,11 @@ export const SEND_STATES = [
 export const RECEIVE_STATES = [
   'init', // preimage generated, nothing issued yet
   'invoice_issued', // hold invoice handed to the external payer
-  'funded', // boltz funded the shared vtxo + presig; bridge verified it
+  'funded', // subdustd funded the shared vtxo + presig; bridge verified it
   'claimed', // bridge revealed the preimage in the claim
-  'settled', // boltz settled the hold invoice — terminal success
-  'refund_wait', // unclaimed/expired; boltz will refund the payer
-  'refunded', // boltz refunded (payer made whole) — terminal
+  'settled', // subdustd settled the hold invoice — terminal success
+  'refund_wait', // unclaimed/expired; subdustd will refund the payer
+  'refunded', // subdustd refunded (payer made whole) — terminal
   'failed', // terminal error
 ] as const
 
@@ -84,8 +84,8 @@ export function assertTransition(direction: SwapDirection, from: AtomicSwapState
 
 // ── boot resume (ATOMIC_SUBDUST_PLAN.md §3.4 "부팅 재개") ──────────────────────
 // On boot the bridge resumes each non-terminal swap. Send: refund after T,
-// otherwise keep polling boltz. Receive: retry the claim, then the settle call;
-// wait out boltz's refund on the miss path.
+// otherwise keep polling subdustd. Receive: retry the claim, then the settle call;
+// wait out subdustd's refund on the miss path.
 export type ResumeAction =
   | 'none' // terminal — nothing to do
   | 'poll' // keep watching the counterparty for the next transition
@@ -93,7 +93,7 @@ export type ResumeAction =
   | 'cancel' // send: LN failed but T not reached → ask C to co-sign the unwind
   | 'retry_claim' // receive: funded but not yet claimed → re-attempt the claim
   | 'retry_settle' // receive: claimed but settle call unconfirmed → re-send it
-  | 'wait_settle' // receive: refund_wait → boltz refunds the payer, just observe
+  | 'wait_settle' // receive: refund_wait → subdustd refunds the payer, just observe
 
 export interface ResumeInput {
   direction: SwapDirection
@@ -112,9 +112,9 @@ export function classifyResume(input: ResumeInput): ResumeAction {
   if (direction === SwapDirection.Send) {
     switch (state as SendState) {
       case 'refund_wait':
-        // Pre-T is NOT a dead wait: boltz has already declared the LN pay
+        // Pre-T is NOT a dead wait: subdustd has already declared the LN pay
         // terminally failed, so the cancel leaf can unwind the funding now.
-        // The T-refund stays the fallback for when boltz won't co-sign.
+        // The T-refund stays the fallback for when subdustd won't co-sign.
         return tElapsed ? 'refund' : 'cancel'
       case 'funded':
       case 'ln_inflight':

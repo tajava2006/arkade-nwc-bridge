@@ -1,24 +1,23 @@
 import type { Database } from 'bun:sqlite'
 import { SqliteAtomicSwapRepository } from './repository'
 
-// Push channel for sub-dust atomic swaps. The boltz fork emits every subdust
-// state transition into its public `swap.update` WebSocket (served by the
-// Rust sidecar; subscribe does no id validation, so subdust ids ride the
-// same rails as regular swaps). We subscribe by swap id and poke the
-// reconciler the moment something moves, collapsing the 30s polling latency
-// to ~RTT.
+// Push channel for atomic swaps. subdustd emits every swap state transition on
+// `/v2/ws` (subdustd/push.ts — the subset of the Boltz sidecar's `swap.update`
+// protocol this client was first written against). We subscribe by swap id and
+// poke the reconciler the moment something moves, collapsing the 30s polling
+// latency to ~RTT.
 //
 // Strictly an accelerator: the 30s reconciler stays the source of truth, so
-// a dead endpoint (sidecar down, unpatched boltz, wrong URL) degrades to
-// exactly today's behavior — the client just keeps retrying quietly.
+// a dead endpoint (subdustd down, wrong URL) degrades to polling — the client
+// just keeps retrying quietly.
 //
-// Wire protocol (boltz-utils/src/ws.rs):
+// Wire protocol:
 //   C→S {op:'subscribe'|'unsubscribe', channel:'swap.update', args:[ids]}
 //       {op:'ping'}
 //   S→C {event:'subscribe'|'unsubscribe'|'update'|'pong'|'error', ...}
 //       update args: [{id, status, ...}]
 
-export interface BoltzWsDeps {
+export interface PushWsDeps {
   /** ws(s):// endpoint. undefined disables the client (no-op handle). */
   url: string | undefined
   db: Database
@@ -30,7 +29,7 @@ export interface BoltzWsDeps {
   reconnectDelayMs?: number
 }
 
-export interface BoltzWs {
+export interface PushWs {
   stop(): void
 }
 
@@ -43,10 +42,10 @@ const PING_INTERVAL_MS = 30_000
 // The ws server caps subscribe args at 100 per message.
 const MAX_ARGS_PER_MSG = 100
 
-/** ws(s)://host/v2/ws from an http(s) API base — the upstream convention. */
-export function deriveBoltzWsUrl(boltzApiUrl: string): string | undefined {
+/** ws(s)://host/v2/ws from subdustd's http(s) API base, where it serves the channel. */
+export function derivePushWsUrl(subdustdUrl: string): string | undefined {
   try {
-    const u = new URL(boltzApiUrl)
+    const u = new URL(subdustdUrl)
     u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
     u.pathname = `${u.pathname.replace(/\/$/, '')}/v2/ws`
     return u.toString()
@@ -55,7 +54,7 @@ export function deriveBoltzWsUrl(boltzApiUrl: string): string | undefined {
   }
 }
 
-export function startBoltzWs(deps: BoltzWsDeps): BoltzWs {
+export function startPushWs(deps: PushWsDeps): PushWs {
   const log = deps.log ?? console.log
   const resyncMs = deps.resyncIntervalMs ?? RESYNC_INTERVAL_MS
   const reconnectMs = deps.reconnectDelayMs ?? RECONNECT_DELAY_MS
@@ -100,7 +99,7 @@ export function startBoltzWs(deps: BoltzWsDeps): BoltzWs {
       if (toDrop.length > 0) sendIds('unsubscribe', toDrop)
       subscribed = desired
     } catch (err) {
-      console.warn('boltz-ws: resync failed:', err)
+      console.warn('push-ws: resync failed:', err)
     }
   }
 
@@ -121,7 +120,7 @@ export function startBoltzWs(deps: BoltzWsDeps): BoltzWs {
       // Malformed URL etc. — log once, keep the poll as the only path.
       if (!loggedDown) {
         loggedDown = true
-        console.warn(`boltz-ws: cannot connect to ${url}:`, err)
+        console.warn(`push-ws: cannot connect to ${url}:`, err)
       }
       scheduleReconnect()
       return
@@ -131,7 +130,7 @@ export function startBoltzWs(deps: BoltzWsDeps): BoltzWs {
     socket.addEventListener('open', () => {
       if (stopped) return
       loggedDown = false
-      log(`boltz-ws: connected (${url})`)
+      log(`push-ws: connected (${url})`)
       // Fresh connection knows nothing — resubscribe from scratch.
       subscribed = new Set()
       resync()
@@ -146,7 +145,7 @@ export function startBoltzWs(deps: BoltzWsDeps): BoltzWs {
         }
         if (msg.event !== 'update' || msg.channel !== 'swap.update') return
         for (const a of msg.args ?? []) {
-          if (a.id) log(`boltz-ws: swap ${a.id.slice(0, 8)}… → ${a.status ?? '?'}`)
+          if (a.id) log(`push-ws: swap ${a.id.slice(0, 8)}… → ${a.status ?? '?'}`)
         }
         deps.onPoke()
       } catch {
@@ -159,7 +158,7 @@ export function startBoltzWs(deps: BoltzWsDeps): BoltzWs {
       if (stopped) return
       if (!loggedDown) {
         loggedDown = true
-        log(`boltz-ws: disconnected — reconnecting every ${Math.round(reconnectMs / 1000)}s (poll still covers)`)
+        log(`push-ws: disconnected — reconnecting every ${Math.round(reconnectMs / 1000)}s (poll still covers)`)
       }
       scheduleReconnect()
     })

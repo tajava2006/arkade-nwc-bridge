@@ -59,7 +59,7 @@ async function boltz<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) throw new Error(`${path} -> ${res.status}: ${await res.text().catch(() => '')}`)
   return (await res.json()) as T
 }
-async function boltzGet<T>(path: string): Promise<T> {
+async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${BOLTZ_URL}${path}`)
   if (!res.ok) throw new Error(`${path} -> ${res.status}`)
   return (await res.json()) as T
@@ -110,7 +110,7 @@ async function main(): Promise<void> {
   type Status = { state: string; fundingOutpoint?: string; presigs?: { arkTx: string; checkpoint: string }; refundLocktime?: number; exitDelay?: string }
   let status: Status | undefined
   for (let i = 0; i < 40; i++) {
-    const s: Status = await boltzGet(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)
+    const s: Status = await getJson(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)
     status = s
     if (s.state === 'funded' && s.fundingOutpoint && s.presigs) break
     await sleep(1000)

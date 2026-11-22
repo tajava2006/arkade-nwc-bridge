@@ -18,7 +18,7 @@ import type { AtomicOutput } from './split'
 // Deterministic tx builders + presign for the atomic sub-dust protocol
 // (ATOMIC_SUBDUST_PLAN.md §3.2, §5). Formalizes the exact flow proven in spikes
 // #01 (claim/refund/cancel) and #02 (uexit sweep). The wire format is PSBT
-// base64 so the boltz vendored copy (§8 [#03]) uses these functions unchanged.
+// base64 so the subdustd vendored copy (§8 [#03]) uses these functions unchanged.
 
 // ── wire format ────────────────────────────────────────────────────────────
 export const encodePsbt = (tx: Transaction): string => base64.encode(tx.toPSBT())
@@ -54,7 +54,7 @@ function arkInput(shared: SharedVtxo, leaf: TapLeafScript): ArkTxInput {
  * rebuild whose txid the caller already matched, so a sig under `pubkey` can
  * only be over that leaf — a pubkey-presence check is equivalent to a leaf-hash
  * match here, and avoids importing @scure/btc-signer's tapLeafHash (which would
- * mix btc-signer versions against the SDK in the boltz vendored copy).
+ * mix btc-signer versions against the SDK in the subdustd vendored copy).
  */
 function hasSig(tx: Transaction, i: number, pubkey: Uint8Array): boolean {
   const input = tx.getInput(i)
@@ -373,7 +373,7 @@ export function cancelSpend(
 /**
  * Fund a shared vtxo: the funder spends one or two of its own regular vtxos
  * WHOLE into the 4-leaf shared output (which MUST be `outputs[0]`) — no funding
- * change — and submits/finalizes the offchain tx. For a no-Wallet funder (boltz
+ * change — and submits/finalizes the offchain tx. For a no-Wallet funder (subdustd
  * on receive); a Wallet-backed funder can use `Wallet.sendBitcoin` instead. Each
  * `funderInput` is one of the funder's vtxos spent via its forfeit leaf
  * (DefaultVtxo.Script.forfeit); one checkpoint is produced per input. Returns

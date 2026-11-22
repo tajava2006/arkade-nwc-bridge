@@ -29,7 +29,7 @@ import { sweepInterruptedWebSends } from './history'
 import { makeBoardingEsplora, reconcileBoardingHistory } from './boarding_history'
 import { autoRefreshPass } from './auto_refresh'
 import { resumeAtomicSends } from './atomic/send'
-import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from './atomic/boltz_ws'
+import { startPushWs, derivePushWsUrl, type PushWs } from './atomic/push_ws'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { PingableWebSocket } from './nostr/ping_ws'
 import { createRelayGate } from './nostr/relay_gate'
@@ -199,7 +199,7 @@ async function main(): Promise<void> {
   let boardingHistoryInterval: ReturnType<typeof setInterval> | undefined
   // Consolidate-all auto-refresh (src/auto_refresh.ts) — assigned in bootReady.
   let autoRefreshInterval: ReturnType<typeof setInterval> | undefined
-  let boltzWs: BoltzWs | undefined
+  let pushWs: PushWs | undefined
 
   // Exit-proof mirroring — assigned in bootReady, torn down on shutdown.
   let proofSync: ProofSyncService | undefined
@@ -377,7 +377,7 @@ async function main(): Promise<void> {
       // a configured Lightning block there is nothing to drive them against.
       const subdustdUrl = lightning?.subdustdUrl
       const atomicDeps = subdustdUrl
-        ? { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: subdustdUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
+        ? { wallet, arkServerUrl: bootCfg.arkServerUrl, db, subdustdUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
         : undefined
       const runReconcilePasses = async (): Promise<void> => {
         const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
@@ -490,8 +490,8 @@ async function main(): Promise<void> {
       // collapsing the 30s poll latency. Pure accelerator; a dead endpoint
       // degrades to the interval above.
       if (subdustdUrl) {
-        boltzWs = startBoltzWs({
-          url: deriveBoltzWsUrl(subdustdUrl),
+        pushWs = startPushWs({
+          url: derivePushWsUrl(subdustdUrl),
           db,
           onPoke: reconcileReceives,
           log: (msg) => console.log(msg),
@@ -679,8 +679,8 @@ async function main(): Promise<void> {
         clearInterval(autoRefreshInterval)
         autoRefreshInterval = undefined
       }
-      boltzWs?.stop()
-      boltzWs = undefined
+      pushWs?.stop()
+      pushWs = undefined
       for (const step of undo.reverse()) {
         try {
           await step()
@@ -776,7 +776,7 @@ async function main(): Promise<void> {
     if (receiveReconcilerInterval) clearInterval(receiveReconcilerInterval)
     if (boardingHistoryInterval) clearInterval(boardingHistoryInterval)
     if (autoRefreshInterval) clearInterval(autoRefreshInterval)
-    boltzWs?.stop()
+    pushWs?.stop()
     proofSync?.stop()
     stopIncomingFunds?.()
     if (bootRetryTimer) clearTimeout(bootRetryTimer)

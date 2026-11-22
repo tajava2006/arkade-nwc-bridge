@@ -47,7 +47,7 @@ async function boltz<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) throw new Error(`${path} -> ${res.status}: ${await res.text().catch(() => '')}`)
   return (await res.json()) as T
 }
-async function boltzGet<T>(path: string): Promise<T> {
+async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${BOLTZ_URL}${path}`)
   if (!res.ok) throw new Error(`${path} -> ${res.status}`)
   return (await res.json()) as T
@@ -92,7 +92,7 @@ async function main(): Promise<void> {
   let up = false
   for (let i = 0; i < 60 && !up; i++) {
     await sleep(1000)
-    try { await boltzGet<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`); up = true } catch { /* still down */ }
+    try { await getJson<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`); up = true } catch { /* still down */ }
   }
   check(up, 'boltz came back up after restart')
 
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
   // resumeReceives scan — that is the F14 recovery. (Log the interim state; not a
   // hard check, since a boot-tick scan may legitimately fund it fast.)
   await sleep(15000)
-  const midState = (await boltzGet<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)).state
+  const midState = (await getJson<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)).state
   console.log(`  interim state 15s after payment: '${midState}' (listener is gone — only the scan can advance it)`)
 
   console.log('\nwaiting for the invoice_issued scan to (re)fund the held receive (≤~120s)…')
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
   for (let i = 0; i < 150 && !funded; i++) {
     await sleep(1000)
     try {
-      const s = await boltzGet<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)
+      const s = await getJson<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)
       funded = s.state === 'funded' && !!s.fundingOutpoint
     } catch { /* transient */ }
     if (i % 15 === 14) console.log(`  … ${i + 1}s (state polling; funded=${funded})`)

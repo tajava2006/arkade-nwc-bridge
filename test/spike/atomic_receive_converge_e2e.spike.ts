@@ -54,7 +54,7 @@ async function boltz<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) throw new Error(`${path} -> ${res.status}: ${await res.text().catch(() => '')}`)
   return (await res.json()) as T
 }
-async function boltzGet<T>(path: string): Promise<T> {
+async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${BOLTZ_URL}${path}`)
   if (!res.ok) throw new Error(`${path} -> ${res.status}`)
   return (await res.json()) as T
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   type Status = { state: string; fundingOutpoint?: string; presigs?: { arkTx: string; checkpoint: string }; refundLocktime?: number }
   let status: Status | undefined
   for (let i = 0; i < 40; i++) {
-    const s: Status = await boltzGet(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)
+    const s: Status = await getJson(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)
     status = s
     if (s.state === 'funded' && s.fundingOutpoint && s.presigs) break
     await sleep(1000)
@@ -122,7 +122,7 @@ async function main(): Promise<void> {
   let boltzSettled = false
   for (let i = 0; i < 95 && !boltzSettled; i++) {
     await sleep(1000)
-    try { boltzSettled = (await boltzGet<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)).state === 'settled' } catch { /* */ }
+    try { boltzSettled = (await getJson<Status>(`/v2/subdust/atomic/receive/status?swapId=${init.swapId}`)).state === 'settled' } catch { /* */ }
     if (i % 10 === 9) console.log(`  … ${i + 1}s (boltz settled=${boltzSettled})`)
   }
   check(boltzSettled, "boltz reached 'settled' via the harvester")
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
   repo.transition(init.swapId, 'funded')
 
   const settled = await driveAtomicReceive(
-    { identity: bridge, arkServerUrl: ARKD_URL, db, boltzApiUrl: BOLTZ_URL },
+    { identity: bridge, arkServerUrl: ARKD_URL, db, subdustdUrl: BOLTZ_URL },
     init.swapId,
   )
   const finalState = repo.get(init.swapId)?.state

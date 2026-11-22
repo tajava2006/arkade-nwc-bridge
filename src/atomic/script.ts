@@ -42,8 +42,8 @@ export function hashlockConditionScript(paymentHash: Uint8Array): Uint8Array {
   // Hand-encoded OP_HASH160 <20-byte push> OP_EQUAL — byte-identical to
   // @scure/btc-signer's Script.encode(['HASH160', h, 'EQUAL']). Encoding it
   // ourselves keeps this module free of a direct @scure/btc-signer import, so
-  // the boltz vendored copy (§8 [#03]) doesn't mix btc-signer versions
-  // (boltz's 2.2.0 vs the SDK's nested 2.0.1) on shared PSBT objects.
+  // the subdustd vendored copy (§8 [#03]) doesn't mix btc-signer versions
+  // (subdustd's 2.2.0 vs the SDK's nested 2.0.1) on shared PSBT objects.
   return Uint8Array.from([0xa9, 0x14, ...ripemd160(paymentHash), 0x87])
 }
 

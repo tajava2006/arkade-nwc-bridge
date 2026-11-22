@@ -95,7 +95,7 @@ async function main(): Promise<void> {
     const bridge = SingleKey.fromPrivateKey(randomBytes(32))
     const bridgeXOnly = toXOnly(await bridge.xOnlyPublicKey())
     const bridgeAddr = new DefaultVtxo.Script({ pubKey: bridgeXOnly, serverPubKey: serverXOnly, csvTimelock: tl }).address(HRP, serverXOnly)
-    const deps = { identity: bridge, arkServerUrl: ARKD_URL, db, boltzApiUrl: BOLTZ_URL }
+    const deps = { identity: bridge, arkServerUrl: ARKD_URL, db, subdustdUrl: BOLTZ_URL }
     const issued = await issueAtomicReceive(deps, a)
 
     execFileSync('docker', ['exec', '-d', 'lnd', 'lncli', '--network=regtest', 'payinvoice', '--force', issued.invoice], { encoding: 'utf8' })

@@ -4,26 +4,26 @@ import type { AtomicScriptKeys } from './script'
 // One struct drives both directions; only who plays funder/claimer flips.
 
 export enum SwapDirection {
-  /** ARK → LN. User pays a sub-dust amount out over Lightning. F=user, C=boltz. */
+  /** ARK → LN. User pays a sub-dust amount out over Lightning. F=user, C=subdustd. */
   Send = 'send',
-  /** LN → ARK. User receives a sub-dust amount over Lightning. F=boltz, C=user. */
+  /** LN → ARK. User receives a sub-dust amount over Lightning. F=subdustd, C=user. */
   Receive = 'receive',
 }
 
 /**
  * Resolve the funder/claimer x-only keys for a direction. Send folds the
- * payment from the user (F) to boltz (C); receive folds it from boltz (F) to
- * the user (C). The user is always the bridge-controlled key; boltz is the
+ * payment from the user (F) to subdustd (C); receive folds it from subdustd (F) to
+ * the user (C). The user is always the bridge-controlled key; subdustd is the
  * swap provider's key.
  */
 export function rolesForDirection(
   direction: SwapDirection,
   userKey: Uint8Array,
-  boltzKey: Uint8Array,
+  peerKey: Uint8Array,
 ): { funder: Uint8Array; claimer: Uint8Array } {
   return direction === SwapDirection.Send
-    ? { funder: userKey, claimer: boltzKey }
-    : { funder: boltzKey, claimer: userKey }
+    ? { funder: userKey, claimer: peerKey }
+    : { funder: peerKey, claimer: userKey }
 }
 
 export interface AtomicSwapParams extends AtomicScriptKeys {

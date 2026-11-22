@@ -94,7 +94,7 @@ export async function sendLightning(deps: LnSendDeps, invoice: string): Promise<
           wallet: deps.wallet,
           arkServerUrl: deps.arkServerUrl,
           db: deps.db,
-          boltzApiUrl: deps.lightning.subdustdUrl,
+          subdustdUrl: deps.lightning.subdustdUrl,
           notify: deps.notify,
         },
         invoice,

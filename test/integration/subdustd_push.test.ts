@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteAtomicSwapRepository, SwapDirection } from '../../src/atomic'
-import { deriveBoltzWsUrl, startBoltzWs } from '../../src/atomic/boltz_ws'
+import { derivePushWsUrl, startPushWs } from '../../src/atomic/push_ws'
 import { openDatabase } from '../../src/db'
 import { startHttp } from '../../subdustd/http.ts'
 import { createLogger } from '../../subdustd/log.ts'
@@ -92,8 +92,8 @@ describe('subdustd push channel', () => {
       refundLocktime: 1_900_000_000,
     })
     let pokes = 0
-    const client = startBoltzWs({
-      url: deriveBoltzWsUrl(base),
+    const client = startPushWs({
+      url: derivePushWsUrl(base),
       db,
       onPoke: () => pokes++,
       log: () => {},

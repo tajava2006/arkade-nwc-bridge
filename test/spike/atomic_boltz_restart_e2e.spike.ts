@@ -82,7 +82,7 @@ async function main(): Promise<void> {
   const idB = SingleKey.fromPrivateKey(randomBytes(32))
   const bridgeXOnly = toXOnly(await idB.xOnlyPublicKey())
   const bridgeAddr = new DefaultVtxo.Script({ pubKey: bridgeXOnly, serverPubKey: serverXOnly, csvTimelock: tl }).address(HRP, serverXOnly)
-  const deps = { identity: idB, arkServerUrl: ARKD_URL, db, boltzApiUrl: BOLTZ_URL }
+  const deps = { identity: idB, arkServerUrl: ARKD_URL, db, subdustdUrl: BOLTZ_URL }
 
   const issued = await issueAtomicReceive(deps, a)
   check(!!issued.swapId, `receive issued (swap ${issued.swapId.slice(0, 8)}…)`)

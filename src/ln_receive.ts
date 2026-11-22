@@ -25,7 +25,7 @@ export interface LnReceiveDeps {
 }
 
 function atomicDeps(deps: LnReceiveDeps): AtomicReceiveDeps {
-  return { identity: deps.wallet.identity, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.subdustdUrl, notify: deps.notify }
+  return { identity: deps.wallet.identity, arkServerUrl: deps.arkServerUrl, db: deps.db, subdustdUrl: deps.subdustdUrl, notify: deps.notify }
 }
 
 export interface IssueInvoiceParams {
@@ -94,9 +94,9 @@ const EXPIRY_GRACE_SECONDS = 15 * 60
 
 /**
  * Boot + periodic pass for atomic sub-dust receives. Two jobs:
- *  1. drive every non-terminal receive swap (poll boltz status → once funded,
- *     verify-before-act, claim revealing our preimage, then settle boltz's hold
- *     invoice) — restart-safe, so a swap boltz funded while we were down resumes.
+ *  1. drive every non-terminal receive swap (poll subdustd status → once funded,
+ *     verify-before-act, claim revealing our preimage, then settle subdustd's hold
+ *     invoice) — restart-safe, so a swap subdustd funded while we were down resumes.
  *  2. flip the matching `transactions` row (NWC make_invoice, swap_id IS NULL)
  *     to settled with our own preimage, or to expired once the grace passes.
  *  3. terminalize never-funded receives past their invoice expiry (below).
@@ -107,12 +107,12 @@ export type ExpiryDecoder = (invoice: string) => number
 
 /**
  * Terminalize never-funded receives past their invoice expiry. A receive stuck
- * at `invoice_issued` (boltz never funded — empty mini-wallet, or the old
+ * at `invoice_issued` (subdustd never funded — empty mini-wallet, or the old
  * funding bug) can't complete: its held hold-invoice htlc just times out and
  * refunds the payer. Without this, driveAtomicReceives polls its status every
  * tick forever. Keyed off the invoice's own expiry (decoded from the stored
  * BOLT11), so it covers both NWC and CLINK receives (only NWC has a
- * `transactions` row). funded/claimed are in-flight and left alone (boltz
+ * `transactions` row). funded/claimed are in-flight and left alone (subdustd
  * refunds funded past T; claimed retries settle). Returns the swept swap ids.
  */
 export function sweepExpiredAtomicReceives(

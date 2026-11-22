@@ -1,7 +1,7 @@
 import type { RestIndexerProvider } from '@arkade-os/sdk'
 
 // Small ARK helpers shared by the atomic send/receive orchestration
-// (send.ts / receive.ts). Bridge-only (NOT vendored to boltz) — the vendored
+// (send.ts / receive.ts). Bridge-only (NOT vendored to subdustd) — the vendored
 // pure lib keeps its own module-private copies on purpose (dependency
 // isolation); this just stops the two orchestration flows from each redefining
 // the same three one-liners + the identical spent-poll.
