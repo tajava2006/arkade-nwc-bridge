@@ -279,7 +279,9 @@ row exists. Logs go to stdout; when running in background pipe to
   absent from a fresh clone; don't add it to defaults or examples checked
   into the repo. Lightning is config.json-only (`lightning`: solver URL +
   card, subdustd URL, emulator key — operator infrastructure, strictly
-  parsed); without it the bridge boots Ark-only.
+  parsed); without it the bridge boots Ark-only. `nostrRelays` in the same
+  file replaces OUTBOX_BOOTSTRAP_RELAYS + NWC_RELAYS_FALLBACK (private
+  relay / regtest): the bridge then opens no other relay.
 - **Two-phase boot.** [`src/index.ts`](src/index.ts) starts the web
   server first, then either calls `bootReady` immediately (account
   exists) or waits for POST `/setup` to call it. Don't reorder this

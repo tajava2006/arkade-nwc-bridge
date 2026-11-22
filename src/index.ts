@@ -105,12 +105,16 @@ async function main(): Promise<void> {
   // opens /connections/new. Watcher keeps running afterward; later
   // 10002 updates change new-connection defaults but don't touch
   // existing connections.
+  // data/config.json `nostrRelays` (private relay / regtest) replaces both
+  // public lists, so the bridge opens no relay outside it.
+  const bootstrapRelays = cfg.nostrRelays ?? OUTBOX_BOOTSTRAP_RELAYS
+  if (cfg.nostrRelays) console.log(`  relays         config.json only: ${cfg.nostrRelays.join(', ')}`)
   const outbox = await startOutboxWatcher({
     pool,
     connect: (url) => relayGate.ensure(url),
     fallbackPubkey: OUTBOX_FALLBACK_PUBKEY,
-    bootstrapRelays: OUTBOX_BOOTSTRAP_RELAYS,
-    fallback: NWC_RELAYS_FALLBACK,
+    bootstrapRelays,
+    fallback: cfg.nostrRelays ?? NWC_RELAYS_FALLBACK,
     initialTimeoutMs: OUTBOX_INITIAL_TIMEOUT_MS,
   })
   console.log(
@@ -170,7 +174,7 @@ async function main(): Promise<void> {
   const RELAY_WATCHDOG_INTERVAL_MS = 5000
   const knownRelayUrls = (): Set<string> => {
     const urls = new Set<string>()
-    for (const url of OUTBOX_BOOTSTRAP_RELAYS) urls.add(normalizeRelayUrl(url))
+    for (const url of bootstrapRelays) urls.add(normalizeRelayUrl(url))
     for (const url of outbox.getOutboxRelays()) urls.add(url)
     for (const conn of listActiveConnections(db)) {
       for (const url of conn.relays) urls.add(url)

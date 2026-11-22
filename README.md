@@ -134,7 +134,9 @@ boot**:
 ```
 
 Any field of `Config` (`network`, `arkServerUrl`, `esploraUrls`,
-`httpBind`, `httpPort`, `dbPath`) can be overridden;
+`httpBind`, `httpPort`, `dbPath`) can be overridden; `nostrRelays`
+replaces the public bootstrap/fallback relay lists (a private relay, or
+regtest — the bridge then opens no other relay);
 missing fields fall through to the static defaults in
 [`src/defaults.ts`](src/defaults.ts). The file is read once at boot.
 Outside of docker the file simply isn't there and the bridge stays

@@ -11,6 +11,12 @@ export interface Config {
   esploraUrls: readonly string[]
   /** Solver + subdustd + emulator key (data/config.json only); undefined = Ark-only. */
   lightning?: LightningConfig
+  /**
+   * Replace the public bootstrap + fallback relay lists with these (a private
+   * relay deployment, or regtest). The bridge then opens no other relay.
+   * Unset = the static defaults in defaults.ts.
+   */
+  nostrRelays?: readonly string[]
   httpBind: string
   httpPort: number
   dbPath: string
@@ -44,6 +50,7 @@ export function loadConfig(): Config {
         : defaults.ESPLORA_URLS,
     // Throws on a malformed block — boot must not guess at payment endpoints.
     lightning: parseLightningConfig((overrides as { lightning?: unknown }).lightning, baseDir),
+    nostrRelays: overrides.nostrRelays && overrides.nostrRelays.length > 0 ? overrides.nostrRelays : undefined,
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,
     // A relative override resolves against the loaded config's own base
