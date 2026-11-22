@@ -42,7 +42,7 @@ export interface ClaimSplitArgs {
   claimerAddress: ArkAddress
   /** V — funding vtxo value (sats). */
   fundingValue: number
-  /** a — sub-dust payment amount (sats). */
+  /** a — payment amount (sats). Sub-dust on sends; any size on receives (D10). */
   amount: number
   /** Server dust threshold (sats). */
   dust: number
@@ -70,7 +70,8 @@ function outputFor(address: ArkAddress, amount: number, dust: number): { output:
 }
 
 /**
- * Compute the claim split. The claimer's output is a (sub-dust OP_RETURN), or
+ * Compute the claim split. The claimer's output is a — sub-dust OP_RETURN, or
+ * a regular vtxo when a ≥ dust (receives of any size, D10) — or
  * a + fee when the fee is folded in (no feeRecipient) — still sub-dust except
  * at the a + fee ≥ dust edge, where it becomes a regular vtxo. The funder's
  * change V−a−fee is regular (≥ dust), sub-dust (OP_RETURN), or omitted (0) —
@@ -83,7 +84,6 @@ export function computeClaimSplit(args: ClaimSplitArgs): ClaimSplit {
   const maxOpReturn = args.maxOpReturnOutputs ?? MAX_OP_RETURN_OUTPUTS
 
   if (a <= 0) throw new SubdustEdgeError(`amount must be positive, got ${a}`)
-  if (a >= dust) throw new SubdustEdgeError(`amount ${a} ≥ dust ${dust} is not a sub-dust split`)
   if (fee < 0) throw new SubdustEdgeError(`fee must be ≥ 0, got ${fee}`)
   const change = V - a - fee
   if (change < 0) throw new SubdustEdgeError(`amount ${a} + fee ${fee} exceeds funding value ${V}`)

@@ -99,21 +99,19 @@ function advanceReceive(repo: SqliteAtomicSwapRepository, swapId: string, target
 }
 
 /**
- * Begin an atomic sub-dust receive: generate the preimage, have boltz mint a
+ * Begin an atomic receive — any amount since D10 (the claimer's output is a
+ * regular vtxo once a ≥ dust): generate the preimage, have the funder mint a
  * HOLD invoice for it, and persist the swap so a restart can resume the claim.
- * Returns the invoice to hand the external payer.
+ * Returns the invoice to hand the external payer. A BOLT11 carries a plain
+ * description or a description hash (NIP-57), never both — the hash wins.
  */
 export async function issueAtomicReceive(
   deps: AtomicReceiveDeps,
   amountSats: number,
   descriptionHash?: string,
+  description?: string,
 ): Promise<AtomicReceiveInvoice> {
-  const ark = new RestArkProvider(deps.arkServerUrl)
-  const info = await ark.getInfo()
-  const dust = Number(info.dust)
-  if (amountSats <= 0 || amountSats >= dust) {
-    throw new Error(`amount ${amountSats} is not sub-dust (dust ${dust})`)
-  }
+  if (!Number.isInteger(amountSats) || amountSats <= 0) throw new Error(`amount ${amountSats} is not a positive whole number of sats`)
 
   const preimage = randomBytes(32)
   const H = sha256(preimage)
@@ -125,7 +123,7 @@ export async function issueAtomicReceive(
       amount: amountSats,
       paymentHash: hex.encode(H),
       userPubkey: hex.encode(userXOnly),
-      ...(descriptionHash ? { descriptionHash } : {}),
+      ...(descriptionHash ? { descriptionHash } : description ? { description } : {}),
     },
   )
 

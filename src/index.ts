@@ -385,7 +385,7 @@ async function main(): Promise<void> {
       // key (same key as the Ark wallet). Minted from the current outbox relay
       // and persisted; on boot it listens on the relay frozen into the stored
       // code (see clink/offers.ts). Operator regenerates by hand if it dies.
-      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl })
+      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, wallet, subdustdUrl: lightning?.subdustdUrl, arkServerUrl: bootCfg.arkServerUrl })
       console.log(`  noffer         ${offers.snapshot().noffer}`)
       undo.push(() => offers.stop())
 
@@ -398,7 +398,12 @@ async function main(): Promise<void> {
       // txid binding) — same server the wallet trusts, never boltz.
       const reconcileIndexer = wholeScriptIndexer(bootCfg.arkServerUrl)
       const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, wallet, indexer: reconcileIndexer, notify }
-      const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
+      // Atomic swaps (every receive, sub-dust sends) live on subdustd; without
+      // a configured Lightning block there is nothing to drive them against.
+      const subdustdUrl = lightning?.subdustdUrl
+      const atomicDeps = subdustdUrl
+        ? { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: subdustdUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
+        : undefined
       const runReconcilePasses = async (): Promise<void> => {
         const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
         // M3 self-heal for dust+ reverse swaps: a boltz-reported success that
@@ -407,7 +412,9 @@ async function main(): Promise<void> {
         // the (M1) crash-window reconcile for interrupted sub-dust sends.
         const incoming = reconcilePendingIncoming(db, wallet, reconcileIndexer, notify)
           .catch((err) => console.error('boltz: pending reconcile failed:', err))
-        const receives = reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
+        const receives = (subdustdUrl
+          ? reconcileAtomicReceives({ wallet, subdustdUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
+          : Promise.resolve([] as string[]))
           .then((settledHashes) => {
             // Ack same-pass settles immediately — otherwise the CLINK receipt
             // (+9735) waits for the NEXT reconcile tick, because the ack pass
@@ -425,8 +432,9 @@ async function main(): Promise<void> {
         // unwound through the cancel leaf, post-T rows are refunded (the
         // T-refund executor), crash-orphaned rows reconcile against boltz
         // status. Blocktime lag counts as waiting — the next tick retries.
-        const sends = resumeAtomicSends(atomicDeps)
+        const sends = (atomicDeps ? resumeAtomicSends(atomicDeps) : Promise.resolve(undefined))
           .then((r) => {
+            if (!r) return
             if (
               r.refunded.length ||
               r.cancelled.length ||
@@ -506,12 +514,14 @@ async function main(): Promise<void> {
       // swap.update ws — a poke re-runs the same reconcile passes immediately,
       // collapsing the 30s poll latency. Pure accelerator; a dead endpoint
       // degrades to the interval above.
-      boltzWs = startBoltzWs({
-        url: bootCfg.boltzWsUrl ?? deriveBoltzWsUrl(bootCfg.boltzApiUrl),
-        db,
-        onPoke: reconcileReceives,
-        log: (msg) => console.log(msg),
-      })
+      if (subdustdUrl) {
+        boltzWs = startBoltzWs({
+          url: deriveBoltzWsUrl(subdustdUrl),
+          db,
+          onPoke: reconcileReceives,
+          log: (msg) => console.log(msg),
+        })
+      }
 
       // SWR caches for the slow ark-side reads. minIntervalMs keeps
       // back-to-back page visits from hammering the upstream — opening

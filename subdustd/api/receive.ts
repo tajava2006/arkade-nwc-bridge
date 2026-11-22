@@ -21,7 +21,10 @@ import type { Logger } from '../log.ts'
 import { DuplicatePaymentHash, type SwapRow, type SwapStore } from '../store.ts'
 import { badRequest, HttpError, validateArgs, xOnlyHex, type SwapLocks } from './http_error.ts'
 
-// Atomic sub-dust RECEIVE (LN → ARK), server side. We are the FUNDER: we issue
+// Atomic RECEIVE (LN → ARK), server side — every bridge receive, sub-dust or
+// not (D10: the solver's hold invoice cannot carry a NIP-57 description
+// hash; this one can, and the split already pays a ≥ dust claimer a regular
+// vtxo). We are the FUNDER: we issue
 // a HOLD invoice for the payer, and once their HTLC is held we fund a 4-leaf
 // shared vtxo from our own float and presign the claim (a → user, the rest
 // back to us). The user claims with the preimage; we settle the hold invoice
@@ -87,6 +90,12 @@ export class ReceiveService {
     const picked = selectFundingInputs(own, { ...args, amount })
     if (picked.length > 0) return picked
     if (own.length === 0) throw new NoFunding('the subdustd float holds no vtxo — top up the address logged at boot')
+    const usable = own.filter((v) => isEligibleFundingInput(v, args).eligible).reduce((n, v) => n + v.value, 0)
+    if (usable > 0 && usable < amount + dust) {
+      throw new NoFunding(
+        `the float's usable vtxos hold ${usable} sats; ${amount} sats needs ${amount + dust} (amount + dust) — top up the address logged at boot`,
+      )
+    }
     const reasons = [...new Set(own.map((v) => isEligibleFundingInput(v, args).reason ?? 'eligible'))]
     throw new NoFunding(
       `the float holds ${own.length} vtxo(s) but none can fund ${amount} sats here (needs > ` +
@@ -101,18 +110,21 @@ export class ReceiveService {
       { name: 'paymentHash', type: 'string' },
       { name: 'userPubkey', type: 'string' },
       { name: 'descriptionHash', type: 'string', optional: true },
+      { name: 'description', type: 'string', optional: true },
     ])
     const a = args.amount as number
     const paymentHash = String(args.paymentHash).toLowerCase()
     if (!/^[0-9a-f]{64}$/.test(paymentHash)) throw badRequest('invalid parameter: paymentHash')
     const descriptionHash = args.descriptionHash as string | undefined
     if (descriptionHash !== undefined && !/^[0-9a-fA-F]{64}$/.test(descriptionHash)) throw badRequest('invalid parameter: descriptionHash')
+    const description = args.description as string | undefined
+    if (description !== undefined && Buffer.byteLength(description) > 639) throw badRequest('invalid parameter: description (max 639 bytes)')
+    if (description !== undefined && descriptionHash !== undefined) throw badRequest('give description or descriptionHash, not both')
     const userPubkey = xOnlyHex('userPubkey', args.userPubkey)
     const { signer, store, knobs, lnd } = this.d
 
     const info = await signer.getInfo()
-    const dust = Number(info.dust)
-    if (!Number.isInteger(a) || a <= 0 || a >= dust) throw badRequest(`amount ${a} is not sub-dust (dust ${dust}) — use a regular swap`)
+    if (!Number.isInteger(a) || a <= 0) throw badRequest(`amount ${a} is not a positive whole number of sats`)
 
     // Idempotent init (F17): the same payment hash with its hold invoice still
     // unpaid returns that invoice instead of minting a second one.
@@ -138,8 +150,9 @@ export class ReceiveService {
       paymentHash,
       cltvExpiry: receiveFinalCltv(knobs),
       expirySecs: window,
-      memo: `subdust-atomic-receive ${a}`,
-      descriptionHash,
+      // BOLT11 carries a description or its hash, never both: a zap's hash
+      // must stand alone for the NIP-57 receipt to verify.
+      ...(descriptionHash !== undefined ? { descriptionHash } : { memo: description ?? '' }),
     })
     const id = randomBytes(16).toString('hex')
     try {

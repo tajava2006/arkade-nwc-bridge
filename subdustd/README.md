@@ -1,8 +1,11 @@
 # subdustd
 
-The server side of atomic sub-dust Lightning swaps (amounts below the 330-sat
-dust limit), split out of the Boltz fork's `SubdustAtomicRouter` into its own
-service. The protocol (`ATOMIC_SUBDUST_PLAN.md`) is unchanged: 4-leaf shared
+The server side of the bridge's atomic Lightning swaps, split out of the Boltz
+fork's `SubdustAtomicRouter` into its own service: **sends below the 330-sat
+dust limit** (above it the bridge pays through the solver) and **every
+receive, any amount** — the solver's hold invoice cannot carry a NIP-57
+description hash, this one can (decision D10 in the operator's migration
+plan). The protocol (`ATOMIC_SUBDUST_PLAN.md`) is unchanged: 4-leaf shared
 vtxo, presigned claim/cancel pairs, split delta. It imports the same
 `src/atomic` library the bridge uses, so the client and server cannot drift.
 
@@ -55,7 +58,7 @@ Where this differs from the fork:
 
 | endpoint | does |
 |---|---|
-| `POST …/receive/init` `{amount, paymentHash, userPubkey, descriptionHash?}` | `{swapId, invoice}`: a hold invoice. Final CLTV is `⌈receiveWindow / blockTime⌉ + 18`, so the held HTLC outlives T (F10). The same hash returns the same invoice while it is unpaid (F17) |
+| `POST …/receive/init` `{amount, paymentHash, userPubkey, descriptionHash?, description?}` | `{swapId, invoice}`: a hold invoice for any positive amount (D10). `description` is the memo, refused beside `descriptionHash` (BOLT11 carries one or the other). 503 when the float cannot fund the amount right now. Final CLTV is `⌈receiveWindow / blockTime⌉ + 18`, so the held HTLC outlives T (F10). The same hash returns the same invoice while it is unpaid (F17) |
 | `GET …/receive/status?swapId=` | `{state, fundingOutpoint?, presigs?, boltzPubkey, refundLocktime, exitDelay, boltzScriptDelay}`, which is what the receiver needs to verify and claim |
 | `POST …/receive/settle` `{swapId, preimage}` | `{settled: true}`. Settling again is idempotent (F12) |
 
@@ -101,8 +104,11 @@ MTP refunds nothing.
 
 ## Ark key
 
-subdustd has its own key and its own float. It funds receives from that float,
-and send proceeds land back on it.
+subdustd has its own key and its own float. It funds every receive from that
+float, and sub-dust send proceeds land back on it. The float has to cover the
+largest receive you expect (amount + dust in eligible coins); dust-and-up
+sends land on the solver instead, so move Ark balance from the solver to this
+address now and then.
 
 ```bash
 bun run subdustd:keygen /data/subdustd.key   # once; refuses to overwrite

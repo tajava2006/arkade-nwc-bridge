@@ -85,11 +85,10 @@ export interface OfferServiceDeps {
   /** Account secret — same key the Ark wallet uses; signs/decrypts offers. */
   secretKey: Uint8Array
   outbox: OutboxWatcher
-  swaps: ArkadeSwaps
-  /** Ark wallet — the sub-dust receive claims to its address; wallet.identity signs. */
+  /** Ark wallet — the receive claims to its address; wallet.identity signs. */
   wallet: Wallet
-  /** Boltz REST base (no /v2 suffix). */
-  boltzApiUrl: string
+  /** subdustd's API base; undefined = no Lightning rail (offers answer Temporary Failure). */
+  subdustdUrl?: string
   /** ASP (arkd) REST base — the atomic sub-dust receive needs server params. */
   arkServerUrl: string
 }
@@ -119,7 +118,7 @@ function mint(secretKey: Uint8Array, outbox: OutboxWatcher): { noffer: string; r
 }
 
 export function startOfferService(deps: OfferServiceDeps): OfferService {
-  const { pool, db, secretKey, outbox, swaps, wallet, boltzApiUrl, arkServerUrl } = deps
+  const { pool, db, secretKey, outbox, wallet, subdustdUrl, arkServerUrl } = deps
   const pub = getPublicKey(secretKey)
 
   // Reuse the stored code iff it decodes and was minted under this account
@@ -159,7 +158,7 @@ export function startOfferService(deps: OfferServiceDeps): OfferService {
       // case is an invoice nobody waits for — harmless, no funds move.
       resumeSince: true,
       onevent: (event) => {
-        handleOfferRequest({ pool, db, secretKey, swaps, wallet, boltzApiUrl, arkServerUrl, relay: state.relay }, event).catch((err) => {
+        handleOfferRequest({ pool, db, secretKey, wallet, subdustdUrl, arkServerUrl, relay: state.relay }, event).catch((err) => {
           console.error('clink: offer handler crashed:', err)
         })
       },
@@ -192,9 +191,8 @@ interface HandlerCtx {
   pool: SimplePool
   db: Database
   secretKey: Uint8Array
-  swaps: ArkadeSwaps
   wallet: Wallet
-  boltzApiUrl: string
+  subdustdUrl?: string
   arkServerUrl: string
   relay: string
 }
@@ -264,24 +262,17 @@ async function handleOfferRequest(ctx: HandlerCtx, event: NostrEvent): Promise<v
   // bookkeeping lands.
   let issued: IssuedInvoice
   try {
+    if (!ctx.subdustdUrl) throw new Error('no Lightning rail configured')
     issued = await issueInvoice(
-      { swaps: ctx.swaps, wallet: ctx.wallet, boltzApiUrl: ctx.boltzApiUrl, arkServerUrl: ctx.arkServerUrl, db: ctx.db },
+      { wallet: ctx.wallet, subdustdUrl: ctx.subdustdUrl, arkServerUrl: ctx.arkServerUrl, db: ctx.db },
       { amountSats: amount, description, descriptionHash: zap?.descriptionHash },
     )
   } catch (err) {
-    if (err instanceof NetworkError) {
-      // Boltz rejected — usually amount outside reverse-swap limits. (Range
-      // is a SHOULD; populating min/max from Boltz limits is a refinement.)
-      const msg = (err.errorData as { error?: string } | undefined)?.error ?? err.message
-      // Log it too: the payer only ever sees their wallet's own rendering of
-      // the error (Zeus turns any failure into "could not connect to the CLINK
-      // relay"), so without this line a boltz-side outage is invisible here.
-      console.error(`clink: boltz rejected the ${amount}-sat invoice: ${msg}`)
-      await respond(ctx, event, { error: `Invalid Amount: ${msg}`, code: ERR_INVALID_AMOUNT })
-      return
-    }
+    // Logged: the payer only ever sees their wallet's own rendering of the
+    // error (Zeus turns any failure into "could not connect to the CLINK
+    // relay"), so without this line a subdustd-side refusal is invisible here.
     await respond(ctx, event, { error: 'Temporary Failure', code: ERR_TEMPORARY })
-    console.error('clink: invoice issue failed:', err)
+    console.error(`clink: ${amount}-sat invoice issue failed:`, err)
     return
   }
 

@@ -289,12 +289,11 @@ async function dispatch(
     case 'make_invoice':
       return handleMakeInvoice(
         {
-          swaps: deps.swaps,
+          lightning: deps.lightning,
           db: deps.db,
           conn,
           eventId: event.id,
           wallet: deps.wallet,
-          boltzApiUrl: deps.cfg.boltzApiUrl,
           arkServerUrl: deps.cfg.arkServerUrl,
         },
         params,

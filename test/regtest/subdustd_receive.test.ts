@@ -152,7 +152,13 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd receive endpoints on 
     expect(decoded.cltvExpiry).toBe(Math.ceil(600 / 30) + 18)
     expect((await post('init', { amount: 21, paymentHash: r.hash, userPubkey: user })).body).toEqual(a.body)
 
-    expect((await post('init', { amount: 400, paymentHash: newReceiver().hash, userPubkey: user })).body.error).toContain('is not sub-dust')
+    // D10: any amount; a plain description becomes the memo, never beside a hash.
+    const big = newReceiver()
+    const b = await post('init', { amount: 400, paymentHash: big.hash, userPubkey: user, description: 'tea' })
+    expect(b.status).toBe(200)
+    expect(await lnd.decodeInvoice(b.body.invoice)).toMatchObject({ valueSat: 400, paymentHash: big.hash })
+    await lnd.cancelHoldInvoice(big.hash)
+    expect((await post('init', { amount: 400, paymentHash: newReceiver().hash, userPubkey: user, description: 'x', descriptionHash })).body.error).toContain('not both')
     expect((await post('init', { amount: 21, paymentHash: 'xyz', userPubkey: user })).body.error).toBe('invalid parameter: paymentHash')
     expect((await fetch(`${base}/v2/subdust/atomic/receive/status?swapId=nope`)).status).toBe(400)
     await lnd.cancelHoldInvoice(r.hash)

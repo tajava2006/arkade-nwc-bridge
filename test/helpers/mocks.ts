@@ -82,7 +82,26 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
     async settle() {
       return 'settletxid-stub'
     },
+    // The atomic receive puts the wallet's x-only key into the swap script.
+    identity: { xOnlyPublicKey: async () => new Uint8Array(32).fill(7) },
   } as unknown as Wallet
+}
+
+/**
+ * subdustd's /receive/init, offline: records each request body and answers
+ * with `invoice` (default: INVOICE_2000_SAT re-hashed to the request's own
+ * payment hash, so the returned invoice and the stored swap agree).
+ */
+export function stubSubdustdReceive(subdustdUrl: string, invoice?: string): { bodies: Record<string, unknown>[] } {
+  const bodies: Record<string, unknown>[] = []
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url) !== `${subdustdUrl}/v2/subdust/atomic/receive/init`) throw new Error(`unexpected fetch ${url}`)
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    bodies.push(body)
+    const inv = invoice ?? invoiceWithHash(String(body.paymentHash))
+    return new Response(JSON.stringify({ swapId: `swap-${bodies.length}`, invoice: inv }), { status: 201, headers: { 'content-type': 'application/json' } })
+  }) as unknown as typeof fetch
+  return { bodies }
 }
 
 /**
