@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import * as defaults from './defaults'
+import { parseLightningConfig, type LightningConfig } from './lightning_config'
 
 export type { Network } from './defaults'
 
@@ -21,6 +22,8 @@ export interface Config {
    */
   boltzWsUrl?: string
   esploraUrls: readonly string[]
+  /** Solver + subdustd + emulator key (data/config.json only); undefined = Ark-only. */
+  lightning?: LightningConfig
   httpBind: string
   httpPort: number
   dbPath: string
@@ -54,6 +57,8 @@ export function loadConfig(): Config {
       overrides.esploraUrls && overrides.esploraUrls.length > 0
         ? overrides.esploraUrls
         : defaults.ESPLORA_URLS,
+    // Throws on a malformed block — boot must not guess at payment endpoints.
+    lightning: parseLightningConfig((overrides as { lightning?: unknown }).lightning, baseDir),
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,
     // A relative override resolves against the loaded config's own base
