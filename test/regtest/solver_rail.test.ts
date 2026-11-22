@@ -141,4 +141,43 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () 
     await until(r.id, 'claimed')
     await waitFor('the claim to land', async () => ((await wallet.getBalance()).available >= before + 6_000 ? true : undefined))
   }, 300_000)
+
+  // SM-52 / F31: our emulator is the instant-refund cosigner. If it is down at
+  // the moment a payment fails, the solver cannot push the refund and parks the
+  // swap `stuck` FOR A HUMAN — on purpose upstream (a refund after `paying` is a
+  // judgement call: a false "failed" would pay twice). Nothing retries it; the
+  // client keeps waiting (no loss) until the refund locktime, ~days out. The
+  // operator's lever is the solver's `refund-now` (the non-interactive refund
+  // leaf, no timelock): it lands at once and the client sees `refunded`.
+  test('emulator outage at failure: the client waits (no loss), the solver parks it stuck, refund-now returns the funds', async () => {
+    const started = new Date().toISOString()
+    const preimage = randomBytes(32).toString('hex')
+    const hash = sha256(preimage)
+    const bolt11 = peer('addholdinvoice', hash, '--amt', '5000').payment_request
+    const before = (await wallet.getBalance()).available
+    const res = await rail.client.pay(bolt11)
+    const id = res.kind === 'swap' ? res.swap.id : ''
+    await waitFor('the payee to hold the HTLC', () => (peer('lookupinvoice', hash).state === 'ACCEPTED' ? true : undefined))
+    execFileSync('docker', ['stop', 'emulator'])
+    let solverId: string
+    try {
+      peer('cancelinvoice', hash)
+      solverId = await waitFor('the solver to give up on the refund', () => {
+        const m = [...execFileSync('docker', ['logs', '--since', started, 'intent-solver'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+          .matchAll(/tick ([0-9a-f-]{36}) failed/g)]
+        return m.at(-1)?.[1]
+      }, 60_000)
+    } finally {
+      execFileSync('docker', ['start', 'emulator'])
+    }
+    const solver = (...args: string[]) =>
+      execFileSync('docker', ['exec', '-w', '/app', 'intent-solver', 'node', 'packages/solver-app/dist/cli.js', ...args], { encoding: 'utf8' })
+    expect(solver('status', solverId).match(/"state":"([a-z_]+)"/)?.[1]).toBe('stuck')
+    await Bun.sleep(15_000) // the emulator is back: still nothing moves by itself
+    expect((await outcomeOf(id))?.outcome).toBe('funded')
+
+    expect(solver('refund-now', solverId)).toContain('COVENANT REFUND PUSHED')
+    await until(id, 'refunded')
+    await waitFor('the refund back in the wallet', async () => ((await wallet.getBalance()).available >= before ? true : undefined))
+  }, 300_000)
 })
