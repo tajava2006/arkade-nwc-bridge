@@ -1,6 +1,6 @@
 import '../../src/polyfills'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -50,9 +50,6 @@ const waitFor = async <T>(what: string, fn: () => Promise<T | undefined> | T | u
   }
   throw new Error(`timeout waiting for ${what}`)
 }
-const payers: ChildProcess[] = []
-const peerPays = (bolt11: string) =>
-  payers.push(spawn('docker', ['exec', 'lnd-peer', 'lncli', '--network=regtest', 'payinvoice', '--force', bolt11], { stdio: 'ignore' }))
 
 describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () => {
   let wallet: Wallet
@@ -92,7 +89,6 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () 
   }, 300_000)
 
   afterAll(async () => {
-    for (const p of payers) p.kill()
     await rail?.dispose()
     await wallet?.dispose()
   })
@@ -110,14 +106,6 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () 
     expect(sha256(record.settlementPreimageHex!)).toBe(inv.r_hash)
   }, 300_000)
 
-  test('receive: the drive claims by itself once the payer pays', async () => {
-    const before = (await wallet.getBalance()).available
-    const r = await rail.client.receive({ amount: 7_000n, via: 'lightning' })
-    peerPays(r.artifact.bolt11)
-    await until(r.id, 'claimed')
-    await waitFor('the claim to land', async () => ((await wallet.getBalance()).available >= before + 7_000 ? true : undefined))
-  }, 300_000)
-
   test('a failed pay comes back at once through our emulator (no timelock wait)', async () => {
     const preimage = randomBytes(32).toString('hex')
     const hash = sha256(preimage)
@@ -131,15 +119,23 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU)('solver rail on regtest', () 
     await waitFor('the refund back in the wallet', async () => ((await wallet.getBalance()).available >= before ? true : undefined))
   }, 300_000)
 
-  test('a restart resumes a live swap from the store: a receive issued before, paid after, still claims', async () => {
-    const before = (await wallet.getBalance()).available
-    const r = await rail.client.receive({ amount: 6_000n, via: 'lightning' })
+  // The solver serves sends only (D10: every receive is subdustd's), so the
+  // restart case is a send: the payee holds the HTLC while the rail restarts,
+  // then settles — the reopened store still drives it to `paid`, which is what
+  // the bridge's boot replay (watchSolverSends) relies on.
+  test('a restart resumes a live swap from the store: a send in flight across the restart still lands paid', async () => {
+    const preimage = randomBytes(32).toString('hex')
+    const hash = sha256(preimage)
+    const bolt11 = peer('addholdinvoice', hash, '--amt', '6000').payment_request
+    const res = await rail.client.pay(bolt11)
+    const id = res.kind === 'swap' ? res.swap.id : ''
+    await waitFor('the payee to hold the HTLC', () => (peer('lookupinvoice', hash).state === 'ACCEPTED' ? true : undefined))
     await rail.dispose()
     rail = await startSolverRail({ wallet, db, lightning, network: 'regtest', arkInfo })
-    expect((await rail.client.swaps()).length).toBeGreaterThanOrEqual(4)
-    peerPays(r.artifact.bolt11)
-    await until(r.id, 'claimed')
-    await waitFor('the claim to land', async () => ((await wallet.getBalance()).available >= before + 6_000 ? true : undefined))
+    expect((await rail.client.swaps()).some((s) => s.id === id)).toBe(true)
+    peer('settleinvoice', preimage)
+    const paid = await until(id, 'paid')
+    expect(paid.lock?.hash).toBe(hash)
   }, 300_000)
 
   // SM-52 / F31: our emulator is the instant-refund cosigner. If it is down at

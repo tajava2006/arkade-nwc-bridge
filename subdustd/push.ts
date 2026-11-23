@@ -2,7 +2,7 @@ import type { ServerWebSocket, WebSocketHandler } from 'bun'
 
 // Push channel: the subset of the Boltz sidecar's `swap.update` WebSocket the
 // bridge's client (src/atomic/push_ws.ts) speaks, served at /v2/ws on
-// the API port — where that client already looks (`${apiUrl}/v2/ws`). Pure
+// the API port — where that client looks (`${subdustdUrl}/v2/ws`). Pure
 // accelerator: the client's 30s reconciler stays the source of truth, so a
 // dropped socket costs latency, never correctness.
 //
