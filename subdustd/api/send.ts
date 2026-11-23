@@ -21,10 +21,16 @@ import { DuplicatePaymentHash, type SwapRow, type SwapStore } from '../store.ts'
 import type { ServerSendState } from '../state.ts'
 import { badRequest, HttpError, validateArgs, xOnlyHex, type SwapLocks } from './http_error.ts'
 
-// Atomic sub-dust SEND (ARK → LN), server side. We are the CLAIMER and commit
-// no capital: the user funds a 4-leaf shared vtxo and hands over two
+// Atomic SEND (ARK → LN), any amount (D11), server side. We are the CLAIMER
+// and commit no capital: the user funds a 4-leaf shared vtxo and hands over two
 // presignatures; we verify, pay the invoice, and claim `a` (+ fee) with the
 // revealed preimage. Request/response shapes are the Boltz fork's.
+//
+// The 4-leaf script gives the claimer no unilateral path (uexit is the
+// funder's alone), so a funder who unrolls while holding our HTLC can keep both
+// the payment and the coin: the claimer is exposed up to `a`. That was bounded
+// by sub-dust when only sub-dust came here; at any amount it is acceptable only
+// while the funder is our own bridge (SUBDUST_ATOMIC_SECURITY_REVIEW F32).
 //
 // Two deliberate departures from the fork:
 //  - F25: a thrown sendPayment is "outcome unknown". The row stays ln_inflight
@@ -38,7 +44,7 @@ const nowSecs = () => Math.floor(Date.now() / 1000)
 const sha256Hex = (h: string) => createHash('sha256').update(Buffer.from(h, 'hex')).digest('hex')
 const timelockType = (v: bigint): 'seconds' | 'blocks' => (v >= 512n ? 'seconds' : 'blocks')
 
-/** The Boltz routing-fee rule: 0.35% with a 121-sat floor — always the floor at sub-dust. */
+/** The Boltz routing-fee rule: 0.35% with a 121-sat floor (the floor up to 34,571 sats). */
 export const routingFeeLimitSat = (amountSat: number): number => Math.max(Math.ceil(amountSat * 0.0035), 121)
 
 export const sendFeeSats = (amountSat: number, pct: number): number => (pct > 0 ? Math.ceil((amountSat * pct) / 100) : 0)
@@ -103,7 +109,7 @@ export class SendService {
     const a = decoded.valueSat
     const info = await signer.getInfo()
     const dust = Number(info.dust)
-    if (a <= 0 || a >= dust) throw badRequest(`amount ${a} is not sub-dust (dust ${dust}) — use a regular swap`)
+    if (a <= 0) throw badRequest(`amount ${a} must be positive`)
 
     // Idempotent init (F17): an unfunded init for this invoice with T still well
     // ahead is handed back as-is, so a client that failed before funding can retry.

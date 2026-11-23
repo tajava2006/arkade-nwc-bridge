@@ -112,7 +112,7 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd send endpoints on reg
   })
 
   /** The bridge's half of a send, up to presigned: init → fund the shared vtxo → presign the claim. */
-  const prepare = async (invoice: string) => {
+  const prepare = async (invoice: string, minCoin = 0) => {
     const init = await post('init', { invoice, userPubkey: hex.encode(await funder.xOnlyPublicKey()) })
     expect(init.status).toBe(200)
     const i = init.body
@@ -129,7 +129,7 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd send endpoints on reg
       refundLocktime: BigInt(i.refundLocktime),
       exitDelay: d,
     })
-    const coin = (await funder.ownVtxos())[0]!
+    const coin = (await funder.ownVtxos()).find((v) => v.value >= minCoin)!
     const self = await funder.selfScript()
     const inputs: ArkTxInput[] = [{ txid: coin.txid, vout: coin.vout, value: coin.value, tapLeafScript: self.forfeit(), tapTree: self.encode() }]
     const outpoint = await fundShared(inputs, [{ script: script.pkScript, amount: BigInt(coin.value) }], unroll, funder.identity, funder.ark)
@@ -163,7 +163,7 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd send endpoints on reg
     }
   }
 
-  test('init: shape, idempotent for an unfunded invoice (F17), refuses dust+ and garbage', async () => {
+  test('init: shape, idempotent for an unfunded invoice (F17), any amount (D11), refuses garbage', async () => {
     const inv = peer('addinvoice', '--amt', '21')
     const user = hex.encode(await funder.xOnlyPublicKey())
     const a = await post('init', { invoice: inv.payment_request, userPubkey: user })
@@ -176,7 +176,8 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd send endpoints on reg
     expect(again.body.swapId).toBe(a.body.swapId)
 
     const big = await post('init', { invoice: peer('addinvoice', '--amt', '1000').payment_request, userPubkey: user })
-    expect(big).toMatchObject({ status: 400, body: { error: expect.stringContaining('is not sub-dust') } })
+    expect(big.status).toBe(200)
+    expect(big.body.feeSats).toBe(5) // ceil(1,000 × 0.5%)
     expect((await post('init', { invoice: 'lnbcrt1garbage', userPubkey: user })).status).toBe(400)
     expect((await post('init', { invoice: inv.payment_request })).body.error).toBe('undefined parameter: userPubkey')
     expect((await fetch(`${base}/v2/subdust/atomic/send/status?swapId=nope`)).status).toBe(400)
@@ -198,6 +199,51 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd send endpoints on reg
     )
     expect(back.value).toBe(p.shared.value - 21 - 1)
   }, 120_000)
+
+  /** A coin of exactly `value` on the funder, for dust+ sends (the float holds 2,000-sat coins). */
+  const bigCoin = async (value: number) => {
+    topUpFunder(value)
+    sh('arkd', 'ark', 'send', '--to', (await funder.receiveAddress()).encode(), '--amount', String(value), '--password', 'secret')
+    await waitFor(`a ${value}-sat coin`, async () => (await funder.ownVtxos()).find((v) => v.value === value))
+  }
+
+  // D11: subdustd carries dust+ sends too. Same script and split; what changes
+  // is that both claim outputs are regular vtxos and the fee scales with `a`.
+  test('dust+ (D11): pays 100,000, claims a + fee as a regular coin, the change comes back regular', async () => {
+    await bigCoin(150_000)
+    const inv = peer('addinvoice', '--amt', '100000')
+    const p = await prepare(inv.payment_request, 150_000)
+    expect(p.init.feeSats).toBe(500)
+    const fund = await post('fund', p.fundBody)
+    expect(fund.body.status).toBe('claimed')
+    expect(sha256(fund.body.preimage)).toBe(inv.r_hash)
+    expect(peer('lookupinvoice', inv.r_hash).state).toBe('SETTLED')
+    const back = await waitFor('the claim change', async () =>
+      (await funder.ownVtxos()).find((v) => v.txid === fund.body.claimTxid),
+    )
+    expect(back.value).toBe(150_000 - 100_000 - 500)
+    const ours = await waitFor('our claim output', async () =>
+      (await signer.ownVtxos()).find((v) => v.txid === fund.body.claimTxid),
+    )
+    expect(ours.value).toBe(100_500)
+  }, 180_000)
+
+  test('dust+ (D11): LN fails → failed, and the cancel returns the whole funding', async () => {
+    await bigCoin(80_000)
+    const { hash } = secret()
+    const bolt11 = peer('addholdinvoice', hash, '--amt', '50000').payment_request
+    const p = await prepare(bolt11, 80_000)
+    const funding = post('fund', p.fundBody)
+    await waitFor('the peer to hold our HTLC', () => peer('lookupinvoice', hash).state === 'ACCEPTED' || undefined)
+    peer('cancelinvoice', hash)
+    expect((await funding).body.status).toBe('failed')
+    const c = await post('cancel', await cancelBody(p))
+    expect(c.body.status).toBe('cancelled')
+    const back = await waitFor('the funding back on the funder', async () =>
+      (await funder.ownVtxos()).find((v) => v.txid === c.body.cancelTxid),
+    )
+    expect(back.value).toBe(80_000)
+  }, 180_000)
 
   test('LN fails terminally → failed; a cancel during the live HTLC is refused, after it the funding comes back', async () => {
     const { hash } = secret()

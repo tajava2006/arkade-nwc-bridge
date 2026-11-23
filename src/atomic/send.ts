@@ -114,8 +114,11 @@ export const inflightSends = new Set<string>()
 // subdustd replying `status: 'claimed'` is NOT proof it spent our funding — only the
 // indexer showing the outpoint spent is. Imported (aliased) from ./ark_util.
 
+/** The most fee the bridge accepts from subdustd: 1% of `a`, never below dust. */
+export const maxSendFeeSats = (a: number, dust: number): number => Math.max(dust, Math.ceil(a / 100))
+
 /**
- * Send a sub-dust amount over LN through the atomic path. The bridge funds a
+ * Send an amount over LN through the atomic path (any size since D11). The bridge funds a
  * shared vtxo from its own vtxos spent WHOLE (V′ ≥ a + fee + dust, no funding
  * change), pre-signs the split, then subdustd pays + claims a (+ its advertised
  * feeSats — it fronts the LN routing cost). The claim change V′ − a − fee comes
@@ -139,7 +142,6 @@ export async function atomicSubdustSend(
   const serverXOnly = toXOnly(hex.decode(info.signerPubkey))
   const unroll = serverUnrollScript(info.checkpointTapscript)
   const dust = Number(info.dust)
-  if (a >= dust) throw new Error(`amount ${a} is not sub-dust (dust ${dust})`)
 
   const userXOnly = toXOnly(await deps.wallet.identity.xOnlyPublicKey())
 
@@ -152,9 +154,10 @@ export async function atomicSubdustSend(
   const T = BigInt(init.refundLocktime)
   const d = BigInt(init.exitDelay)
   // subdustd's advertised fee, sanity-capped: it rides on OUR funding, so refuse
-  // anything a sane operator wouldn't configure before locking coins to it.
+  // anything a sane operator wouldn't configure before locking coins to it. The
+  // cap scales with the amount (dust+ sends, D11): 1% or dust, whichever is more.
   const fee = init.feeSats ?? 0
-  if (!Number.isInteger(fee) || fee < 0 || fee > dust) {
+  if (!Number.isInteger(fee) || fee < 0 || fee > maxSendFeeSats(a, dust)) {
     throw new Error(`subdustd advertised an unreasonable feeSats ${init.feeSats} — refusing to fund`)
   }
 
