@@ -6,7 +6,6 @@
       "name": "arkade-nwc-bridge",
       "dependencies": {
         "@arkade-os/sdk": "0.5.11",
-        "@arkade-os/swap": "0.1.12",
         "@grpc/grpc-js": "^1.14.7",
         "@grpc/proto-loader": "^0.8.1",
         "@noble/curves": "2.4.0",
@@ -26,17 +25,12 @@
     },
   },
   "overrides": {
-    "@arkade-os/sdk": "0.5.11",
     "@noble/curves": "2.4.0",
     "@scure/base": "2.4.0",
     "@scure/btc-signer": "2.4.1",
   },
   "packages": {
     "@arkade-os/sdk": ["@arkade-os/sdk@0.5.11", "", { "dependencies": { "@bitcoinerlab/descriptors-scure": "3.1.7", "@marcbachmann/cel-js": "8.0.0", "@noble/curves": "2.4.0", "@noble/secp256k1": "3.0.0", "@scure/base": "2.4.0", "@scure/bip39": "2.4.0", "@scure/btc-signer": "2.4.1", "bip68": "1.0.4", "micro-packed": "0.11.1", "ws-electrumx-client": "1.0.5" }, "peerDependencies": { "@arkade-os/compiler": "^0.1.0-rc.1", "@react-native-async-storage/async-storage": ">=1.0.0", "expo": ">=54.0.0", "expo-background-task": "~1.0.10 || >=55.0.0", "expo-sqlite": "~16.0.10 || >=55.0.0", "expo-task-manager": "~14.0.9 || >=55.0.0" }, "optionalPeers": ["@arkade-os/compiler", "@react-native-async-storage/async-storage", "expo", "expo-background-task", "expo-sqlite", "expo-task-manager"] }, "sha512-7nVaFy3ng2YcBee2Exs+4ke/XWWPwJOXrHTZJFX7lKJwjqmlRVzCPuxBctL7QWAHEOlJ9MyUWyQSO418xeDkNQ=="],
-
-    "@arkade-os/solver-discovery": ["@arkade-os/solver-discovery@0.4.0", "", { "dependencies": { "@noble/curves": "^2.4.0", "@noble/hashes": "^2.4.0" } }, "sha512-oIKsS4lt8yXbUDKzo2uLd4cbZZLEN6/iGQlaOaW72mA7dvtLCznylVEpUTvpdIggQIIRd6DpvFzN/DlJXecBRg=="],
-
-    "@arkade-os/swap": ["@arkade-os/swap@0.1.12", "", { "dependencies": { "@arkade-os/sdk": "0.5.11", "@arkade-os/solver-discovery": "0.4.0", "@noble/ciphers": "2.1.1", "@noble/curves": "2.4.0", "@noble/hashes": "2.4.0", "@scure/base": "2.4.0", "@scure/btc-signer": "2.4.1", "light-bolt11-decoder": "3.2.0" }, "peerDependencies": { "nostr-tools": "2.24.1" }, "optionalPeers": ["nostr-tools"] }, "sha512-JCOLfEAWPO+nRwBNDY9o6ZCzmWtjYDpwq7ooCsDB17etHSPrWbCYrlW/8qthM+5F5Zyv+4+1+AY/03XfJKwDMA=="],
 
     "@bitcoinerlab/descriptors-core": ["@bitcoinerlab/descriptors-core@3.1.7", "", { "dependencies": { "@bitcoinerlab/miniscript": "^2.0.0", "lodash.memoize": "^4.1.2", "uint8array-tools": "^0.0.9", "varuint-bitcoin": "^2.0.0" }, "peerDependencies": { "@ledgerhq/ledger-bitcoin": "^0.3.1", "@noble/curves": "^2.0.1", "@noble/hashes": "^2.0.1", "@scure/base": "^2.0.0", "@scure/bip32": "^2.0.1", "@scure/btc-signer": "^2.0.1", "bip32": "^5.0.1", "bitcoinjs-lib": "^7.0.1", "ecpair": "^3.0.1" }, "optionalPeers": ["@ledgerhq/ledger-bitcoin", "@noble/curves", "@noble/hashes", "@scure/base", "@scure/bip32", "@scure/btc-signer", "bip32", "bitcoinjs-lib", "ecpair"] }, "sha512-7VccUDvKcHK7RF07Vo19Obax9jO3wlPWIXtvXy61GBqXptKv156O9Z4+sm2py1CuxPRpTXHlvH70G4KVVDoKlw=="],
 

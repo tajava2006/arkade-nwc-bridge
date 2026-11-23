@@ -96,7 +96,7 @@ import {
   classifyDestination,
   classifyVtxos,
   lightningPreview,
-  quoteLightningTotal,
+  subdustdFeePercent,
   type LnPreview,
   offboardDustChange,
   offboardFeeSat,
@@ -1029,9 +1029,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             swapsView({
               swaps: new SqliteAtomicSwapRepository(db).list(),
-              solverSends: r.ready.lightning
-                ? (await r.ready.lightning.solver.client.swaps()).filter((s) => s.route.take.corridor === 'lightning')
-                : [],
               nowSec: Math.floor(Date.now() / 1000),
               notice: msg ? { ok: url.searchParams.get('ok') === '1', text: msg } : undefined,
             }),
@@ -1602,49 +1599,35 @@ export function startWebServer(deps: WebServerDeps): WebServer {
 }
 
 /**
- * The /send confirm breakdown for a bolt11: decoded, then priced by the rail
- * that would pay it — a live solver quote for dust and up (nothing funded),
- * none for sub-dust (subdustd fixes its fee when the swap starts). A string is
- * the user-facing refusal.
+ * The /send confirm breakdown for a bolt11: decoded, then priced with
+ * subdustd's fee rule (exact — it fronts the routing). A string is the
+ * user-facing refusal.
  */
-async function previewInvoice(
-  ready: { lightning?: LightningRails; arkProvider: { getInfo(): Promise<{ dust: bigint }> } },
-  invoice: string,
-): Promise<LnPreview | string> {
+async function previewInvoice(ready: { lightning?: LightningRails }, invoice: string): Promise<LnPreview | string> {
   if (!ready.lightning) return 'this wallet has no Lightning rail configured'
-  let dust: number
+  let feePercent: number
   try {
-    dust = Number((await ready.arkProvider.getInfo()).dust)
+    feePercent = await subdustdFeePercent(ready.lightning.subdustdUrl)
   } catch (err) {
-    return `could not read the ASP's dust limit: ${(err instanceof Error ? err.message : String(err))}`
+    return `subdustd did not answer its fee rule: ${(err instanceof Error ? err.message : String(err))}`
   }
   let preview: LnPreview
   try {
-    preview = lightningPreview(invoice, dust)
+    preview = lightningPreview(invoice, feePercent)
   } catch (err) {
     return `invalid invoice: ${(err instanceof Error ? err.message : String(err))}`
   }
   if (!preview.amountSats || preview.amountSats <= 0) return '0-amount invoices are not supported'
-  try {
-    const total = await quoteLightningTotal(ready.lightning.solver.client, invoice, dust)
-    return total === undefined ? preview : lightningPreview(invoice, dust, total)
-  } catch (err) {
-    return `the solver would not quote this invoice: ${(err instanceof Error ? err.message : String(err))}`
-  }
+  return preview
 }
 
 function lnFeeRows(p: LnPreview): Array<{ label: string; value: string }> {
-  if (p.feeSat === null || p.totalSat === null) {
-    return [{ label: 'Fee', value: 'set by subdustd when the swap starts (sub-dust rail)' }]
-  }
   return [
-    { label: 'Fee', value: `${p.feeSat.toLocaleString()} sats` },
+    { label: 'Fee', value: `${p.feeSat.toLocaleString()} sats (${p.feePercent}%, routing included)` },
     { label: 'Total leaving wallet', value: `${p.totalSat.toLocaleString()} sats` },
   ]
 }
 
-function lnRailNote(p: LnPreview): string {
-  return p.rail === 'solver'
-    ? 'Paid through our solver: the fee is its live quote (a percentage plus a routing estimate), and the total above is what leaves your wallet. If the payment fails, the funds come back.'
-    : 'Below dust, paid through subdustd\'s atomic swap: the invoice amount plus a small fee leaves the wallet. If the payment fails, the funds come back.'
+function lnRailNote(_p: LnPreview): string {
+  return "Paid through subdustd's atomic swap: the total above leaves your wallet and subdustd pays the Lightning routing. The swap spends whole coins worth at least the total plus dust, and the excess comes straight back as one coin. If the payment fails, the funds come back."
 }

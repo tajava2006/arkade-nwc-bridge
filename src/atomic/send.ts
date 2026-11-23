@@ -26,6 +26,7 @@ import {
   type AtomicSwapRow,
   type SharedVtxo,
 } from './index'
+import { maxSendFeeSats } from './fees'
 import { postJson } from './http'
 import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from './ark_util'
 import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
@@ -110,12 +111,12 @@ const FUNDING_MARGIN_SECS = 600
  */
 export const inflightSends = new Set<string>()
 
+/** Refused before anything moved: the wallet has too few eligible coins for a + fee + dust. */
+export class AtomicInsufficientFunds extends Error {}
+
 // confirmClaimSpent = the shared confirmSpent poll (verify-before-bookkeep, F4):
 // subdustd replying `status: 'claimed'` is NOT proof it spent our funding — only the
 // indexer showing the outpoint spent is. Imported (aliased) from ./ark_util.
-
-/** The most fee the bridge accepts from subdustd: 1% of `a`, never below dust. */
-export const maxSendFeeSats = (a: number, dust: number): number => Math.max(dust, Math.ceil(a / 100))
 
 /**
  * Send an amount over LN through the atomic path (any size since D11). The bridge funds a
@@ -196,7 +197,7 @@ export async function atomicSubdustSend(
     { target: dust + a + fee, exitCostOf: makeExitCostOracle(deps.db) },
   )
   if (funding.length === 0) {
-    throw new Error(
+    throw new AtomicInsufficientFunds(
       `atomic send needs ${a + fee + dust} sats of eligible vtxos (regular, spendable, batch expiry past T+${FUNDING_MARGIN_SECS}s) — ` +
         `sub-dust/swept funds and soon-expiring vtxos don't qualify`,
     )
@@ -315,7 +316,7 @@ export async function atomicSubdustSend(
       deps.notify?.(
         'send-fail',
         () =>
-          `send: sub-dust LN pay failed (${fund.error || fund.status}) — reclaiming the funding [hash ${paymentHash.slice(0, 8)}]`,
+          `send: LN pay failed (${fund.error || fund.status}) — reclaiming the funding [hash ${paymentHash.slice(0, 8)}]`,
       )
       // Unwind here, while subdustd is on the line and has just declared the pay
       // terminally failed — otherwise V sits locked until T. Best-effort by
@@ -346,6 +347,11 @@ export async function atomicSubdustSend(
     // but if the claim hasn't landed on-chain we keep the swap recoverable in
     // ln_inflight so the refund executor reclaims V after T (subdustd can't have it
     // both ways: it took V, or we get it back).
+    // The preimage goes on the row first, whichever branch follows: if we die
+    // before the caller settles its NWC row, the crash-window reconcile
+    // settles it from this row, and a settled payment without its preimage is
+    // no proof of payment.
+    repo.setPreimage(init.swapId, fund.preimage)
     if (await confirmClaimSpent(indexer, shared.txid, shared.vout)) {
       repo.transition(init.swapId, 'claimed')
       // Terminal success: the shared vtxo is spent by the claim split (our change
@@ -353,7 +359,6 @@ export async function atomicSubdustSend(
       // lifecycle-owned vault row.
       releaseVaultRow(deps.db, shared.txid, shared.vout)
     } else {
-      repo.setPreimage(init.swapId, fund.preimage)
       console.warn(
         `atomic send ${init.swapId}: subdustd reported claimed but the shared vtxo isn't spent per the indexer — keeping recoverable (F4); refund executor reclaims V after T`,
       )
@@ -361,8 +366,8 @@ export async function atomicSubdustSend(
     // After the F4 if/else on purpose: the LN payment succeeded either way
     // (we hold the preimage) — only the claim bookkeeping differs.
     deps.notify?.(
-      'send-subdust',
-      () => `send: LN paid — ${a} sats (+${fee} fee, sub-dust) [hash ${paymentHash.slice(0, 8)}]`,
+      'send-ln',
+      () => `send: LN paid — ${a} sats (+${fee} fee) [hash ${paymentHash.slice(0, 8)}]`,
     )
     return { amount: a + fee, preimage: fund.preimage, txid, swapId: init.swapId }
   } finally {
@@ -553,7 +558,7 @@ export async function refundAtomicSend(
   deps.notify?.(
     'refund',
     () =>
-      `send: sub-dust refund complete — ${coin.value} sats returned (arkTx ${refundTxid.slice(0, 12)}…) [hash ${swap.paymentHash.slice(0, 8)}]`,
+      `send: refund complete — ${coin.value} sats returned (arkTx ${refundTxid.slice(0, 12)}…) [hash ${swap.paymentHash.slice(0, 8)}]`,
   )
   releaseVaultRow(deps.db, txid, vout)
   return { txid: refundTxid, amount: coin.value }
@@ -675,7 +680,7 @@ export async function cancelAtomicSend(deps: AtomicSendDeps, swapId: string): Pr
   deps.notify?.(
     'refund',
     () =>
-      `send: sub-dust cancelled early — ${coin.value} sats returned without waiting for T (arkTx ${cancelTxid.slice(0, 12)}…) [hash ${swap.paymentHash.slice(0, 8)}]`,
+      `send: cancelled early — ${coin.value} sats returned without waiting for T (arkTx ${cancelTxid.slice(0, 12)}…) [hash ${swap.paymentHash.slice(0, 8)}]`,
   )
   releaseVaultRow(deps.db, txid, vout)
   return { txid: cancelTxid, amount: coin.value }
@@ -923,9 +928,9 @@ export async function resumeAtomicSends(
     // overlap with the live paid DM should read as a reconcile, not a
     // second payment.
     deps.notify?.(
-      'send-subdust',
+      'send-ln',
       () =>
-        `send: sub-dust claim confirmed after restart — ${cur.amount} sats [hash ${cur.paymentHash.slice(0, 8)}]`,
+        `send: claim confirmed after restart — ${cur.amount} sats [hash ${cur.paymentHash.slice(0, 8)}]`,
     )
     if (preimage) repo.setPreimage(swapId, preimage)
     if (fundingOutpoint) {
@@ -1006,7 +1011,7 @@ export async function resumeAtomicSends(
             // Gated on the actual transition so repeat polls stay silent.
             deps.notify?.(
               'send-fail',
-              () => `send: sub-dust LN pay failed — reclaiming the funding [hash ${swap.paymentHash.slice(0, 8)}]`,
+              () => `send: LN pay failed — reclaiming the funding [hash ${swap.paymentHash.slice(0, 8)}]`,
             )
           }
           result.refundWait.push(swap.id)

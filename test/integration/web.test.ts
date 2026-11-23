@@ -127,6 +127,15 @@ const CFG: Config = {
   dbPath: '',
 }
 
+// subdustd's fee-rule endpoint, all the /send review asks of it.
+const FAKE_SUBDUSTD = Bun.serve({
+  port: 0,
+  fetch: (req) =>
+    new URL(req.url).pathname === '/v2/subdust/atomic/send/fees'
+      ? Response.json({ feePercent: 0.002 })
+      : new Response('not found', { status: 404 }),
+})
+
 // Pre-built ready-mode AppState so the web server skips the /setup gate.
 // The setup flow itself has its own test below.
 function readyState(): AppStateRef {
@@ -137,11 +146,8 @@ function readyState(): AppStateRef {
       mode: 'ready',
       arkServerUrl: 'https://stub',
       wallet,
-      // The solver quotes 2500-sat invoices at a 5-sat fee.
-      lightning: {
-        solver: { client: { quote: async () => ({ give: { amount: 250_005n } }) } } as never,
-        subdustdUrl: 'http://subdustd.invalid',
-      },
+      // subdustd's fee rule: 0.002% → 5 sats on the 250,000-sat review invoice.
+      lightning: { subdustdUrl: FAKE_SUBDUSTD.url.origin },
       nostr: STUB_NOSTR,
       offers: STUB_OFFERS,
       pool: STUB_POOL,
@@ -365,6 +371,7 @@ describe('web server', () => {
     expect(body).toContain('Fee')
     expect(body).toContain('5 sats')
     expect(body).toContain('Total leaving wallet')
+    expect(body).toContain('250,005 sats')
   })
 
   test('POST /send/confirm onchain records a pending offboard and acks', async () => {

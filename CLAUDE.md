@@ -36,27 +36,20 @@ src/
                                baselines — no backfill), own-boarding-input
                                sweep suppression, esplora-confirmed settles
   wallet.ts                  — privateKey → SingleKey → Wallet (in-memory repos)
-  lightning_config.ts        — data/config.json `lightning` block (solver URL
-                               + card, subdustd URL, emulator key), strict;
-                               absent ⇒ Ark-only boot, LN methods refuse
-  solver_rail.ts             — @arkade-os/swap client pinned to OUR solver
-                               (card as the only discovery snapshot, HTTP,
-                               our emulator key, drive auto); funds through
-                               withSpendPolicy so coin policy still applies
-  swap_store.ts              — the swap client's SQLite backend on the bridge
-                               db (prefix swapclient_, tables it owns)
-  ln_send.ts                 — sendLightning: ≥ dust → solver pay, < dust →
-                               atomic send (subdustd); preimage hash-verified
-                               (record, else claim witness via arkd);
-                               LnSendUnresolved keeps the NWC row pending
+  lightning_config.ts        — data/config.json `lightning` block (subdustd
+                               URL), strict; the solver-era keys refuse with
+                               the reason; absent ⇒ Ark-only boot, LN
+                               methods refuse
+  ln_send.ts                 — sendLightning: every amount → atomic send
+                               (subdustd, D11); LnSendUnresolved keeps the
+                               NWC row pending, too few coins → LnSendRefused
+                               (insufficientFunds)
   ln_receive.ts              — issueInvoice: EVERY amount → atomic receive on
-                               subdustd (D10: the solver's hold invoice can't
-                               carry a NIP-57 description hash) + the
+                               subdustd (D10: NIP-57 description hash) + the
                                reconcile that claims and flips NWC rows
   ln_ledger.ts               — settle/failOutgoing (pending-gated, + budget
-                               counter), watchSolverSends (swap listener +
-                               boot replay = restart recovery, send DMs),
-                               reconcileAtomicSendRows (M1)
+                               counter), reconcileAtomicSendRows (M1 — the
+                               crash-window settle, also at boot)
   exit/                      — unilateral exit (EXIT_DESIGN.md). ASP-free:
                                vault.ts (offline proof store — exit_proof_txs
                                + exit_vtxos incl. quarantine), proof_sync.ts +
@@ -146,7 +139,7 @@ src/
                                (ln_receive.ts, same core as the CLINK noffer):
                                an atomic receive on subdustd for any amount,
                                1:1 (ATOMIC_SUBDUST_PLAN.md)
-    pay_invoice.ts           — via ln_send.ts (solver ≥ dust, atomic < dust);
+    pay_invoice.ts           — via ln_send.ts (atomic, any amount);
                                amount stays the invoice nominal, fees_paid =
                                our cost; an unresolved outcome leaves the row
                                pending (INTERNAL, do not retry)
@@ -179,8 +172,8 @@ src/
                                layout.ts injects the SSE client JS
 subdustd/                    — separate service (own entrypoint + Dockerfile,
                                build context = this repo root): the server side
-                               of the atomic swaps (every receive, sub-dust
-                               sends), imports src/atomic so
+                               of the atomic swaps (every send and receive, any
+                               amount — D10/D11), imports src/atomic so
                                client and server share one protocol lib. Same
                                no-env rule: one strict JSON config (unknown keys
                                fail boot). See subdustd/README.md for the knob
@@ -277,9 +270,9 @@ row exists. Logs go to stdout; when running in background pipe to
   `data/config.json` > `bridge_server` row > defaults, so a docker/regtest
   config.json still wins over the fresh-start row. The file is intentionally
   absent from a fresh clone; don't add it to defaults or examples checked
-  into the repo. Lightning is config.json-only (`lightning`: solver URL +
-  card, subdustd URL, emulator key — operator infrastructure, strictly
-  parsed); without it the bridge boots Ark-only. `nostrRelays` in the same
+  into the repo. Lightning is config.json-only (`lightning`: the subdustd
+  URL — operator infrastructure, strictly parsed); without it the bridge
+  boots Ark-only. `nostrRelays` in the same
   file replaces OUTBOX_BOOTSTRAP_RELAYS + NWC_RELAYS_FALLBACK (private
   relay / regtest): the bridge then opens no other relay.
 - **Two-phase boot.** [`src/index.ts`](src/index.ts) starts the web
@@ -317,21 +310,21 @@ row exists. Logs go to stdout; when running in background pipe to
   accept. This only concerns the checkpoint script; vtxo addresses derive
   from `unilateralExitDelay`.
 - **The ark dependency chain must stay a single instance.**
-  `@arkade-os/swap` pins `@arkade-os/sdk` to an *exact* version,
-  and that SDK in turn pins `@noble/curves` / `@scure/base` /
+  `@arkade-os/sdk` pins `@noble/curves` / `@scure/base` /
   `@scure/btc-signer` exactly. Running ahead of those pins puts two
   copies of the same library in the tree: `tsc` rejects it outright
   (`Wallet` vs `IWallet`, "separate declarations of a private property"),
   and the failure mode where it *doesn't* is worse — two `Transaction`
   classes on a money path. The `overrides` block in package.json is what
-  holds the line; `./update-deps.sh` compares each override with what
-  `@arkade-os/swap` and the SDK declare and stops on a mismatch. Bump those
-  four by hand only when swap bumps its own pin. (`@noble/hashes` 2.0.1 also
+  holds the line; `./update-deps.sh` compares each override with what the
+  SDK declares and stops on a mismatch. Bump those three by hand only when
+  the SDK bumps its own pins. (`@noble/hashes` 2.0.1 also
   sits in the tree via nostr-tools — off the ark signing path, left alone.)
-- **The swap client must stay pinned to our own infrastructure.** Its
-  defaults reach Ark Labs (the discovery registry, the emulator key a
-  refund covenant depends on); solver_rail.ts overrides both — our card as
-  the only snapshot, our `emulatorPubkey`. Don't drop either override.
+- **Atomic sends trust the funder (D11).** The 4-leaf script gives
+  subdustd, the claimer on a send, no unilateral path: a funder who unrolls
+  while subdustd's HTLC is held keeps both sides, up to `a`. Fine while the
+  funder is the operator's own bridge; before subdustd serves anyone else it
+  needs a v2 script with a claimer unilateral leaf.
 - **`transactions.amount_msat` = the BOLT11 nominal, both
   directions; `fees_paid_msat` = our cost.** Wallet movement is
   derived (incoming credits amount − fees, outgoing debits

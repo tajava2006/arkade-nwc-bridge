@@ -8,7 +8,8 @@ import {
   type ExtendedVirtualCoin,
   type OperatorInfo,
 } from '@arkade-os/sdk'
-import type { SwapClient } from '@arkade-os/swap'
+import { getJson } from './atomic/http'
+import { sendFeeSats } from './atomic/fees'
 import { decodeInvoice } from './lib/bolt11'
 import { decode as decodeBolt11 } from 'light-bolt11-decoder'
 
@@ -44,9 +45,8 @@ export function classifyDestination(raw: string): Rail | null {
 }
 
 /**
- * The reads the /send breakdown needs, fetched together. No Lightning fee
- * table: the solver prices each invoice when asked (its fee includes a live
- * routing estimate), so LN fees come from a quote at preview time.
+ * The reads the /send breakdown needs, fetched together. Lightning fees aren't
+ * here: the preview asks subdustd for its fee rule when an invoice is pasted.
  */
 export interface SendData {
   arkInfo: OperatorInfo
@@ -192,48 +192,41 @@ export interface LnPreview {
   description: string
   paymentHash: string
   payee: string | undefined
-  /** Which rail pays it: our solver (dust and up) or subdustd (below dust). */
-  rail: 'solver' | 'subdust'
-  /** null when not known before sending (sub-dust: subdustd fixes it at init). */
-  feeSat: number | null
-  totalSat: number | null
+  /** subdustd's fee rule (percent), as it answered at preview. */
+  feePercent: number
+  feeSat: number
+  /** What leaves the wallet: invoice + fee. subdustd pays the routing itself. */
+  totalSat: number
 }
 
 /**
  * Pre-send breakdown for a bolt11 invoice: what's billed (invoice amount), the
- * fee and the total that leaves the wallet. `quotedTotalSat` is the solver
- * quote's give (fee included) for dust-and-up invoices; sub-dust ones have no
- * quote — subdustd sets its fee when the swap starts. The payee node key isn't
- * in decodeInvoice's shape, so it's pulled best-effort from the raw sections.
+ * fee and the total that leaves the wallet. Exact, because subdustd's fee is a
+ * fixed percentage and it fronts the routing cost (`sendFeeSats` is the formula
+ * it charges with). The payee node key isn't in decodeInvoice's shape, so it's
+ * pulled best-effort from the raw sections.
  */
-export function lightningPreview(invoice: string, dust: number, quotedTotalSat?: number): LnPreview {
+export function lightningPreview(invoice: string, feePercent: number): LnPreview {
   const decoded = decodeInvoice(invoice)
-  const known = quotedTotalSat !== undefined
+  const feeSat = sendFeeSats(decoded.amountSats, feePercent)
   return {
     amountSats: decoded.amountSats,
     description: decoded.description,
     paymentHash: decoded.paymentHash,
     payee: payeeNodeKey(invoice),
-    rail: decoded.amountSats < dust ? 'subdust' : 'solver',
-    feeSat: known ? quotedTotalSat - decoded.amountSats : null,
-    totalSat: known ? quotedTotalSat : null,
+    feePercent,
+    feeSat,
+    totalSat: decoded.amountSats + feeSat,
   }
 }
 
-/**
- * The solver's quoted total (invoice + fee) for paying `invoice`, without
- * accepting it — an RFQ to our own solver, nothing funded. Undefined below
- * dust (that rail is subdustd's). Throws the solver's refusal (out of limits,
- * no route) so the preview can show it before anything moves.
- */
-export async function quoteLightningTotal(
-  client: Pick<SwapClient, 'quote'>,
-  invoice: string,
-  dust: number,
-): Promise<number | undefined> {
-  if ((decodeInvoice(invoice).amountSats ?? 0) < dust) return undefined
-  const q = await client.quote({ to: invoice })
-  return Number(q.give.amount)
+/** subdustd's send fee rule, read before anything is initiated. */
+export async function subdustdFeePercent(subdustdUrl: string): Promise<number> {
+  const { feePercent } = await getJson<{ feePercent: unknown }>(`${subdustdUrl}/v2/subdust/atomic/send/fees`)
+  if (typeof feePercent !== 'number' || !Number.isFinite(feePercent) || feePercent < 0 || feePercent >= 100) {
+    throw new Error(`unexpected fee rule ${JSON.stringify(feePercent)}`)
+  }
+  return feePercent
 }
 
 function payeeNodeKey(invoice: string): string | undefined {

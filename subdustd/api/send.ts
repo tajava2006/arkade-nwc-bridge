@@ -6,6 +6,7 @@ import {
   computeClaimSplit,
   finishCancel,
   finishClaim,
+  sendFeeSats,
   verifyPresig,
   type AtomicOutput,
   type AtomicPresig,
@@ -47,7 +48,6 @@ const timelockType = (v: bigint): 'seconds' | 'blocks' => (v >= 512n ? 'seconds'
 /** The Boltz routing-fee rule: 0.35% with a 121-sat floor (the floor up to 34,571 sats). */
 export const routingFeeLimitSat = (amountSat: number): number => Math.max(Math.ceil(amountSat * 0.0035), 121)
 
-export const sendFeeSats = (amountSat: number, pct: number): number => (pct > 0 ? Math.ceil((amountSat * pct) / 100) : 0)
 
 const CANCELLABLE: readonly ServerSendState[] = ['init', 'funded', 'ln_inflight', 'failed', 'refund_wait']
 
@@ -377,6 +377,11 @@ export class SendService {
     } finally {
       release()
     }
+  }
+
+  /** The fee rule, so a client can price a send before init (the routing cost is ours, not the payer's). */
+  fees() {
+    return { feePercent: this.d.knobs.sendFeePercent }
   }
 
   status(query: unknown) {

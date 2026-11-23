@@ -5,10 +5,10 @@ wallet service that gives a nostr client (Amethyst, Damus, Primal,
 Alby, …) Lightning payments without needing to run a Lightning node.
 Clients **send** over NWC (`pay_invoice`); **receiving** is over a
 static [CLINK noffer](RECEIVE_DESIGN.md), not per-client NWC invoices.
-The Lightning side is handled by the Ark server operator's own swap
-services against an [Ark Protocol](https://arkadeos.com) wallet: an
-[intent solver](https://github.com/arkade-os/intent-solver) for sends,
-and `subdustd` (in this repo) for receives and sends below the dust limit.
+The Lightning side is handled by the Ark server operator's own atomic
+swap service, `subdustd` (in this repo), against an
+[Ark Protocol](https://arkadeos.com) wallet — both directions, any
+amount down to 1 sat.
 
 > [!WARNING]
 > **Proof-of-concept — not audited.** This wallet exists to demonstrate
@@ -35,19 +35,20 @@ nostr client  ──┐
                 │   (NIP-47 over nostr relays)
                 ▼
        ╔══════════════════════╗      ┌────────────┐
-       ║  arkade-nwc-bridge   ║◄────►│ solver +   │  ◄── Lightning
-       ║  (this repo, your    ║      │ subdustd   │
+       ║  arkade-nwc-bridge   ║◄────►│ subdustd   │  ◄── Lightning
+       ║  (this repo, your    ║      │            │
        ║   machine, 24/7)     ║      └────────────┘
        ║                      ║      ┌────────────┐
        ║                      ║◄────►│ Ark server │
        ╚══════════════════════╝      └────────────┘
 ```
 
-Funds live as VTXOs in your Ark wallet. A Lightning send locks sats in
-a covenant the solver can claim only with the payment's preimage — so it
-gets them only by paying the invoice, and a failed payment comes back to
-you. A Lightning receive is the reverse, through subdustd's atomic swap
-(a shared VTXO with pre-signed spends), for any amount down to 1 sat.
+Funds live as VTXOs in your Ark wallet. Every Lightning payment, either
+way, is subdustd's atomic swap: a shared VTXO with pre-signed spends, where
+the preimage that pays one side is the one that settles the other. A send
+is claimed by subdustd only with the payment's preimage — so it gets the
+sats only by paying the invoice — and a failed payment is unwound back to
+you at once.
 Sends arrive over NWC (`pay_invoice`); receives come through the CLINK
 noffer or NWC `make_invoice`. The bridge runs the swap state machines for
 you either way.
@@ -97,8 +98,8 @@ docker port mapping enforcing loopback at the host.)
 ### Running in Docker
 
 Use this if you want the bridge inside an existing self-hosted stack
-(e.g. alongside a personal Ark server, intent solver and subdustd running
-in the same compose network).
+(e.g. alongside a personal Ark server and subdustd running in the same
+compose network).
 
 ```bash
 docker build -t arkade-nwc-bridge .
@@ -152,11 +153,8 @@ worth knowing first:
 - **Lightning comes with the Ark server, not on its own.** The swap
   services keep their Ark-side liquidity on one Ark server, so they can
   only swap for that server. Lightning is the `lightning` block in
-  `config.json` — `solverUrl` + `solverCard` (or `solverCardPath`, the
-  solver's signed card), `subdustdUrl`, and `emulatorPubkey` (the
-  operator's covenant cosigner — never the SDK default, which belongs to
-  Ark Labs). All four come from the operator of that Ark server; the block
-  is parsed strictly and a malformed one refuses boot. Without it the
+  `config.json` — `subdustdUrl`, from the operator of that Ark server; the
+  block is parsed strictly and a malformed one refuses boot. Without it the
   bridge runs Ark-only.
 - **Only on a fresh start.** VTXOs exist on one Ark server and mean
   nothing on another, and the unilateral-exit proof vault mirrors the
@@ -200,7 +198,7 @@ NIP-47 methods implemented:
 - `get_info`
 - `get_balance`
 - `make_invoice` (Lightning → Ark via subdustd's atomic receive, any amount)
-- `pay_invoice` (Ark → Lightning via the solver; below dust via subdustd's atomic send)
+- `pay_invoice` (Ark → Lightning via subdustd's atomic send, any amount)
 - `lookup_invoice`
 - `list_transactions`
 
@@ -291,8 +289,8 @@ small marker slots. No client framework, no build step.
   mixes with. A refresh re-mints them into clean, spendable VTXOs —
   automatically over time, or at once via a consolidate-all refresh or a
   cooperative (onchain) offboard.
-- **Lightning sends carry a fee** — the solver's quote (a percentage plus
-  a routing estimate), or a small share below dust; receives carry none.
+- **Lightning sends carry a fee** — a small fixed share of the amount
+  (subdustd pays the routing out of it); receives carry none.
   You'll see it as `fees_paid` in the per-connection history, and on the
   Send tab before you confirm.
 - **Backup the nsec separately.** Your Ark identity is the `nsec`
@@ -329,8 +327,6 @@ small marker slots. No client framework, no build step.
 
 - [arkade-os/ts-sdk](https://github.com/arkade-os/ts-sdk) — the Ark
   protocol TypeScript SDK this bridge builds on.
-- [arkade-os/intent-solver](https://github.com/arkade-os/intent-solver) —
-  the solver the operator runs for Lightning sends.
 
 ## Contributing
 

@@ -54,6 +54,7 @@ export const startHttp = (config: SubdustdConfig, log: Logger, api?: Api) => {
     routes[`${PREFIX}/send/fund`] = { POST: handle(log, async (r) => send.fund(await body(r))) }
     routes[`${PREFIX}/send/cancel`] = { POST: handle(log, async (r) => send.cancel(await body(r))) }
     routes[`${PREFIX}/send/status`] = { GET: handle(log, (r) => send.status(query(r))) }
+    routes[`${PREFIX}/send/fees`] = { GET: handle(log, () => send.fees()) }
   }
   const receive = api?.receive
   if (receive) {

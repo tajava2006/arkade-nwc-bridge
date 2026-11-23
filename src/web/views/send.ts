@@ -117,10 +117,10 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
  * Standing "how do I empty this wallet" guidance, independent of the Max
  * button. Onchain: the offboard rail is the one path that always works — a
  * settlement round consumes sub-dust and swept/expired VTXOs directly, no
- * Refresh needed. Lightning: no exact drain amount any more — the solver's
- * fee includes a live routing estimate, known only from a quote for a real
- * invoice — so the copy says how to read the quote instead of promising a
- * number. Amounts come from arkInfo, never hardcoded.
+ * Refresh needed. Lightning can't empty the wallet: the atomic send funds
+ * whole coins worth at least invoice + fee + dust and the excess (≥ dust)
+ * comes back as one coin, so dust always stays. Amounts come from arkInfo,
+ * never hardcoded.
  */
 function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets): RawHtml {
   if (buckets.roundTotalSat === 0) return html``
@@ -149,13 +149,13 @@ function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets): RawHtml {
   const needsRefresh = buckets.subdustSat + buckets.recoverableSat > 0
   const ln = html`
     <p class="muted">
-      <strong>Emptying the wallet — Lightning:</strong> ${needsRefresh
-        ? html`hit Refresh first (free, the total doesn't change) — sub-dust/swept funds can't back
-            an LN send. Then `
-        : html``}paste a self-made invoice: the confirm page shows the solver's live quote. A total
-      equal to your balance (or up to 2 sats under it) empties the wallet — those 2 sats stay as
-      recoverable sub-dust. A total that would leave 3–${(dust - 1).toLocaleString()} sats is
-      refused before anything moves; adjust the invoice amount by that difference.
+      <strong>Emptying the wallet — Lightning:</strong> not all the way. A Lightning send spends whole
+      coins worth at least the invoice + fee + ${fmtSats(dust)}, and the excess comes back as one coin,
+      so at least ${fmtSats(dust)} stays. ${needsRefresh
+        ? html`Hit Refresh first (free, the total doesn't change) — sub-dust/swept funds can't back an
+            LN send. `
+        : html``}The confirm page shows the exact total (invoice + fee) before anything moves; to take
+      the rest out, use the onchain withdraw above.
     </p>`
 
   return html`${onchain}${ln}`

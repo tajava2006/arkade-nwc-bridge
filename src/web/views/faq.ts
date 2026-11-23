@@ -100,22 +100,18 @@ export function faqView(): RawHtml {
         mining fee of your own deposit transaction). Moving <strong>within</strong>
         Ark is free — offchain sends and refreshes cost nothing. Money going
         <strong>out</strong> is charged: onchain withdrawals pay a flat withdraw fee,
-        Lightning sends pay the solver's quoted fee (a percentage plus a routing
-        estimate; below dust, a small fixed share). The live numbers are always
-        shown before you confirm on the <a href="/send">Send tab</a>.
+        Lightning sends pay a small fixed share of the amount (the operator pays
+        the routing out of it). The live numbers are always shown before you
+        confirm on the <a href="/send">Send tab</a>.
       </p>
 
       <h2>Are deposits and withdrawals atomic?</h2>
       <p>
-        Lightning, both directions, runs on the operator's own swap services, and
-        both are atomic. Sends of dust and up go through an intent solver: your
-        funds sit in a hash-locked covenant the solver can take only with the
-        payment's preimage — proof the invoice was paid — and a failed payment
-        comes back to you, at once with the operator's cosigner or by timeout
-        without it. Receives, and sends below dust, use a shared vtxo with
-        pre-signed spends: the preimage that pays one side is the one that
-        settles the other, and a timeout refund covers the rest. Nobody can end
-        up holding both sides. Onchain deposits are protected by a timelock of their own: if a
+        Lightning, both directions and any amount, runs on the operator's own swap
+        service, and it is atomic: each payment uses a shared vtxo with pre-signed
+        spends. The preimage that pays one side is the one that settles the other;
+        a failed payment is unwound at once, and a timeout refund covers the rest.
+        Nobody can end up holding both sides. Onchain deposits are protected by a timelock of their own: if a
         deposit is never converted into a VTXO, you reclaim it unilaterally onchain
         once the timelock expires. Onchain withdrawals happen inside a settlement
         round — you give up the VTXO only in the same transaction that creates your

@@ -117,7 +117,7 @@ function buildSweepStep(op: ExitOp | null, waitStatus: StepStatus): SweepStep {
 }
 
 export function buildExitStepper(
-  /** ourXOnly: count down OUR exit leaf (a solver lockup has others, SM-55). */
+  /** ourXOnly: count down OUR exit leaf (a multi-leaf lockup has others, SM-55). */
   deps: { db: Database; ourXOnly?: Uint8Array },
   txid: string,
   vout: number,

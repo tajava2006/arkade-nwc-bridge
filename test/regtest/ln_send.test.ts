@@ -2,7 +2,7 @@ import '../../src/polyfills'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Database } from 'bun:sqlite'
@@ -10,7 +10,6 @@ import {
   EsploraProvider,
   InMemoryContractRepository,
   InMemoryWalletRepository,
-  RestArkProvider,
   RestIndexerProvider,
   RestOperatorProvider,
   SingleKey,
@@ -18,20 +17,17 @@ import {
 } from '@arkade-os/sdk'
 import { openDatabase } from '../../src/db'
 import { handlePayInvoice } from '../../src/handlers/pay_invoice'
-import { watchSolverSends } from '../../src/ln_ledger'
-import type { LightningRails } from '../../src/ln_send'
+import { reconcileAtomicSendRows } from '../../src/ln_ledger'
+import { sendLightning, type LightningRails } from '../../src/ln_send'
 import { createConnection, type Connection } from '../../src/nostr/connections'
-import { startSolverRail } from '../../src/solver_rail'
 
-// The LN send core (SM-43) on the regtest-solver harness, through the NWC
-// pay_invoice handler: the solver rail for dust and up, subdustd below, the
-// ledger listener, and the coin policy on the swap client's funding.
+// The LN send core on the regtest harness, through the NWC pay_invoice
+// handler: since D11 every amount is the atomic send against subdustd — the
+// row convention, the coin policy on its funding, a failed payment unwound,
+// the crash-window reconcile, and what a too-small wallet gets.
 //
 //   eval "$(test-script/regtest-solver.sh env)" && bun test test/regtest/ln_send.test.ts
 
-const SOLVER_URL = process.env.SOLVER_URL
-const CARD_PATH = process.env.SOLVER_CARD_PATH
-const EMU = process.env.EMULATOR_PUBKEY_OVERRIDE
 const SUBDUSTD_URL = process.env.SUBDUSTD_URL
 const ARKD = process.env.REGTEST_ARKD_URL ?? 'http://localhost:7070'
 const ESPLORA = process.env.REGTEST_ESPLORA_URL ?? 'http://localhost:3000/api'
@@ -69,30 +65,23 @@ const newWallet = () =>
   })
 const outpoints = async (w: Wallet) => (await w.getSpendableVtxos()).map((v) => `${v.txid}:${v.vout}:${v.value}`)
 
-describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU || !SUBDUSTD_URL)('LN send core on regtest', () => {
+describe.skipIf(!SUBDUSTD_URL)('LN send core on regtest', () => {
   let wallet: Wallet
   let db: Database
   let conn: Connection
-  let lightning: LightningRails
-  let stopLedger: () => void
-  const arkInfo = () => new RestArkProvider(ARKD).getInfo()
-  const solverConfig = () => ({
-    solverUrl: SOLVER_URL!,
-    solverCard: JSON.parse(readFileSync(CARD_PATH!, 'utf8')),
-    subdustdUrl: SUBDUSTD_URL!,
-    emulatorPubkey: EMU!,
-  })
-  const pay = (eventId: string, invoice: string) =>
-    handlePayInvoice({ lightning, db, conn, eventId, wallet, arkServerUrl: ARKD }, { invoice }) as Promise<{
+  const lightning: LightningRails = { subdustdUrl: SUBDUSTD_URL! }
+  const pay = (eventId: string, invoice: string, w = wallet, d = db, c = conn) =>
+    handlePayInvoice({ lightning, db: d, conn: c, eventId, wallet: w, arkServerUrl: ARKD }, { invoice }) as Promise<{
       preimage: string
       fees_paid?: number
     }>
-  const row = (eventId: string) =>
-    db
-      .query<{ state: string; amount_msat: number; fees_paid_msat: number | null; preimage: string | null; swap_id: string | null }, [string]>(
-        `SELECT state, amount_msat, fees_paid_msat, preimage, swap_id FROM transactions WHERE request_event_id = ?`,
+  const row = (eventId: string, d = db) =>
+    d
+      .query<{ state: string; amount_msat: number; fees_paid_msat: number | null; preimage: string | null }, [string]>(
+        `SELECT state, amount_msat, fees_paid_msat, preimage FROM transactions WHERE request_event_id = ?`,
       )
       .get(eventId)!
+  const spent = () => db.query<{ s: number }, [number]>('SELECT spent_msat AS s FROM connections WHERE id = ?').get(conn.id)!.s
 
   beforeAll(async () => {
     wallet = await newWallet()
@@ -104,18 +93,13 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU || !SUBDUSTD_URL)('LN send cor
     await waitFor('the wallet funded', async () => ((await wallet.getBalance()).available >= 46_000 ? true : undefined))
     db = openDatabase(join(mkdtempSync(join(tmpdir(), 'bridge-lnsend-')), 'bridge.sqlite'))
     conn = createConnection(db, { label: null, relays: ['wss://r'] }).connection
-    const solver = await startSolverRail({ wallet, db, lightning: solverConfig(), network: 'regtest', arkInfo })
-    lightning = { solver, subdustdUrl: SUBDUSTD_URL! }
-    stopLedger = watchSolverSends({ lightning, arkServerUrl: ARKD, db })
   }, 300_000)
 
   afterAll(async () => {
-    stopLedger?.()
-    await lightning?.solver.dispose()
     await wallet?.dispose()
   })
 
-  test('≥ dust: paid through the solver; the row is settled by the NWC convention; our coin policy funded it', async () => {
+  test('dust+ (D11): paid through subdustd; the row is settled by the NWC convention; our coin policy funded it', async () => {
     const big = (await wallet.getSpendableVtxos()).find((v) => v.value === 40_000)!
     const inv = peer('addinvoice', '--amt', '5000')
     const res = await pay('evt-1', inv.payment_request)
@@ -125,14 +109,14 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU || !SUBDUSTD_URL)('LN send cor
     expect(r.state).toBe('settled')
     expect(r.amount_msat).toBe(5_000_000)
     expect(r.preimage).toBe(res.preimage)
-    expect(r.swap_id).toMatch(/^rfq:/)
-    expect(r.fees_paid_msat ?? 0).toBe(res.fees_paid ?? 0)
-    // The single covering coin (6000) is spent, the 40000 one untouched — the
-    // SDK's own selector takes the largest.
+    expect(r.fees_paid_msat).toBe(25_000) // ceil(5,000 × 0.5%)
+    expect(res.fees_paid).toBe(25_000)
+    // The single covering coin (6000 ≥ 5000 + 25 + dust) is spent, the 40000
+    // one untouched — the SDK's own selector takes the largest.
     expect(await outpoints(wallet)).toContain(`${big.txid}:${big.vout}:40000`)
   }, 300_000)
 
-  test('sub-dust: the atomic send against subdustd, same row convention', async () => {
+  test('sub-dust: the same atomic send, same row convention', async () => {
     const inv = peer('addinvoice', '--amt', '21')
     const res = await pay('evt-2', inv.payment_request)
     expect(sha256(res.preimage)).toBe(inv.r_hash)
@@ -140,7 +124,7 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU || !SUBDUSTD_URL)('LN send cor
     expect(row('evt-2')).toMatchObject({ state: 'settled', amount_msat: 21_000, preimage: res.preimage })
   }, 300_000)
 
-  test('a failed pay: PAYMENT_FAILED, row failed, the lockup back in the wallet', async () => {
+  test('a failed pay: PAYMENT_FAILED, row failed, the funding back in the wallet', async () => {
     const preimage = randomBytes(32).toString('hex')
     const hash = sha256(preimage)
     const bolt11 = peer('addholdinvoice', hash, '--amt', '5000').payment_request
@@ -150,54 +134,48 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !EMU || !SUBDUSTD_URL)('LN send cor
     peer('cancelinvoice', hash)
     expect(await paying).toMatchObject({ code: 'PAYMENT_FAILED' })
     expect(row('evt-3').state).toBe('failed')
-    await waitFor('the refund back in the wallet', async () => ((await wallet.getBalance()).available >= before ? true : undefined))
+    await waitFor('the funding back in the wallet', async () => ((await wallet.getBalance()).available >= before ? true : undefined))
   }, 300_000)
 
-  test('restart replay: a send whose handler never returned is settled by the ledger listener', async () => {
-    // The handler's pending row, unlinked (a crash before onSwapCreated), and
-    // the swap driven to `paid` with no handler awaiting it.
+  test('crash window: a send whose handler never returned is settled by the atomic reconcile', async () => {
     const inv = peer('addinvoice', '--amt', '4000')
     db.query(
       `INSERT INTO transactions (connection_id, type, request_event_id, invoice, payment_hash, amount_msat, state, created_at)
        VALUES (?, 'outgoing', 'evt-4', ?, ?, 4000000, 'pending', ?)`,
     ).run(conn.id, inv.payment_request, inv.r_hash, Math.floor(Date.now() / 1000))
-    stopLedger()
-    const res = await lightning.solver.client.pay(inv.payment_request)
-    const id = res.kind === 'swap' ? res.swap.id : ''
-    await waitFor('paid', async () => ((await lightning.solver.client.swaps()).find((s) => s.id === id)?.outcome === 'paid' ? true : undefined))
+    const before = spent()
+    // The send runs with no handler awaiting it (the process "died" there).
+    await sendLightning({ lightning, wallet, arkServerUrl: ARKD, db }, inv.payment_request)
     expect(row('evt-4').state).toBe('pending')
-    const spentBefore = db.query<{ s: number }, [number]>('SELECT spent_msat AS s FROM connections WHERE id = ?').get(conn.id)!.s
-    // Re-subscribing replays every known swap, as a boot does.
-    stopLedger = watchSolverSends({ lightning, arkServerUrl: ARKD, db })
-    await waitFor('the replay to settle the row', () => (row('evt-4').state === 'settled' ? true : undefined), 30_000)
+    reconcileAtomicSendRows(db)
     const r = row('evt-4')
+    expect(r.state).toBe('settled')
     expect(sha256(r.preimage!)).toBe(inv.r_hash)
-    expect(r.swap_id).toBe(id)
-    const spentAfter = db.query<{ s: number }, [number]>('SELECT spent_msat AS s FROM connections WHERE id = ?').get(conn.id)!.s
-    expect(spentAfter - spentBefore).toBe(4_000_000 + (r.fees_paid_msat ?? 0))
+    // The crash path books the reserved principal; the atomic row keeps no fee.
+    expect(spent() - before).toBe(4_000_000)
   }, 300_000)
 
-  test('drain: a residue under the slack is not refused; it stays ours as recoverable sub-dust', async () => {
+  test('a too-small wallet is INSUFFICIENT_BALANCE before anything moves; the most it can send leaves dust behind', async () => {
     const w = await newWallet()
     arkSend(await w.getAddress(), 3_001)
     await waitFor('funded', async () => ((await w.getBalance()).available >= 3_001 ? true : undefined))
-    const dbw = openDatabase(join(mkdtempSync(join(tmpdir(), 'bridge-drain-')), 'bridge.sqlite'))
+    const dbw = openDatabase(join(mkdtempSync(join(tmpdir(), 'bridge-small-')), 'bridge.sqlite'))
     const connw = createConnection(dbw, { label: null, relays: ['wss://r'] }).connection
-    const solver = await startSolverRail({ wallet: w, db: dbw, lightning: solverConfig(), network: 'regtest', arkInfo })
     try {
-      const inv = peer('addinvoice', '--amt', '3000') // regtest solver fee is 0 → 1 sat residue
-      const res = (await handlePayInvoice(
-        { lightning: { solver, subdustdUrl: SUBDUSTD_URL! }, db: dbw, conn: connw, eventId: 'evt-d', wallet: w, arkServerUrl: ARKD },
-        { invoice: inv.payment_request },
-      )) as { preimage: string }
+      // 3,000 + 15 fee + 330 dust > 3,001
+      const refused = await pay('evt-s1', peer('addinvoice', '--amt', '3000').payment_request, w, dbw, connw).catch((e) => e)
+      expect(refused).toMatchObject({ code: 'INSUFFICIENT_BALANCE' })
+      expect(row('evt-s1', dbw).state).toBe('failed')
+      expect((await w.getSpendableVtxos()).map((v) => v.value)).toEqual([3_001])
+      // 2,657 + 14 fee + 330 dust = 3,001: the whole coin goes in, 330 comes back.
+      const inv = peer('addinvoice', '--amt', '2657')
+      const res = await pay('evt-s2', inv.payment_request, w, dbw, connw)
       expect(sha256(res.preimage)).toBe(inv.r_hash)
-      await waitFor('only the 1-sat residue left', async () => {
-        const left = await w.getVtxos()
-        return left.length === 1 && left[0]!.value === 1 ? true : undefined
+      await waitFor('dust back as change', async () => {
+        const left = (await w.getSpendableVtxos()).map((v) => v.value)
+        return left.length === 1 && left[0] === 330 ? true : undefined
       }, 30_000)
-      expect(await w.getSpendableVtxos({ withRecoverable: false } as never)).toEqual([])
     } finally {
-      await solver.dispose()
       await w.dispose()
     }
   }, 300_000)

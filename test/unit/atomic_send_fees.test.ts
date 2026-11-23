@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { maxSendFeeSats } from '../../src/atomic/send'
-import { routingFeeLimitSat, sendFeeSats } from '../../subdustd/api/send'
+import { maxSendFeeSats, sendFeeSats } from '../../src/atomic/fees'
+import { routingFeeLimitSat } from '../../subdustd/api/send'
 
 // D11: atomic sends carry any amount, so the fee rules have to hold past dust.
 describe('atomic send fees at any amount', () => {

@@ -2,7 +2,7 @@
 
 > **2026-11 — Lightning moved off Boltz.** Every Lightning receive — NWC
 > `make_invoice` and the CLINK noffer, any amount — is now an atomic receive
-> against the operator's `subdustd` (decision D10: the solver's hold invoice
+> against the operator's `subdustd` (decision D10: a solver's hold invoice
 > cannot carry a NIP-57 description hash), 1:1 with no fee. Sections that
 > describe Boltz reverse swaps, the ≥dust/sub-dust split or
 > `clink_offer_receipts` are history; CLINK receipts all go through

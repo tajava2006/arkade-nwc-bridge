@@ -24,10 +24,9 @@ export const NOTIFY_KINDS = [
   'recv-ln', //       NWC invoice settled (atomic receive, any amount — D10)
   'recv-noffer', //   CLINK noffer/zap settled
   'onboard', //       onchain boarding deposit detected / settled (boarding_history.ts)
-  'send-ln', //       dust+ invoice paid (solver)
-  'send-subdust', //  atomic sub-dust paid / claim recovered
+  'send-ln', //       atomic send paid / claim recovered (any amount — D11)
   'send-fail', //     a send failed after its swap existed
-  'refund', //        atomic or solver-lockup refund landed
+  'refund', //        atomic send refund / early cancel landed
   'offboard', //      onchain offboard settled/failed
   'health-asp', //    proof sync failing/recovered (ASP reachability)
   'health-vault', //  vtxo quarantined / expired-unrefreshed batch

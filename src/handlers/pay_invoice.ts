@@ -21,11 +21,12 @@ export interface PayInvoiceDeps {
   /** ASP (arkd) REST base — the atomic sub-dust send needs server params. */
   arkServerUrl: string
   /**
-   * Operator DM sink, forwarded into sendLightning. Solver send terminals are
-   * notified from the swap listener (ln_ledger.ts, single source), so this
-   * handler itself never calls it — only the atomic sub-dust path underneath does.
+   * Operator DM sink, forwarded into sendLightning. This handler never calls it
+   * itself — the atomic send underneath owns the send DMs.
    */
   notify?: NotifyFn
+  /** The LN send; sendLightning unless a test scripts the outcome. */
+  send?: typeof sendLightning
 }
 
 export async function handlePayInvoice(
@@ -104,26 +105,18 @@ export async function handlePayInvoice(
     createdAt,
   })
 
-  // sendLightning is the shared LN-send path (src/ln_send.ts): our solver for
-  // amounts >= dust, the atomic sub-dust send below it. Both are atomic. Can
-  // take minutes — bounded by the payment's own timeout, not by our code.
+  // sendLightning is the shared LN-send path (src/ln_send.ts): the atomic send
+  // against subdustd, any amount. Can take minutes — bounded by the payment's
+  // own timeout, not by our code.
   let result
   try {
-    result = await sendLightning(
+    result = await (deps.send ?? sendLightning)(
       {
         lightning,
         wallet: deps.wallet,
         arkServerUrl: deps.arkServerUrl,
         db: deps.db,
         notify: deps.notify,
-        // Link the row the instant the swap exists. Restart recovery would
-        // still find an unlinked row by its payment hash; the link just keeps
-        // a second connection's row for the same invoice out of the match.
-        onSwapCreated: (swapId) => {
-          deps.db
-            .query(`UPDATE transactions SET swap_id = ? WHERE request_event_id = ? AND state = 'pending'`)
-            .run(swapId, deps.eventId)
-        },
       },
       invoice,
     )
@@ -131,8 +124,7 @@ export async function handlePayInvoice(
     const msg = err instanceof Error ? err.message : String(err)
     if (err instanceof LnSendUnresolved) {
       // The money may still move: the row keeps its reservation and stays
-      // pending until the swap resolves (the ledger listener or the atomic
-      // reconcile flips it). Retrying this invoice is refused meanwhile.
+      // pending until the swap resolves (the atomic reconcile flips it). Retrying this invoice is refused meanwhile.
       throw new NwcError('INTERNAL', `${msg} — do not retry; the payment may still complete`)
     }
     failOutgoing(deps.db, { requestEventId: deps.eventId }, msg)

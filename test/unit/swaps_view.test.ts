@@ -27,7 +27,7 @@ describe('swapsView', () => {
     const eligible = swap({ id: 'refundable', state: 'refund_wait', fundingOutpoint: 'f'.repeat(64) + ':0' })
     const terminal = swap({ id: 'done', state: 'claimed', fundingOutpoint: 'f'.repeat(64) + ':0' })
     const receive = swap({ id: 'rcv', direction: SwapDirection.Receive, state: 'funded', fundingOutpoint: 'f'.repeat(64) + ':0' })
-    const html = swapsView({ swaps: [eligible, terminal, receive], solverSends: [], nowSec }).value
+    const html = swapsView({ swaps: [eligible, terminal, receive], nowSec }).value
     // exactly one refund form — the eligible send
     expect(html.split('/swaps/refund').length - 1).toBe(1)
     expect(html).toContain('refundable')
@@ -40,7 +40,6 @@ describe('swapsView', () => {
     const nowSec = 1752603600 + 600 // 10m past T, well inside the ~1h lag
     const html = swapsView({
       swaps: [swap({ state: 'refund_wait', fundingOutpoint: 'f'.repeat(64) + ':0' })],
-      solverSends: [],
       nowSec,
     }).value
     expect(html).not.toContain('/swaps/refund')
@@ -50,7 +49,6 @@ describe('swapsView', () => {
     const nowSec = 1752603600 - 90 // before T
     const html = swapsView({
       swaps: [swap({ fundingOutpoint: 'f'.repeat(64) + ':0' })],
-      solverSends: [],
       nowSec,
     }).value
     expect(html).not.toContain('/swaps/refund')
@@ -66,7 +64,6 @@ describe('swapsView', () => {
         swap({ id: 'claimed-1', state: 'claimed', fundingOutpoint: 'f'.repeat(64) + ':0' }),
         swap({ id: 'refunded-1', state: 'refunded', fundingOutpoint: 'f'.repeat(64) + ':0' }),
       ],
-      solverSends: [],
       nowSec,
     }).value
     expect(html).not.toContain('ago')
@@ -78,7 +75,6 @@ describe('swapsView', () => {
     // as a "…h ago" countdown.
     const html = swapsView({
       swaps: [swap({ direction: SwapDirection.Receive, state: 'settled', refundLocktime: 0 })],
-      solverSends: [],
       nowSec: 1752603600,
     }).value
     expect(html).toContain('— (subdustd)')
@@ -86,26 +82,7 @@ describe('swapsView', () => {
   })
 
   test('notice renders', () => {
-    const html = swapsView({ swaps: [], solverSends: [], nowSec: 0, notice: { ok: true, text: 'refunded 351 sats' } }).value
+    const html = swapsView({ swaps: [], nowSec: 0, notice: { ok: true, text: 'refunded 351 sats' } }).value
     expect(html).toContain('refunded 351 sats')
-  })
-
-  test('solver sends: outcome, invoice amount, fee (give − take), newest first', () => {
-    const send = (id: string, outcome: string, createdAt: number) =>
-      ({
-        id,
-        outcome,
-        createdAt,
-        give: { amount: 2005n },
-        take: { amount: 2000n },
-        route: { give: { corridor: 'arkade' }, take: { corridor: 'lightning' } },
-        fundingTxid: 'a'.repeat(64),
-      }) as never
-    const html = swapsView({ swaps: [], solverSends: [send('rfq:old', 'refunded', 100), send('rfq:new', 'paid', 200)], nowSec: 0 }).value
-    expect(html).toContain('2,000 sats')
-    expect(html).toContain('5 sats')
-    expect(html.indexOf('rfq:new')).toBeLessThan(html.indexOf('rfq:old'))
-    expect(html).toContain('paid')
-    expect(html).toContain('refunded')
   })
 })

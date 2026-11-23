@@ -3,13 +3,12 @@ import { layout } from './layout'
 import { copyable, localTime } from './ui'
 import type { AtomicSwapRow } from '../../atomic'
 import { isTerminal } from '../../atomic'
-import type { Swap } from '@arkade-os/swap'
 
-// Swap monitor: atomic swaps on subdustd (every receive, sub-dust sends —
-// ATOMIC_SUBDUST_PLAN.md #13) and dust-and-up sends through our solver. Swaps
-// are initiated over NWC/CLINK or /send, not here — this page is for watching
-// in-flight ones and pulling the manual refund lever on an atomic send whose
-// T has passed (solver sends refund themselves: the swap client's drive).
+// Swap monitor: every Lightning swap is an atomic swap on subdustd, both
+// directions, any amount (ATOMIC_SUBDUST_PLAN.md #13, D11). Swaps are
+// initiated over NWC/CLINK or /send, not here — this page is for watching
+// in-flight ones and pulling the manual refund lever on a send whose T has
+// passed.
 // Server-rendered snapshot; reload to refresh (swaps are seconds-to-minutes
 // affairs, a live ticker isn't worth the machinery).
 
@@ -88,46 +87,8 @@ function stateBadge(s: AtomicSwapRow): RawHtml {
   return html`<span style="color: ${color}; font-weight: ${terminal ? 'normal' : '600'}">${s.state}</span>`
 }
 
-// Dust-and-up sends through our solver. The swap client's drive claims
-// nothing here (the solver claims with the preimage) and refunds a failed one
-// by itself — through our emulator at once, or after the timelock — so the
-// table is read-only. Outcome vocabulary is the client's.
-const SOLVER_GOOD = new Set(['paid', 'refunded'])
-const SOLVER_DONE = new Set(['paid', 'refunded', 'failed', 'cancelled', 'lapsed'])
-
-function solverBadge(s: Swap): RawHtml {
-  const done = SOLVER_DONE.has(s.outcome)
-  // refunded is green like a refund elsewhere on this page: the payment
-  // failed, the money did not.
-  const color = !done ? '#b60' : SOLVER_GOOD.has(s.outcome) ? '#080' : '#c00'
-  return html`<span style="color: ${color}; font-weight: ${done ? 'normal' : '600'}" title="${s.failure ?? s.blockedReason ?? ''}">${s.outcome}</span>`
-}
-
-const solverRow = (s: Swap) => html`
-  <tr>
-    <td>${swapIdCell(s.id)}</td>
-    <td>${solverBadge(s)}</td>
-    <td class="num">${Number(s.take.amount).toLocaleString()} sats</td>
-    <td class="num">${(Number(s.give.amount) - Number(s.take.amount)).toLocaleString()} sats</td>
-    <td class="muted">${s.fundingTxid ? copyable(s.fundingTxid, `${s.fundingTxid.slice(0, 12)}…`) : '—'}</td>
-    <td class="muted">${localTime(s.createdAt * 1000)}</td>
-  </tr>
-`
-
-function solverTable(swaps: Swap[]): RawHtml {
-  return swaps.length === 0
-    ? html`<p class="muted">No solver sends yet.</p>`
-    : html`<table>
-        <tr>
-          <th>swap</th><th>outcome</th><th class="num">invoice</th><th class="num">fee</th><th>funding</th><th>created</th>
-        </tr>
-        ${[...swaps].sort((a, b) => b.createdAt - a.createdAt).map(solverRow)}
-      </table>`
-}
-
 export function swapsView(args: {
   swaps: AtomicSwapRow[]
-  solverSends: Swap[]
   nowSec: number
   notice?: { ok: boolean; text: string }
 }): RawHtml {
@@ -173,7 +134,7 @@ export function swapsView(args: {
 
     <h2>Atomic swaps <span class="muted">(subdustd, custom, beta)</span></h2>
     <p class="muted">
-      Every Lightning receive, and sends below dust, ride a shared 4-leaf vtxo — a custom, beta
+      Every Lightning payment, both ways and any amount, rides a shared 4-leaf vtxo — a custom, beta
       protocol built for this bridge, served by the operator's subdustd. In-flight <em>send</em>
       funding is mirrored into the exit vault (visible on the Exit tab) until the swap resolves; if
       subdustd never pays, the full funding is reclaimable here once T passes.
@@ -182,13 +143,6 @@ export function swapsView(args: {
     ${table(inflight, 'No swaps in flight.')}
     <h3>Recent</h3>
     ${table(done, 'No completed swaps yet.')}
-
-    <h2>Solver sends</h2>
-    <p class="muted">
-      Lightning sends of dust and up, through the operator's own intent solver. The solver can take
-      the lockup only with the payment's preimage; a failed payment comes back by itself. Read-only.
-    </p>
-    ${solverTable(args.solverSends)}
   `
   return layout({ title: 'Swaps', current: 'swaps', body })
 }

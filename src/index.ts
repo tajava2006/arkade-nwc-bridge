@@ -20,9 +20,8 @@ import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
 import { startOfferService, sendClinkAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
-import { reconcileAtomicSendRows, watchSolverSends, watchUnresolvedSolverSends } from './ln_ledger'
+import { reconcileAtomicSendRows } from './ln_ledger'
 import type { LightningRails } from './ln_send'
-import { startSolverRail } from './solver_rail'
 import { sweepInterruptedWebSends } from './history'
 import { makeBoardingEsplora, reconcileBoardingHistory } from './boarding_history'
 import { autoRefreshPass } from './auto_refresh'
@@ -307,29 +306,17 @@ async function main(): Promise<void> {
         `  balance        total=${balance.total} available=${balance.available} settled=${balance.settled} boarding=${balance.boarding.total}`,
       )
 
-      // Second provider for ArkInfo reads (/send's dust + intent-fee programs,
-      // the solver rail's coin policy). Stateless REST; the wallet keeps its
-      // own internal one for signing.
+      // Second provider for ArkInfo reads (/send's dust + intent-fee programs).
+      // Stateless REST; the wallet keeps its own internal one for signing.
       const arkProvider = new RestArkProvider(bootCfg.arkServerUrl)
 
-      // Lightning: our solver (dust and up) + subdustd (sub-dust), from
-      // data/config.json's `lightning` block. Absent → Ark-only: NWC LN
-      // methods refuse rather than reach anything else.
+      // Lightning: subdustd, every amount both ways (D11), from data/config.json's
+      // `lightning` block. Absent → Ark-only: NWC LN methods refuse rather than
+      // reach anything else.
       let lightning: LightningRails | undefined
       if (bootCfg.lightning) {
-        const solver = await startSolverRail({
-          wallet,
-          db,
-          lightning: bootCfg.lightning,
-          network: bootCfg.network,
-          arkInfo: () => arkProvider.getInfo(),
-        })
-        undo.push(() => solver.dispose())
-        lightning = { solver, subdustdUrl: bootCfg.lightning.subdustdUrl }
-        undo.push(watchSolverSends({ lightning, arkServerUrl: bootCfg.arkServerUrl, db, notify }))
-        const unresolved = watchUnresolvedSolverSends({ client: solver.client, notify })
-        undo.push(() => unresolved.stop())
-        console.log(`  lightning      solver ${bootCfg.lightning.solverUrl}, subdustd ${bootCfg.lightning.subdustdUrl}`)
+        lightning = { subdustdUrl: bootCfg.lightning.subdustdUrl }
+        console.log(`  lightning      subdustd ${bootCfg.lightning.subdustdUrl}`)
       } else {
         console.log('  lightning      not configured — Ark-only')
       }
@@ -498,7 +485,7 @@ async function main(): Promise<void> {
         // VTXO set together — fetched in parallel so the page renders from a
         // snapshot instead of blocking on sequential round-trips. The set
         // churns, but we push the whole table fragment over SSE (no diffing).
-        // LN fees aren't here: the solver quotes each invoice at preview.
+        // LN fees aren't here: /send asks subdustd for its fee rule at preview.
         sendData: new AsyncCache<SendData>({
           label: 'send-data',
           fetcher: async () => {
@@ -772,7 +759,6 @@ async function main(): Promise<void> {
     if (appState.current.mode === 'ready') {
       appState.current.offers.stop()
       await appState.current.nostr.stop()
-      await appState.current.lightning?.solver.dispose()
       // Wallet.dispose tears down the VtxoManager poll loop, ContractWatcher's
       // SSE subscription, and ArkProvider's settlement-event stream so the
       // Ark server sees a clean disconnect rather than a half-open socket.

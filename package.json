@@ -25,14 +25,12 @@
     "typescript": "^7.0.2"
   },
   "overrides": {
-    "@arkade-os/sdk": "0.5.11",
     "@noble/curves": "2.4.0",
     "@scure/base": "2.4.0",
     "@scure/btc-signer": "2.4.1"
   },
   "dependencies": {
     "@arkade-os/sdk": "0.5.11",
-    "@arkade-os/swap": "0.1.12",
     "@grpc/grpc-js": "^1.14.7",
     "@grpc/proto-loader": "^0.8.1",
     "@noble/curves": "2.4.0",

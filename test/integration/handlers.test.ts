@@ -1,3 +1,4 @@
+import { LnSendRefused } from '../../src/ln_send'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { Config } from '../../src/config'
 import { NwcError } from '../../src/lib/errors'
@@ -153,8 +154,9 @@ describe('handlers', () => {
   })
 
   describe('pay_invoice', () => {
-    const payDeps = (conn: Connection, eventId: string, lightning = makeLightningStub().lightning) => ({
-      lightning,
+    const payDeps = (conn: Connection, eventId: string, stub = makeLightningStub()) => ({
+      lightning: stub.lightning,
+      send: stub.send,
       db: temp.db,
       conn,
       eventId,
@@ -188,24 +190,23 @@ describe('handlers', () => {
       })
     })
 
-    test('successful pay: amount stays the nominal, fees_paid is the solver fee, budget books both', async () => {
+    test('successful pay: amount stays the nominal, fees_paid is the swap fee, budget books both', async () => {
       const conn = newConn(temp)
       const { preimage, invoice } = knownPreimageInvoice()
-      const { lightning } = makeLightningStub({ feeSats: 5, preimage })
-      const r = (await handlePayInvoice(payDeps(conn, 'evt-f', lightning), { invoice })) as Record<string, unknown>
+      const r = (await handlePayInvoice(payDeps(conn, 'evt-f', makeLightningStub({ feeSats: 5, preimage })), { invoice })) as Record<string, unknown>
       expect(r.preimage).toBe(preimage)
       expect(r.fees_paid).toBe(5_000)
       const row = rowOf('evt-f')!
       expect(row.state).toBe('settled')
       expect(row.amount_msat).toBe(2_000_000) // stays the BOLT11 nominal — fee is separate
       expect(row.fees_paid_msat).toBe(5_000)
-      expect(row.swap_id).toBe('rfq:00112233445566778899aabbccddeeff')
+      expect(row.swap_id).toBe('atomic-swap-1')
       expect(spentOf(conn)).toBe(2_005_000) // budget tracks wallet movement, fee included
     })
 
     test('a zero-fee pay reports no fees_paid', async () => {
       const { preimage, invoice } = knownPreimageInvoice()
-      const r = (await handlePayInvoice(payDeps(newConn(temp), 'evt-f0', makeLightningStub({ preimage }).lightning), {
+      const r = (await handlePayInvoice(payDeps(newConn(temp), 'evt-f0', makeLightningStub({ preimage })), {
         invoice,
       })) as Record<string, unknown>
       expect(r.fees_paid).toBeUndefined()
@@ -223,7 +224,7 @@ describe('handlers', () => {
         .run(conn.id, 1_000_000, Math.floor(Date.now() / 1000) - 2 * 86_400)
       temp.db.query('UPDATE connections SET spent_msat = ? WHERE id = ?').run(1_000_000, conn.id)
       const { preimage, invoice } = knownPreimageInvoice()
-      const res = (await handlePayInvoice(payDeps(conn, 'evt-window', makeLightningStub({ feeSats: 5, preimage }).lightning), {
+      const res = (await handlePayInvoice(payDeps(conn, 'evt-window', makeLightningStub({ feeSats: 5, preimage })), {
         invoice,
       })) as Record<string, unknown>
       expect(res.preimage).toBe(preimage)
@@ -250,21 +251,20 @@ describe('handlers', () => {
       })
     })
 
-    test('a refunded swap marks the row failed and throws PAYMENT_FAILED', async () => {
+    test('a failed payment marks the row failed and throws PAYMENT_FAILED', async () => {
       const { invoice } = knownPreimageInvoice()
       await expect(
-        handlePayInvoice(payDeps(newConn(temp), 'evt-g', makeLightningStub({ finalOutcome: 'refunded' }).lightning), { invoice }),
+        handlePayInvoice(payDeps(newConn(temp), 'evt-g', makeLightningStub({ outcome: 'failed' })), { invoice }),
       ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' })
       expect(rowOf('evt-g')).toMatchObject({ state: 'failed' })
-      expect(rowOf('evt-g')!.error).toContain('refunded')
+      expect(rowOf('evt-g')!.error).toContain('NO_ROUTE')
     })
 
-    test('a solver refusal for funds is INSUFFICIENT_BALANCE, row failed', async () => {
-      const { InsufficientFunds } = await import('@arkade-os/swap')
-      const refusal = Object.setPrototypeOf(Object.assign(new Error('balance 10 < 2000'), { name: 'InsufficientFunds' }), InsufficientFunds.prototype)
+    test('a refusal for funds is INSUFFICIENT_BALANCE, row failed', async () => {
+      const refusal = new LnSendRefused('atomic send needs 2340 sats of eligible vtxos', true)
       const { invoice } = knownPreimageInvoice()
       await expect(
-        handlePayInvoice(payDeps(newConn(temp), 'evt-g2', makeLightningStub({ payError: refusal }).lightning), { invoice }),
+        handlePayInvoice(payDeps(newConn(temp), 'evt-g2', makeLightningStub({ payError: refusal })), { invoice }),
       ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE' })
       expect(rowOf('evt-g2')).toMatchObject({ state: 'failed' })
     })
@@ -273,9 +273,9 @@ describe('handlers', () => {
       const conn = newConn(temp)
       const { invoice } = knownPreimageInvoice()
       await expect(
-        handlePayInvoice(payDeps(conn, 'evt-u', makeLightningStub({ finalOutcome: 'needs_recovery' }).lightning), { invoice }),
+        handlePayInvoice(payDeps(conn, 'evt-u', makeLightningStub({ outcome: 'unresolved' })), { invoice }),
       ).rejects.toMatchObject({ code: 'INTERNAL' })
-      expect(rowOf('evt-u')).toMatchObject({ state: 'pending', swap_id: 'rfq:00112233445566778899aabbccddeeff' })
+      expect(rowOf('evt-u')).toMatchObject({ state: 'pending' })
       await expect(handlePayInvoice(payDeps(conn, 'evt-u2'), { invoice })).rejects.toThrow(/already being paid/)
     })
   })

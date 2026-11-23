@@ -1,23 +1,15 @@
 import type { Database } from 'bun:sqlite'
-import type { Swap } from '@arkade-os/swap'
 import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
-import { paidPreimage, type LnSendDeps } from './ln_send'
-import type { NotifyFn } from './nostr/notifier'
 
-// The NWC ledger side of solver swaps. Two writers can settle the same
+// The NWC ledger side of Lightning sends. Two writers can settle the same
 // outgoing row — the pay_invoice handler when its await returns, and the
-// swap listener below for a send whose handler never came back (restart,
-// timeout). Both go through settleOutgoing, gated on `state = 'pending'`, so
-// whichever lands first wins and the other is a no-op.
+// atomic reconcile below for a send whose handler never came back (restart,
+// "unresolved"). Both are gated on `state = 'pending'`, so whichever lands
+// first wins and the other is a no-op.
 
-type OutgoingMatch = { requestEventId: string } | { swapId: string; paymentHash: string }
+type OutgoingMatch = { requestEventId: string }
 
-const matchSql = (m: OutgoingMatch): [string, string[]] =>
-  'requestEventId' in m
-    ? ['request_event_id = ?', [m.requestEventId]]
-    : // A row linked to this swap, or — a crash before the link was written —
-      // an unlinked row for this payment hash: the hash is the exact binding.
-      ['(swap_id = ? OR (swap_id IS NULL AND payment_hash = ?))', [m.swapId, m.paymentHash]]
+const matchSql = (m: OutgoingMatch): [string, string[]] => ['request_event_id = ?', [m.requestEventId]]
 
 /**
  * Flip a pending outgoing row to settled and book it against the connection's
@@ -69,54 +61,11 @@ export function failOutgoing(db: Database, match: OutgoingMatch, error: string):
   )
 }
 
-const isSend = (s: Swap) => s.route.take.corridor === 'lightning'
-const sats = (s: Swap, leg: 'give' | 'take' | 'fee') => Number(s[leg].amount)
-
 /**
- * Mirror solver sends into the NWC ledger and the operator DMs. Subscribed
- * after the client's restore read, so the client's synchronous replay of every
- * known swap runs inside the subscribe call: those updates settle rows a
- * restart left pending, but DM only when they actually flipped one (an old
- * terminal swap replays at every boot). Live transitions arrive once per
- * (swap, outcome) and always DM — this is the one owning site for send DMs.
- */
-export function watchSolverSends(deps: Pick<LnSendDeps, 'lightning' | 'arkServerUrl' | 'db'> & { notify?: NotifyFn }): () => void {
-  const { db, notify } = deps
-  let replaying = true
-  const onSwap = async (swap: Swap, replay: boolean) => {
-    const hash = swap.lock?.hash
-    if (!isSend(swap) || !hash) return
-    const match = { swapId: swap.id, paymentHash: hash }
-    const tag = `[swap ${swap.id.slice(4, 12)}]`
-    if (swap.outcome === 'paid') {
-      const preimage = await paidPreimage(deps, swap, hash)
-      const flipped = settleOutgoing(db, match, { preimage, paidSats: sats(swap, 'give'), swapId: swap.id })
-      if (flipped || !replay) {
-        notify?.('send-ln', () => `send: LN paid — ${sats(swap, 'take')} sats (+${sats(swap, 'give') - sats(swap, 'take')} fee) ${tag}`)
-      }
-    } else if (swap.outcome === 'refunded' || swap.outcome === 'failed' || swap.outcome === 'cancelled') {
-      const flipped = failOutgoing(db, match, `${swap.outcome}${swap.failure ? `: ${swap.failure}` : ''}`)
-      if (flipped || !replay) {
-        notify?.('send-fail', () => `send: LN payment FAILED — ${sats(swap, 'take')} sats (${swap.outcome}) ${tag}`)
-        if (swap.outcome === 'refunded') notify?.('refund', () => `send: solver lockup refunded to wallet ${tag}`)
-      }
-    } else if (swap.outcome === 'needs_recovery' && !replay) {
-      notify?.('send-fail', () => `send: LN payment needs recovery — ${swap.blockedReason ?? 'see /swaps'} ${tag}`)
-    }
-  }
-  const unsubscribe = deps.lightning.solver.client.onUpdate(({ swap }) => {
-    const replay = replaying
-    onSwap(swap, replay).catch((e) => console.warn(`ln: ledger update for ${swap.id} failed: ${(e as Error).message}`))
-  })
-  replaying = false
-  return unsubscribe
-}
-
-/**
- * Crash-window reconcile for sub-dust sends (M1/R2): an atomic send whose NWC
+ * Crash-window reconcile for atomic sends (M1/R2): an atomic send whose NWC
  * row is still pending — the handler never returned (restart), or answered
  * "unresolved" — settles or fails from the atomic swap row, matched by payment
- * hash. Solver sends have no atomic row and are the swap listener's job.
+ * hash.
  *
  * R2: the settle books the reserved principal (amount_msat) into the 'never'
  * budget counter in the same transaction as the flip, changes-gated so a
@@ -154,52 +103,4 @@ export function reconcileAtomicSendRows(db: Database): void {
     }
     // non-terminal → still in flight, leave pending
   }
-}
-
-/** A solver send still open after this long gets one operator DM (F31). */
-export const UNRESOLVED_SEND_ALERT_SECS = 30 * 60
-
-/**
- * F31: a solver send that stays open — the payee may be holding the HTLC (a
- * legitimate slow payment), or the payment failed while our emulator was down
- * and the solver parked the swap `stuck` for a human. The client can't tell the
- * two apart, and the second one would otherwise sit until the refund locktime
- * (days) with nobody noticing. One DM per swap per process, pointing at the
- * solver's `status` / `refund-now`. Never throws.
- */
-export function watchUnresolvedSolverSends(deps: {
-  client: Pick<LnSendDeps['lightning']['solver']['client'], 'swaps'>
-  notify?: NotifyFn
-  thresholdSecs?: number
-  intervalMs?: number
-  now?: () => number
-}): { stop(): void; pass(): Promise<string[]> } {
-  const threshold = deps.thresholdSecs ?? UNRESOLVED_SEND_ALERT_SECS
-  const now = deps.now ?? (() => Math.floor(Date.now() / 1000))
-  const alerted = new Set<string>()
-  const pass = async (): Promise<string[]> => {
-    const fired: string[] = []
-    try {
-      for (const s of await deps.client.swaps()) {
-        if (!isSend(s) || alerted.has(s.id)) continue
-        if (s.outcome !== 'funded' && s.outcome !== 'funding') continue
-        const age = now() - s.createdAt
-        if (age < threshold) continue
-        alerted.add(s.id)
-        fired.push(s.id)
-        deps.notify?.(
-          'send-fail',
-          () =>
-            `send: LN payment unresolved for ${Math.round(age / 60)} min — ${sats(s, 'take')} sats [swap ${s.id.slice(4, 12)}, hash ${s.lock?.hash.slice(0, 8) ?? '?'}]. ` +
-            `Either the payee is holding the HTLC, or the solver parked the swap 'stuck' (payment failed while the emulator was down). ` +
-            `Check on the solver: cli status / refund-now. Untouched, it refunds itself at the refund locktime.`,
-        )
-      }
-    } catch (e) {
-      console.warn(`ln: unresolved-send check failed: ${(e as Error).message}`)
-    }
-    return fired
-  }
-  const timer = setInterval(() => void pass(), deps.intervalMs ?? 60_000)
-  return { stop: () => clearInterval(timer), pass }
 }

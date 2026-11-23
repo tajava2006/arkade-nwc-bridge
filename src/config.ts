@@ -9,7 +9,7 @@ export interface Config {
   network: defaults.Network
   arkServerUrl: string
   esploraUrls: readonly string[]
-  /** Solver + subdustd + emulator key (data/config.json only); undefined = Ark-only. */
+  /** subdustd (data/config.json only); undefined = Ark-only. */
   lightning?: LightningConfig
   /**
    * Replace the public bootstrap + fallback relay lists with these (a private
@@ -49,7 +49,7 @@ export function loadConfig(): Config {
         ? overrides.esploraUrls
         : defaults.ESPLORA_URLS,
     // Throws on a malformed block — boot must not guess at payment endpoints.
-    lightning: parseLightningConfig((overrides as { lightning?: unknown }).lightning, baseDir),
+    lightning: parseLightningConfig((overrides as { lightning?: unknown }).lightning),
     nostrRelays: overrides.nostrRelays && overrides.nostrRelays.length > 0 ? overrides.nostrRelays : undefined,
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,

@@ -287,7 +287,7 @@ describe('resumeAtomicSends', () => {
     }
     await resumeAtomicSends(deps, noRefund, spent)
     expect(calls.length).toBe(1)
-    expect(calls[0]!.kind).toBe('send-subdust')
+    expect(calls[0]!.kind).toBe('send-ln')
     expect(calls[0]!.text).toContain('after restart')
     expect(calls[0]!.text).toContain('21 sats')
 

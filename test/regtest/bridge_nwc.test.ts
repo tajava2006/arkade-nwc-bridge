@@ -12,17 +12,14 @@ import { decryptContent, encryptContent } from '../../src/nostr/crypto'
 // SM-53: the real bridge process on the regtest-solver harness, driven the way
 // a nostr client drives it — NIP-47 over the harness relay — plus the web
 // pages SM-46 changed. Lightning comes from data/config.json's `lightning`
-// block (our solver, subdustd, our emulator key); `nostrRelays` keeps the
-// bridge off every public relay.
+// block (subdustd, every amount — D11); `nostrRelays` keeps the bridge off
+// every public relay.
 //
 //   eval "$(test-script/regtest-solver.sh env)" && bun test test/regtest/bridge_nwc.test.ts
 
 const ARKD = process.env.REGTEST_ARKD_URL ?? 'http://localhost:7070'
 const ESPLORA = process.env.REGTEST_ESPLORA_URL ?? 'http://localhost:3000/api'
-const SOLVER_URL = process.env.SOLVER_URL
-const CARD_PATH = process.env.SOLVER_CARD_PATH
 const SUBDUSTD_URL = process.env.SUBDUSTD_URL
-const EMU = process.env.EMULATOR_PUBKEY_OVERRIDE
 const RELAY = process.env.REGTEST_NOSTR_RELAY ?? 'ws://localhost:7777'
 const PORT = 4300 + Math.floor(Math.random() * 600)
 const BASE = `http://127.0.0.1:${PORT}`
@@ -57,7 +54,7 @@ const payers: ChildProcess[] = []
 const peerPays = (bolt11: string) =>
   payers.push(spawn('docker', ['exec', 'lnd-peer', 'lncli', '--network=regtest', 'payinvoice', '--force', bolt11], { stdio: 'ignore' }))
 
-describe.skipIf(!SOLVER_URL || !CARD_PATH || !SUBDUSTD_URL || !EMU)('the bridge process over NWC on regtest', () => {
+describe.skipIf(!SUBDUSTD_URL)('the bridge process over NWC on regtest', () => {
   let bridge: ChildProcess
   let logPath: string
   const pool = new SimplePool()
@@ -106,7 +103,7 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !SUBDUSTD_URL || !EMU)('the bridge 
         httpPort: PORT,
         dbPath: './data/bridge.sqlite',
         nostrRelays: [RELAY],
-        lightning: { solverUrl: SOLVER_URL, solverCardPath: CARD_PATH, subdustdUrl: SUBDUSTD_URL, emulatorPubkey: EMU },
+        lightning: { subdustdUrl: SUBDUSTD_URL },
       }),
     )
     logPath = join(runtime, 'bridge.log')
@@ -153,14 +150,15 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !SUBDUSTD_URL || !EMU)('the bridge 
     expect(r.result.methods).toEqual(expect.arrayContaining(['pay_invoice', 'make_invoice', 'lookup_invoice', 'list_transactions', 'get_balance']))
   }, 60_000)
 
-  test('pay_invoice ≥ dust (solver): preimage of the invoice, amount = nominal, fees_paid = the quote gap', async () => {
+  test('pay_invoice ≥ dust (subdustd, D11): preimage of the invoice, amount = nominal, fees_paid = 0.5%', async () => {
     const inv = peer('addinvoice', '--amt', '5000')
     const r = await nwc('pay_invoice', { invoice: inv.payment_request })
     expect(r.error ?? null).toBeNull() // NIP-47 answers carry error: null beside the result
     expect(sha256(r.result.preimage)).toBe(inv.r_hash)
     const l = await nwc('lookup_invoice', { payment_hash: inv.r_hash })
     expect(l.result).toMatchObject({ type: 'outgoing', state: 'settled', amount: 5_000_000, preimage: r.result.preimage })
-    expect(l.result.fees_paid ?? 0).toBe(r.result.fees_paid ?? 0)
+    expect(r.result.fees_paid).toBe(25_000)
+    expect(l.result.fees_paid).toBe(25_000)
   }, 300_000)
 
   test('pay_invoice < dust (subdustd): a 21-sat invoice is paid atomically', async () => {
@@ -217,16 +215,16 @@ describe.skipIf(!SOLVER_URL || !CARD_PATH || !SUBDUSTD_URL || !EMU)('the bridge 
     expect(await states({ limit: 50, unpaid: true })).toContain('outgoing:failed')
   }, 60_000)
 
-  test('web pages (SM-46): the send preview quotes, /swaps lists both rails, the dashboard says no receive fee', async () => {
+  test('web pages: the send preview prices from subdustd, /swaps lists the atomic swaps, the dashboard says no receive fee', async () => {
     const inv = peer('addinvoice', '--amt', '3000')
     const preview = await (await form('/send', { destination: inv.payment_request })).text()
     expect(preview).toContain('Lightning payment')
     expect(preview).toContain('Total leaving wallet')
-    expect(preview).toContain('our solver')
+    expect(preview).toContain('15 sats (0.5%, routing included)')
+    expect(preview).toContain('3,015 sats')
     const swaps = await page('/swaps')
-    expect(swaps).toContain('Solver sends')
     expect(swaps).toContain('Atomic swaps')
-    expect(swaps).toMatch(/rfq:/)
+    expect(swaps).not.toContain('Solver')
     expect(await page('/')).toContain('Fee: none')
     // and the process never reached for a public relay
     expect(readFileSync(logPath, 'utf8')).not.toMatch(/wss:\/\//)

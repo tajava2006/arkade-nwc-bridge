@@ -68,8 +68,8 @@ async function resolveInput(deps: SweepDeps, txid: string, vout: number): Promis
     throw new Error(`vtxo tx ${txid} is not confirmed onchain — unroll first`)
   }
   const tip = await deps.explorer.getChainTip()
-  // Only a leaf we can sign alone: a solver lockup's other CSV leaves need the
-  // solver's signature or the preimage (SM-55).
+  // Only a leaf we can sign alone: a swap lockup's other CSV leaves need the
+  // provider's signature or the preimage (SM-55).
   const exit = availableExitPath(
     vtxo.tapTree,
     { height: status.blockHeight, time: status.blockTime },

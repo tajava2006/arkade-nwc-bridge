@@ -7,7 +7,7 @@ import type { NotifyFn } from './nostr/notifier'
 
 // Every LN receive is an ATOMIC receive against subdustd, whatever the amount
 // (D10): the bridge generates the preimage, subdustd mints a HOLD invoice
-// (carrying the NIP-57 description hash when given — the solver's cannot),
+// (carrying the NIP-57 description hash when given),
 // funds a shared vtxo once the payer's HTLC is held, and we claim with our own
 // preimage. The bridge owns the preimage, so receipts use it directly.
 

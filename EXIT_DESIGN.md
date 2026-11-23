@@ -302,10 +302,8 @@ retries the full bring-up and promotes to ready in place; open tabs reload on a
 **Whole-or-degraded, on purpose.** A partial-ready state (wallet up, a swap
 service down) would fork `AppState` into per-subsystem availability flags for a
 rare, transient condition the retry loop already heals — not worth the
-complexity. The Lightning rails don't gate boot at all: the solver is not
-contacted at boot (its card is local config, the swap client's restore read is
-the bridge's own sqlite) and subdustd is only polled, so either one being down
-degrades Lightning, never the wallet. (A transient Boltz failure used to crash
+complexity. The Lightning rail doesn't gate boot at all: subdustd is only
+polled, so it being down degrades Lightning, never the wallet. (A transient Boltz failure used to crash
 boot.)
 
 `bootReady` carries an **undo stack**: with a retry loop, a failure past

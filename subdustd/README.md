@@ -1,12 +1,18 @@
 # subdustd
 
 The server side of the bridge's atomic Lightning swaps, split out of the Boltz
-fork's `SubdustAtomicRouter` into its own service: **sends below the 330-sat
-dust limit** (above it the bridge pays through the solver) and **every
-receive, any amount** — the solver's hold invoice cannot carry a NIP-57
-description hash, this one can (decision D10 in the operator's migration
-plan). The protocol (`ATOMIC_SUBDUST_PLAN.md`) is unchanged: 4-leaf shared
-vtxo, presigned claim/cancel pairs, split delta. It imports the same
+fork's `SubdustAtomicRouter` into its own service: **every send and every
+receive, any amount** (decisions D10 and D11 in the operator's migration
+plan — the name is from when it only did sub-dust). The protocol
+(`ATOMIC_SUBDUST_PLAN.md`) is unchanged: 4-leaf shared vtxo, presigned
+claim/cancel pairs, split delta.
+
+> **One-funder trust on sends.** The script gives subdustd (the claimer on a
+> send) no unilateral path: a funder who unrolls the shared vtxo while holding
+> subdustd's HTLC keeps both the payment and the coin, up to `a`. Below dust
+> that bound was negligible; at any amount it is acceptable only while the
+> funder is the operator's own bridge. Serving anyone else needs a v2 script
+> with a claimer unilateral leaf first. It imports the same
 `src/atomic` library the bridge uses, so the client and server cannot drift.
 
 It serves the same REST contract the bridge already speaks
@@ -38,6 +44,7 @@ The request and response shapes are the Boltz fork's. Errors come back as
 | `POST …/send/fund` `{swapId, presigs, fundingOutpoint?}` | Finds the funding through arkd's indexer, verifies the presigs, pays, then claims. Returns `{status:'claimed', preimage, claimTxid}` or `{status:'failed', error}` |
 | `POST …/send/cancel` `{swapId, fundingOutpoint, outputs, presigs}` | Co-signs the funder's unwind, only when the cancel gate says the payment is dead. Otherwise `{status:'refused', error}` |
 | `GET …/send/status?swapId=` | `{state, preimage?}` |
+| `GET …/send/fees` | `{feePercent}` — the fee rule (`feeSats = ceil(a × feePercent / 100)`, frozen per swap at init), so a client can price a send before init. subdustd pays the routing out of it |
 
 Where this differs from the fork:
 
@@ -105,10 +112,9 @@ MTP refunds nothing.
 ## Ark key
 
 subdustd has its own key and its own float. It funds every receive from that
-float, and sub-dust send proceeds land back on it. The float has to cover the
-largest receive you expect (amount + dust in eligible coins); dust-and-up
-sends land on the solver instead, so move Ark balance from the solver to this
-address now and then.
+float, and send proceeds (`a` + fee) land back on it, so sends refill what
+receives spend. The float has to cover the largest receive you expect
+(amount + dust in eligible coins).
 
 ```bash
 bun run subdustd:keygen /data/subdustd.key   # once; refuses to overwrite

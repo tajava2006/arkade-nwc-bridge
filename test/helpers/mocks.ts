@@ -195,63 +195,37 @@ export function knownPreimageInvoice(base?: string): { preimage: string; payment
 }
 
 export interface LightningStubOptions {
-  /** Thrown from client.pay — a refusal before any value moved. */
+  /** Thrown before any value moved (e.g. LnSendRefused). */
   payError?: Error
-  /** Where the swap ends up after pay() returns ('funding'). Default 'paid'. */
-  finalOutcome?: 'paid' | 'refunded' | 'failed' | 'needs_recovery'
-  /** Solver fee in sats (give = take + fee). */
+  /** How the send ends. Default 'paid'. */
+  outcome?: 'paid' | 'failed' | 'unresolved'
+  /** Fee in sats (what left the wallet = invoice + fee). */
   feeSats?: number
-  /** The preimage the record will carry for a paid swap. */
+  /** The preimage a paid send returns. */
   preimage?: string
   swapId?: string
 }
 
 /**
- * The bridge's Lightning rails with a scripted solver: pay() returns the swap
- * at 'funding' and the final outcome is emitted on the next tick, the way the
- * drive reports it. The record store answers getSwapRecord for the preimage.
+ * The bridge's Lightning rail plus a scripted `send` for handlers that take
+ * one (pay_invoice): the real atomic send needs arkd and subdustd and runs on
+ * regtest; this one returns or throws the way sendLightning does.
  */
 export function makeLightningStub(opts: LightningStubOptions = {}): {
   lightning: import('../../src/ln_send').LightningRails
+  send: typeof import('../../src/ln_send').sendLightning
   paid: string[]
-  emit: (swap: Record<string, unknown>) => void
 } {
-  const listeners = new Set<(u: { swap: unknown }) => void>()
   const paid: string[] = []
-  const id = opts.swapId ?? 'rfq:00112233445566778899aabbccddeeff'
-  const emit = (swap: Record<string, unknown>) => {
-    for (const l of listeners) l({ swap })
+  const send: typeof import('../../src/ln_send').sendLightning = async (_deps, invoice) => {
+    if (opts.payError) throw opts.payError
+    paid.push(invoice)
+    const { decodeInvoice } = await import('../../src/lib/bolt11')
+    const { LnSendUnresolved } = await import('../../src/ln_send')
+    if (opts.outcome === 'failed') throw new Error('LN pay failed (FAILURE_REASON_NO_ROUTE)')
+    if (opts.outcome === 'unresolved') throw new LnSendUnresolved('payment outcome unknown — resolving in the background')
+    const sats = decodeInvoice(invoice).amountSats ?? 0
+    return { amount: sats + (opts.feeSats ?? 0), preimage: opts.preimage ?? '', txid: 'arktxid-funding', swapId: opts.swapId ?? 'atomic-swap-1' }
   }
-  const client = {
-    pay: async (invoice: string) => {
-      if (opts.payError) throw opts.payError
-      paid.push(invoice)
-      const { decodeInvoice } = await import('../../src/lib/bolt11')
-      const d = decodeInvoice(invoice)
-      const take = BigInt(d.amountSats ?? 0)
-      const base = {
-        id,
-        route: { give: { corridor: 'arkade' }, take: { corridor: 'lightning' } },
-        give: { amount: take + BigInt(opts.feeSats ?? 0) },
-        take: { amount: take },
-        fee: { amount: BigInt(opts.feeSats ?? 0) },
-        lock: { hash: d.paymentHash },
-        fundingTxid: 'arktxid-lockup',
-      }
-      setTimeout(() => emit({ ...base, outcome: opts.finalOutcome ?? 'paid', failure: 'no route' }), 0)
-      return { kind: 'swap', swap: { ...base, outcome: 'funding' } }
-    },
-    onUpdate: (fn: (u: { swap: unknown }) => void) => {
-      listeners.add(fn)
-      return () => listeners.delete(fn)
-    },
-  }
-  const repository = {
-    getSwapRecord: async () => ({ settlementPreimageHex: opts.preimage, lockupPkScript: '5120' + '00'.repeat(32) }),
-  }
-  return {
-    lightning: { solver: { client, repository, dispose: async () => {} } as never, subdustdUrl: 'http://subdustd.invalid' },
-    paid,
-    emit,
-  }
+  return { lightning: { subdustdUrl: 'http://subdustd.invalid' }, send, paid }
 }

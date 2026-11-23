@@ -51,7 +51,7 @@ export function setupView(args?: {
             : null}
 
           <label class="opt"><input type="radio" name="server_choice" value="hoppe" ${checked('hoppe')} /> This bridge's operator — recommended</label>
-          <p class="note muted">${ARK_SERVER_URL}<br />Lightning runs on the operator's own swap services — an intent solver for sends and an atomic swap server for receives and sub-dust — so <strong>any amount, down to a 1-sat zap</strong>, works in both directions, with no third party in the refund path.</p>
+          <p class="note muted">${ARK_SERVER_URL}<br />Lightning runs on the operator's own atomic swap server, so <strong>any amount, down to a 1-sat zap</strong>, works in both directions, with no third party in the refund path.</p>
           <p class="note muted">A one-person server, so liquidity is finite: <strong>sending out of Ark</strong> — a cooperative offboard to the chain, or a Lightning payment — is capped at what the operator has stocked. That does <strong>not</strong> make it custodial. In Ark your ownership is the <strong>unilateral-exit</strong> right, not the operator's cooperation: whatever the server's liquidity, you can move <strong>every sat you put here</strong> onto the chain yourself, without the operator — only <em>cooperative</em> exit is liquidity-bound. Funds coming <strong>in</strong> have no cap.</p>
 
           <label class="opt"><input type="radio" name="server_choice" value="custom" ${checked('custom')} /> Custom — your own Ark server</label>

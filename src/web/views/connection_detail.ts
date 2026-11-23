@@ -73,7 +73,7 @@ export function connectionDetailView(args: {
         Amount is the invoice's face value — the number both sides agreed
         on. Fee is the Ark ↔ Lightning swap service charge, paid by this
         wallet, never by the counterparty: a send actually debits amount +
-        fee (the solver's quote, which covers Lightning routing); receives
+        fee (the swap service's fixed share, which covers Lightning routing); receives
         carry no fee, so whoever pays your invoice pays exactly its face
         value and that much lands here.
       </p>
