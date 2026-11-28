@@ -422,6 +422,15 @@ const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 6,
+    description: 'dust+ atomic swaps on the VHTLC (F32_VHTLC_PLAN, D12)',
+    // NULL = the 4-leaf script (every row before this, and sub-dust after).
+    // JSON {claimDelaySecs, refundDelaySecs, refundNoReceiverDelaySecs}; with
+    // refund_locktime + peer_pubkey they rebuild the VHTLC offline, as the
+    // 4-leaf columns already do for the refund path.
+    sql: `ALTER TABLE atomic_swaps ADD COLUMN vhtlc TEXT;`,
+  },
 ]
 
 export function openDatabase(path: string): Database {

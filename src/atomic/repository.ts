@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
 import { SwapDirection } from './params'
 import { assertTransition, isTerminal, type AtomicSwapState } from './state'
 import type { AtomicPresig } from './tx'
+import type { VhtlcDelays } from './vhtlc'
 
 // Persistent store for in-flight atomic swaps (ATOMIC_SUBDUST_PLAN.md §3.4).
 // Pre-signatures, the preimage, and swap state MUST survive a restart — losing
@@ -25,6 +26,7 @@ export const ATOMIC_SWAPS_SCHEMA = `
     invoice           TEXT,                      -- bolt11
     peer_pubkey       TEXT,                      -- counterparty x-only (hex) — script rebuild without the peer
     exit_delay        INTEGER,                   -- d (unilateral exit delay) at swap creation
+    vhtlc             TEXT,                      -- VHTLC delays (JSON); NULL = 4-leaf (db.ts v6)
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL
   );
@@ -46,6 +48,8 @@ export interface AtomicSwapRow {
   peerPubkey?: string
   /** unilateral exit delay d at swap creation (script rebuild input) */
   exitDelay?: number
+  /** Set when the swap rides the VHTLC (dust+); its delays + refundLocktime rebuild the script. */
+  vhtlc?: VhtlcDelays
   /** unix MILLISECONDS (create() writes Date.now()) — not seconds like refundLocktime */
   createdAt: number
   updatedAt: number
@@ -62,6 +66,7 @@ export interface NewAtomicSwap {
   preimage?: string
   peerPubkey?: string
   exitDelay?: number
+  vhtlc?: VhtlcDelays
 }
 
 export class DuplicateSwapError extends Error {
@@ -84,6 +89,7 @@ interface DbRow {
   invoice: string | null
   peer_pubkey: string | null
   exit_delay: number | null
+  vhtlc: string | null
   created_at: number
   updated_at: number
 }
@@ -102,6 +108,7 @@ function fromDb(r: DbRow): AtomicSwapRow {
     invoice: r.invoice ?? undefined,
     peerPubkey: r.peer_pubkey ?? undefined,
     exitDelay: r.exit_delay ?? undefined,
+    vhtlc: r.vhtlc ? (JSON.parse(r.vhtlc) as VhtlcDelays) : undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }
@@ -123,8 +130,8 @@ export class SqliteAtomicSwapRepository {
       this.db
         .query(
           `INSERT INTO atomic_swaps
-             (id, direction, payment_hash, state, amount, refund_locktime, invoice, preimage, peer_pubkey, exit_delay, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, direction, payment_hash, state, amount, refund_locktime, invoice, preimage, peer_pubkey, exit_delay, vhtlc, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           swap.id,
@@ -137,6 +144,7 @@ export class SqliteAtomicSwapRepository {
           swap.preimage ?? null,
           swap.peerPubkey ?? null,
           swap.exitDelay ?? null,
+          swap.vhtlc ? JSON.stringify(swap.vhtlc) : null,
           now,
           now,
         )

@@ -12,7 +12,7 @@ import {
   type TapLeafScript,
 } from '@arkade-os/sdk'
 import type { ArkAddress } from '@arkade-os/sdk'
-import type { AtomicVtxoScript } from './script'
+import { funderKey, roleLeaves, type SwapScript } from './swap_script'
 import type { AtomicOutput } from './split'
 
 // Deterministic tx builders + presign for the atomic sub-dust protocol
@@ -35,7 +35,8 @@ export interface SharedVtxo {
   txid: string
   vout: number
   value: number
-  script: AtomicVtxoScript
+  /** The 4-leaf script (sub-dust) or the VHTLC (dust+) — leaves are reached by role (swap_script.ts). */
+  script: SwapScript
 }
 
 function arkInput(shared: SharedVtxo, leaf: TapLeafScript): ArkTxInput {
@@ -91,12 +92,12 @@ function buildPair(
 
 /** The claim pair: shared vtxo → split outputs via the claim leaf (preimage). */
 export function buildClaimPair(shared: SharedVtxo, outputs: AtomicOutput[], unroll: CSVMultisigTapscript.Type): ClaimPair {
-  return buildPair(shared, shared.script.claim(), outputs, unroll)
+  return buildPair(shared, roleLeaves(shared.script).claim, outputs, unroll)
 }
 
 /** The cancel pair: shared vtxo → F's outputs via the cancel leaf (no timelock). */
 export function buildCancelPair(shared: SharedVtxo, outputs: AtomicOutput[], unroll: CSVMultisigTapscript.Type): ClaimPair {
-  return buildPair(shared, shared.script.cancel(), outputs, unroll)
+  return buildPair(shared, roleLeaves(shared.script).cancel, outputs, unroll)
 }
 
 // ── presign (funder) ─────────────────────────────────────────────────────────
@@ -240,8 +241,25 @@ export async function finishClaim(
   preimage: Uint8Array,
   ark: ArkProvider,
 ): Promise<string> {
-  const v = verifyPresig(shared, outputs, unroll, presig, shared.script.options.funder)
+  const v = verifyPresig(shared, outputs, unroll, presig, funderKey(shared.script))
   return finishPresigned(v, withPreimage(claimer, preimage), ark)
+}
+
+/**
+ * The VHTLC claim (claim leaf = claimer + server + preimage): no presig — the
+ * funder's consent is the preimage itself. Same submit/finalize as any single-
+ * signer spend; withPreimage puts the preimage on both the checkpoint and the
+ * arkTx input (each spends through the hashlocked leaf). Returns the arkTxid.
+ */
+export function claimAlone(
+  shared: SharedVtxo,
+  outputs: AtomicOutput[],
+  unroll: CSVMultisigTapscript.Type,
+  claimer: Identity,
+  preimage: Uint8Array,
+  ark: ArkProvider,
+): Promise<string> {
+  return collaborativeSpend(shared, roleLeaves(shared.script).claim, outputs, unroll, [withPreimage(claimer, preimage)], ark)
 }
 
 /**
@@ -261,7 +279,7 @@ export async function finishCancel(
   claimer: Identity,
   ark: ArkProvider,
 ): Promise<string> {
-  const v = verifyCancelPresig(shared, outputs, unroll, presig, shared.script.options.funder)
+  const v = verifyCancelPresig(shared, outputs, unroll, presig, funderKey(shared.script))
   return finishPresigned(v, claimer, ark)
 }
 
@@ -354,7 +372,7 @@ export function refundSpend(
   funder: Identity,
   ark: ArkProvider,
 ): Promise<string> {
-  return collaborativeSpend(shared, shared.script.refund(), outputs, unroll, [funder], ark)
+  return collaborativeSpend(shared, roleLeaves(shared.script).refund, outputs, unroll, [funder], ark)
 }
 
 /** Cooperatively unwind the shared vtxo to F (cancel leaf, F+C+server, live). */
@@ -366,7 +384,7 @@ export function cancelSpend(
   claimer: Identity,
   ark: ArkProvider,
 ): Promise<string> {
-  return collaborativeSpend(shared, shared.script.cancel(), outputs, unroll, [funder, claimer], ark)
+  return collaborativeSpend(shared, roleLeaves(shared.script).cancel, outputs, unroll, [funder, claimer], ark)
 }
 
 // ── funding (F spends its own vtxo(s) whole into the shared 4-leaf output) ─────
@@ -421,7 +439,7 @@ export interface UexitSweepArgs {
   txid: string
   vout: number
   value: number
-  script: AtomicVtxoScript
+  script: SwapScript
   /** BIP68 sequence for the CSV exit delay (timelockToSequence of d). */
   sequence: number
   /** Destination onchain scriptPubKey (e.g. F's P2TR). */
@@ -443,7 +461,7 @@ export function buildUexitSweep(args: UexitSweepArgs): Transaction {
     txid: args.txid,
     index: args.vout,
     witnessUtxo: { amount: BigInt(args.value), script: args.script.pkScript },
-    tapLeafScript: [args.script.uexit()],
+    tapLeafScript: [roleLeaves(args.script).uexit],
     sequence: args.sequence,
   })
   tx.addOutput({ script: args.outputScript, amount: BigInt(out) })

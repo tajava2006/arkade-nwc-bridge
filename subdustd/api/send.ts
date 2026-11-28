@@ -3,14 +3,22 @@ import { hex } from '@scure/base'
 import { DefaultVtxo, getAllNormalizedVtxos } from '@arkade-os/sdk'
 import {
   AtomicVtxoScript,
+  buildVhtlc,
+  claimAlone,
   computeClaimSplit,
   finishCancel,
   finishClaim,
+  isVhtlcScript,
+  policyFor,
   sendFeeSats,
+  sendTimeouts,
+  SwapDirection,
+  usesVhtlc,
   verifyPresig,
   type AtomicOutput,
   type AtomicPresig,
   type SharedVtxo,
+  type SwapScript,
 } from '../../src/atomic/index.ts'
 import { lnPaymentIsDead } from '../cancel_gate.ts'
 import type { SubdustKnobs } from '../config.ts'
@@ -23,15 +31,16 @@ import type { ServerSendState } from '../state.ts'
 import { badRequest, HttpError, validateArgs, xOnlyHex, type SwapLocks } from './http_error.ts'
 
 // Atomic SEND (ARK → LN), any amount (D11), server side. We are the CLAIMER
-// and commit no capital: the user funds a 4-leaf shared vtxo and hands over two
-// presignatures; we verify, pay the invoice, and claim `a` (+ fee) with the
-// revealed preimage. Request/response shapes are the Boltz fork's.
+// and commit no capital: the user funds the swap script, we verify, pay the
+// invoice, and claim `a` (+ fee) with the revealed preimage. Request/response
+// shapes are the Boltz fork's.
 //
-// The 4-leaf script gives the claimer no unilateral path (uexit is the
-// funder's alone), so a funder who unrolls while holding our HTLC can keep both
-// the payment and the coin: the claimer is exposed up to `a`. That was bounded
-// by sub-dust when only sub-dust came here; at any amount it is acceptable only
-// while the funder is our own bridge (SUBDUST_ATOMIC_SECURITY_REVIEW F32).
+// Two scripts (F32_VHTLC_PLAN.md, D12). Dust+ rides the SDK's VHTLC: our claim
+// needs no presig (the preimage is the consent), and its unilateralClaim leaf
+// matures before the funder's own, so a funder who unrolls while holding our
+// HTLC still loses the race on chain — d_s is sized for that (vhtlc.ts S1).
+// Sub-dust keeps the 4-leaf script, where the claimer has no unilateral path:
+// there the exposure is < dust, as it always was (F32 🚫, original bound).
 //
 // Two deliberate departures from the fork:
 //  - F25: a thrown sendPayment is "outcome unknown". The row stays ln_inflight
@@ -113,6 +122,7 @@ export class SendService {
 
     // Idempotent init (F17): an unfunded init for this invoice with T still well
     // ahead is handed back as-is, so a client that failed before funding can retry.
+    const feeSats = sendFeeSats(a, knobs.sendFeePercent)
     let swap = store.getByPaymentHash(decoded.paymentHash)
     if (swap) {
       if (!(swap.direction === 'send' && swap.state === 'init' && swap.refundLocktime > nowSecs() + knobs.payMarginSecs)) {
@@ -122,17 +132,31 @@ export class SendService {
       const window = sendWindowSecs(await this.routeCltvDelta(decoded, a), this.windowCfg)
       const id = randomBytes(16).toString('hex')
       if (window < knobs.sendWindowSecs) this.d.log.debug(`send ${id}: T sized to ${window}s from the measured route`)
+      const now = nowSecs()
+      const t = usesVhtlc(SwapDirection.Send, a, feeSats, dust)
+        ? sendTimeouts(policyFor(Number(info.unilateralExitDelay), info.network), {
+            nowSecs: now,
+            windowSecs: window,
+            payMarginSecs: knobs.payMarginSecs,
+            blockTimeSecs: knobs.blockTimeSecs,
+          })
+        : undefined
       try {
         swap = store.create({
           id,
           direction: 'send',
           paymentHash: decoded.paymentHash,
           amount: a,
-          refundLocktime: nowSecs() + window,
+          refundLocktime: now + window,
           userPubkey,
-          feeSats: sendFeeSats(a, knobs.sendFeePercent),
+          feeSats,
           selfDelay: info.unilateralExitDelay,
           invoice,
+          vhtlc: t && {
+            claimDelaySecs: t.claimDelaySecs,
+            refundDelaySecs: t.refundDelaySecs,
+            refundNoReceiverDelaySecs: t.refundNoReceiverDelaySecs,
+          },
         })
       } catch (e) {
         if (e instanceof DuplicatePaymentHash) throw badRequest(`invoice already has an atomic swap in progress: ${e.message}`)
@@ -153,6 +177,10 @@ export class SendService {
       feeSats: swap.feeSats,
       dust,
       vtxoMin: Number(info.vtxoMinAmount),
+      // 'vhtlc': fund the VHTLC built from these delays + refundLocktime (we are
+      // its receiver, boltzPubkey); no presig. 'atomic4': the 4-leaf flow.
+      script: swap.vhtlc ? 'vhtlc' : 'atomic4',
+      ...(swap.vhtlc ? { vhtlc: swap.vhtlc } : {}),
     }
   }
 
@@ -163,49 +191,63 @@ export class SendService {
     const server = await signer.serverXOnly()
     const delay = swap.selfDelay!
     const user = hex.decode(swap.userPubkey)
-    const script = new AtomicVtxoScript({
-      funder: user,
-      claimer: await signer.xOnlyPublicKey(),
-      server,
-      paymentHash: hex.decode(swap.paymentHash),
-      refundLocktime: BigInt(swap.refundLocktime),
-      exitDelay: delay,
-    })
+    const own = await signer.xOnlyPublicKey()
+    const script: SwapScript = swap.vhtlc
+      ? buildVhtlc({
+          sender: user,
+          receiver: own,
+          server,
+          paymentHash: hex.decode(swap.paymentHash),
+          timeouts: { refundLocktime: swap.refundLocktime, ...swap.vhtlc },
+        })
+      : new AtomicVtxoScript({
+          funder: user,
+          claimer: own,
+          server,
+          paymentHash: hex.decode(swap.paymentHash),
+          refundLocktime: BigInt(swap.refundLocktime),
+          exitDelay: delay,
+        })
     const funderAddress = new DefaultVtxo.Script({
       pubKey: user,
       serverPubKey: server,
       csvTimelock: { type: timelockType(delay), value: delay },
     }).address(hrpOf(info), server)
     const claimerAddress = await signer.receiveAddress(delay)
-    const split = (fundingValue: number) =>
-      computeClaimSplit({
-        funderAddress,
-        claimerAddress,
-        fundingValue,
-        amount: swap.amount,
-        dust: Number(info.dust),
-        feeSats: swap.feeSats,
-      })
-    return { info, user, script, split, unroll: await signer.serverUnroll() }
+    // What the claim pays: the 4-leaf split (a + fee to us, the rest back to the
+    // funder), or the whole VHTLC to us — its funding already left the change
+    // in the funding tx.
+    const claimOutputs = (fundingValue: number): AtomicOutput[] =>
+      swap.vhtlc
+        ? [{ script: claimerAddress.pkScript, amount: BigInt(fundingValue) }]
+        : computeClaimSplit({
+            funderAddress,
+            claimerAddress,
+            fundingValue,
+            amount: swap.amount,
+            dust: Number(info.dust),
+            feeSats: swap.feeSats,
+          }).outputs
+    return { info, user, script, claimOutputs, unroll: await signer.serverUnroll() }
   }
 
   async fund(body: unknown) {
     const args = validateArgs(body, [
       { name: 'swapId', type: 'string' },
-      { name: 'presigs', type: 'object' },
+      { name: 'presigs', type: 'object', optional: true },
       { name: 'fundingOutpoint', type: 'string', optional: true },
     ])
     const swapId = args.swapId as string
     const release = this.d.locks.tryAcquire(swapId)
     if (!release) throw badRequest(`swap ${swapId} is busy (a fund or cancel is in flight)`)
     try {
-      return await this.fundLocked(swapId, args.presigs as AtomicPresig, args.fundingOutpoint as string | undefined)
+      return await this.fundLocked(swapId, args.presigs as AtomicPresig | undefined, args.fundingOutpoint as string | undefined)
     } finally {
       release()
     }
   }
 
-  private async fundLocked(swapId: string, presig: AtomicPresig, fundingOutpoint: string | undefined) {
+  private async fundLocked(swapId: string, presig: AtomicPresig | undefined, fundingOutpoint: string | undefined) {
     const { store, signer, knobs } = this.d
     const swap = store.get(swapId)
     if (!swap || swap.direction !== 'send') throw badRequest(`unknown send swap ${swapId}`)
@@ -222,14 +264,17 @@ export class SendService {
     if (V < swap.amount + swap.feeSats) throw badRequest(`funding ${V} < amount ${swap.amount} + fee ${swap.feeSats}`)
 
     const shared: SharedVtxo = { txid: funding.txid, vout: funding.vout, value: V, script: ctx.script }
-    const split = ctx.split(V)
-    verifyPresig(shared, split.outputs, ctx.unroll, presig, ctx.user)
+    const outputs = ctx.claimOutputs(V)
+    if (!swap.vhtlc) {
+      if (!presig) throw badRequest(`swap ${swapId} is a 4-leaf send: presigs required`)
+      verifyPresig(shared, outputs, ctx.unroll, presig, ctx.user)
+    }
 
     // init → funded is the serialization point against a duplicate /send/fund (F3).
     const won = store.transition(swapId, 'init', 'funded', {
       fundingOutpoint: `${funding.txid}:${funding.vout}`,
       fundingValue: V,
-      presigs: JSON.stringify(presig),
+      presigs: swap.vhtlc ? null : JSON.stringify(presig),
     })
     if (!won) throw badRequest(`swap ${swapId} is already being funded (concurrent /send/fund) — ignoring duplicate`)
     this.d.emit(swapId, 'funded')
@@ -259,7 +304,7 @@ export class SendService {
       this.d.log.warn(`send ${swapId}: LN pay failed: ${pay.failureReason}`)
       return { status: 'failed', error: pay.failureReason }
     }
-    const claimTxid = await this.claim(store.get(swapId)!, shared, split.outputs, ctx.unroll, presig, pay.preimage)
+    const claimTxid = await this.claim(store.get(swapId)!, shared, outputs, ctx.unroll, presig ?? null, pay.preimage)
     return { status: 'claimed', preimage: pay.preimage, claimTxid }
   }
 
@@ -268,13 +313,17 @@ export class SendService {
     shared: SharedVtxo,
     outputs: AtomicOutput[],
     unroll: Awaited<ReturnType<ArkSigner['serverUnroll']>>,
-    presig: AtomicPresig,
+    presig: AtomicPresig | null,
     preimage: string,
   ): Promise<string> {
     if (sha256Hex(preimage) !== swap.paymentHash) throw new Error(`send ${swap.id}: LND preimage does not hash to the payment hash`)
+    const { identity, ark } = this.d.signer
+    if (!isVhtlcScript(shared.script) && !presig) throw new Error(`send ${swap.id}: 4-leaf claim without the funder's presig`)
     let claimTxid: string
     try {
-      claimTxid = await finishClaim(shared, outputs, unroll, presig, this.d.signer.identity, hex.decode(preimage), this.d.signer.ark)
+      claimTxid = isVhtlcScript(shared.script)
+        ? await claimAlone(shared, outputs, unroll, identity, hex.decode(preimage), ark)
+        : await finishClaim(shared, outputs, unroll, presig!, identity, hex.decode(preimage), ark)
     } catch (e) {
       // Paid but not yet claimed (arkd down, F6): the row stays ln_inflight and
       // resolveInflight retries with the preimage LND keeps.
@@ -317,7 +366,8 @@ export class SendService {
       const ctx = await this.context(swap)
       const [txid, vout] = swap.fundingOutpoint!.split(':')
       const shared: SharedVtxo = { txid: txid!, vout: Number(vout), value: swap.fundingValue!, script: ctx.script }
-      await this.claim(swap, shared, ctx.split(swap.fundingValue!).outputs, ctx.unroll, JSON.parse(swap.presigs!), tracked.payment.preimage)
+      const presig = swap.presigs ? (JSON.parse(swap.presigs) as AtomicPresig) : null
+      await this.claim(swap, shared, ctx.claimOutputs(swap.fundingValue!), ctx.unroll, presig, tracked.payment.preimage)
       return 'claimed'
     } finally {
       release()

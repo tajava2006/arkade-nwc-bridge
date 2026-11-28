@@ -7,6 +7,7 @@ import {
   checkSendOffer,
   CSV_UNIT_SECS,
   DEFAULT_VHTLC_POLICY,
+  policyFor,
   receiveFundingMinLifeSecs,
   receiveTimeouts,
   ripemd160,
@@ -33,6 +34,18 @@ const K = p.confirmBlocks
 const sendArgs = { nowSecs: NOW, windowSecs: 324_000, payMarginSecs: 600, blockTimeSecs: 600 }
 
 const csvOk = (s: number) => s % CSV_UNIT_SECS === 0 && s >= E
+
+describe('policyFor — block assumptions come from the network, not the counterparty', () => {
+  test('mainnet keeps the 9/11-minute bounds and an hour of MTP lag', () => {
+    expect(policyFor(E, 'bitcoin')).toEqual({ ...DEFAULT_VHTLC_POLICY, exitDelaySecs: E })
+  })
+  test('regtest runs on the harness’s ~30-second tick', () => {
+    const r = policyFor(2048, 'regtest')
+    expect([r.fastBlockSecs, r.slowBlockSecs, r.mtpLagSecs]).toEqual([20, 30, 180])
+    // a 2-hour regtest batch can fund a 1-hour send window
+    expect(sendFundingMinLifeSecs(r, 3_600)).toBeLessThan(7_200)
+  })
+})
 
 describe('usesVhtlc — dust decides the script', () => {
   test('a send rides the VHTLC once a + fee is a real coin', () => {

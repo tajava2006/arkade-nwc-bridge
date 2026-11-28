@@ -112,6 +112,15 @@ describe.skipIf(!SUBDUSTD_URL)('LN send core on regtest', () => {
     expect(r.preimage).toBe(res.preimage)
     expect(r.fees_paid_msat).toBe(25_000) // ceil(5,000 × 0.5%)
     expect(res.fees_paid).toBe(25_000)
+    // dust+ rides the VHTLC (F32_VHTLC_PLAN): its delays are on the row, no presig.
+    const swap = db
+      .query<{ vhtlc: string | null; presigs_json: string | null; state: string }, [string]>(
+        `SELECT vhtlc, presigs_json, state FROM atomic_swaps WHERE payment_hash = ?`,
+      )
+      .get(inv.r_hash)!
+    expect(swap.state).toBe('claimed')
+    expect(swap.vhtlc).not.toBeNull()
+    expect(swap.presigs_json).toBeNull()
     // The single covering coin (6000 ≥ 5000 + 25 + dust) is spent, the 40000
     // one untouched — the SDK's own selector takes the largest.
     expect(await outpoints(wallet)).toContain(`${big.txid}:${big.vout}:40000`)
@@ -123,6 +132,8 @@ describe.skipIf(!SUBDUSTD_URL)('LN send core on regtest', () => {
     expect(sha256(res.preimage)).toBe(inv.r_hash)
     expect(peer('lookupinvoice', inv.r_hash).state).toBe('SETTLED')
     expect(row('evt-2')).toMatchObject({ state: 'settled', amount_msat: 21_000, preimage: res.preimage })
+    // sub-dust stays on the 4-leaf script
+    expect(db.query<{ vhtlc: string | null }, [string]>(`SELECT vhtlc FROM atomic_swaps WHERE payment_hash = ?`).get(inv.r_hash)!.vhtlc).toBeNull()
   }, 300_000)
 
   test('a failed pay: PAYMENT_FAILED, row failed, the funding back in the wallet', async () => {

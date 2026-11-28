@@ -43,6 +43,15 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX idx_swaps_direction_state ON swaps(direction, state);
     `,
   },
+  {
+    version: 2,
+    description: 'dust+ swaps on the VHTLC (F32_VHTLC_PLAN): its CSV delays, frozen at init',
+    // NULL = the 4-leaf script (every row before this, and sub-dust after).
+    // JSON {claimDelaySecs, refundDelaySecs, refundNoReceiverDelaySecs}; T stays
+    // in refund_locktime. Frozen like fee_sats: the script address is built
+    // from them, so they can't move between init and fund.
+    sql: `ALTER TABLE swaps ADD COLUMN vhtlc TEXT;`,
+  },
 ]
 
 export interface SwapRow {
@@ -60,8 +69,16 @@ export interface SwapRow {
   fundingValue: number | null
   presigs: string | null
   preimage: string | null
+  /** Set for a VHTLC swap; null for the 4-leaf script. */
+  vhtlc: VhtlcDelays | null
   createdAt: number
   updatedAt: number
+}
+
+export interface VhtlcDelays {
+  claimDelaySecs: number
+  refundDelaySecs: number
+  refundNoReceiverDelaySecs: number
 }
 
 export interface NewSwap {
@@ -74,6 +91,7 @@ export interface NewSwap {
   feeSats?: number
   selfDelay?: bigint
   invoice?: string
+  vhtlc?: VhtlcDelays
 }
 
 /** Fields a transition may set in the same atomic UPDATE as the state change. */
@@ -104,6 +122,7 @@ interface DbRow {
   funding_value: number | null
   presigs: string | null
   preimage: string | null
+  vhtlc: string | null
   created_at: number
   updated_at: number
 }
@@ -123,6 +142,7 @@ const fromDb = (r: DbRow): SwapRow => ({
   fundingValue: r.funding_value,
   presigs: r.presigs,
   preimage: r.preimage,
+  vhtlc: r.vhtlc === null ? null : (JSON.parse(r.vhtlc) as VhtlcDelays),
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 })
@@ -157,8 +177,8 @@ export class SwapStore {
       this.db
         .query(
           `INSERT INTO swaps (id, direction, payment_hash, state, amount, refund_locktime, user_pubkey,
-             fee_sats, self_delay, invoice, created_at, updated_at)
-           VALUES ($id, $direction, $hash, $state, $amount, $T, $user, $fee, $delay, $invoice, $now, $now)`,
+             fee_sats, self_delay, invoice, vhtlc, created_at, updated_at)
+           VALUES ($id, $direction, $hash, $state, $amount, $T, $user, $fee, $delay, $invoice, $vhtlc, $now, $now)`,
         )
         .run({
           id: s.id,
@@ -171,6 +191,7 @@ export class SwapStore {
           fee: s.feeSats ?? 0,
           delay: s.selfDelay === undefined ? null : s.selfDelay.toString(),
           invoice: s.invoice ?? null,
+          vhtlc: s.vhtlc ? JSON.stringify(s.vhtlc) : null,
           now,
         })
     } catch (e) {

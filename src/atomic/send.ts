@@ -11,20 +11,27 @@ import {
 import { decodeInvoice } from '../lib/bolt11'
 import {
   AtomicVtxoScript,
+  buildVhtlc,
+  checkSendOffer,
   classifyResume,
   computeClaimSplit,
   freshTxidAttempts,
   isBlocktimeLocked,
   isEligibleFundingInput,
+  policyFor,
   presignCancel,
   presignClaim,
   refundSpend,
+  sendFundingMinLifeSecs,
   serverUnrollScript,
   SqliteAtomicSwapRepository,
   SwapDirection,
   type AtomicOutput,
+  type AtomicPresig,
   type AtomicSwapRow,
   type SharedVtxo,
+  type SwapScript,
+  type VhtlcDelays,
 } from './index'
 import { maxSendFeeSats } from './fees'
 import { postJson } from './http'
@@ -32,7 +39,8 @@ import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from '.
 import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
 import { makeExitCostOracle } from '../exit/cost_oracle'
 import { gcOrphanProofs, removeVtxo } from '../exit/vault'
-import { selectSpendInputs } from '../coin_select'
+import { selectSpendInputs, type SelectOptions } from '../coin_select'
+import { chainGraph } from '../exit/chain_order'
 import type { NotifyFn } from '../nostr/notifier'
 
 // Bridge side of the atomic sub-dust SEND (ARK -> LN). The bridge is the funder
@@ -93,6 +101,75 @@ interface InitResponse {
   feeSats?: number
   dust: number
   vtxoMin: number
+  /** 'vhtlc' (dust+, F32_VHTLC_PLAN): fund the VHTLC built from `vhtlc` + refundLocktime, no presig. Absent = 4-leaf. */
+  script?: 'vhtlc' | 'atomic4'
+  vhtlc?: VhtlcDelays
+}
+
+/**
+ * The longest T we let subdustd set on a send. It runs 90h (the window was
+ * widened for an LSP route needing 435 blocks); a little slack above that.
+ * checkSendOffer also caps d_s from it, so a server can't park our on-chain
+ * fallback for weeks.
+ */
+const MAX_ACCEPTED_SEND_WINDOW_SECS = 96 * 3600
+/** subdustd's pay margin and block time (its config, mirrored only to bound d_s). */
+const SUBDUSTD_PAY_MARGIN_SECS = 600
+const SUBDUSTD_BLOCK_SECS = 600
+
+/** The send's script, rebuilt from its row: the VHTLC when the row carries its delays, else the 4-leaf. */
+function sendScriptForRow(swap: AtomicSwapRow, userXOnly: Uint8Array, serverXOnly: Uint8Array): SwapScript {
+  const peer = toXOnly(hex.decode(swap.peerPubkey!))
+  if (swap.vhtlc) {
+    return buildVhtlc({
+      sender: userXOnly,
+      receiver: peer,
+      server: serverXOnly,
+      paymentHash: hex.decode(swap.paymentHash),
+      timeouts: { refundLocktime: swap.refundLocktime, ...swap.vhtlc },
+    })
+  }
+  return new AtomicVtxoScript({
+    funder: userXOnly,
+    claimer: peer,
+    server: serverXOnly,
+    paymentHash: hex.decode(swap.paymentHash),
+    refundLocktime: BigInt(swap.refundLocktime),
+    exitDelay: BigInt(swap.exitDelay!),
+  })
+}
+
+/**
+ * Pick funding coins as selectSpendInputs does, but never one whose unroll is
+ * deeper than the cap — a VHTLC's on-chain fallback is timed for a bounded
+ * unroll (vhtlc.ts U). A too-deep coin is dropped and the pick rerun; one
+ * indexer chain read per picked coin, memoized.
+ */
+async function selectWithinDepthCap<T extends VirtualCoin>(
+  pool: T[],
+  opts: SelectOptions<T>,
+  indexer: RestIndexerProvider,
+  cap: number,
+): Promise<T[]> {
+  const depth = new Map<string, number>()
+  const depthOf = async (c: T): Promise<number> => {
+    const key = `${c.txid}:${c.vout}`
+    let d = depth.get(key)
+    if (d === undefined) {
+      const { chain } = await indexer.getVtxoChain({ txid: c.txid, vout: c.vout })
+      d = chainGraph(chain).levels.length - 1
+      depth.set(key, d)
+    }
+    return d
+  }
+  for (;;) {
+    const picked = selectSpendInputs(pool, opts)
+    if (picked.length === 0) return []
+    const deep = new Set<string>()
+    for (const c of picked) if ((await depthOf(c)) > cap) deep.add(`${c.txid}:${c.vout}`)
+    if (deep.size === 0) return picked
+    pool = pool.filter((c) => !deep.has(`${c.txid}:${c.vout}`))
+  }
 }
 
 /** Funding-input batch expiry must clear T by this (mirror of subdustd's payMargin). */
@@ -162,15 +239,39 @@ export async function atomicSubdustSend(
     throw new Error(`subdustd advertised an unreasonable feeSats ${init.feeSats} — refusing to fund`)
   }
 
-  // 2. build the shared 4-leaf script (funder=user, claimer=subdustd).
-  const script = new AtomicVtxoScript({
-    funder: userXOnly,
-    claimer: peerXOnly,
-    server: serverXOnly,
-    paymentHash: H,
-    refundLocktime: T,
-    exitDelay: d,
-  })
+  // 2. the swap script (funder = user, claimer = subdustd). subdustd picks it by
+  // amount (vhtlc.ts usesVhtlc): the VHTLC for dust+, whose terms we vet before
+  // locking a coin to them; the 4-leaf for sub-dust. Either is safe for US as
+  // the sender — F32's send-side hole hurts subdustd, not the funder.
+  if (init.script === 'vhtlc' && !init.vhtlc) throw new Error('subdustd offered a VHTLC without its delays — refusing to fund')
+  const vhtlc = init.script === 'vhtlc' ? init.vhtlc : undefined
+  const policy = policyFor(Number(info.unilateralExitDelay), info.network)
+  const nowS = Math.floor(Date.now() / 1000)
+  if (vhtlc) {
+    const problems = checkSendOffer(policy, { refundLocktime: init.refundLocktime, ...vhtlc }, {
+      nowSecs: nowS,
+      maxWindowSecs: MAX_ACCEPTED_SEND_WINDOW_SECS,
+      payMarginSecs: SUBDUSTD_PAY_MARGIN_SECS,
+      blockTimeSecs: SUBDUSTD_BLOCK_SECS,
+    })
+    if (problems.length > 0) throw new Error(`subdustd's VHTLC terms refused before funding: ${problems.join('; ')}`)
+  }
+  const script: SwapScript = vhtlc
+    ? buildVhtlc({
+        sender: userXOnly,
+        receiver: peerXOnly,
+        server: serverXOnly,
+        paymentHash: H,
+        timeouts: { refundLocktime: init.refundLocktime, ...vhtlc },
+      })
+    : new AtomicVtxoScript({
+        funder: userXOnly,
+        claimer: peerXOnly,
+        server: serverXOnly,
+        paymentHash: H,
+        refundLocktime: T,
+        exitDelay: d,
+      })
 
   // 3. fund the shared vtxo with our own vtxos spent WHOLE (same selection the
   // subdustd receive funder uses — ascending accumulation until V is covered, so
@@ -195,16 +296,28 @@ export async function atomicSubdustSend(
   // that would leave it sub-dust. The shared vtxo is ≥ dust either way: every
   // eligible coin is, so an exact a + fee can only be hit when a + fee ≥ dust —
   // a sub-dust send still needs a + fee + dust, as before.
-  const eligibility = { dust, refundLocktime: T, marginSecs: FUNDING_MARGIN_SECS }
-  const funding = selectSpendInputs(
-    ownVtxos.filter((v) => isEligibleFundingInput(v, eligibility).eligible),
-    { target: a + fee, changeDust: dust, exitCostOf: makeExitCostOracle(deps.db) },
-  )
+  //
+  // A VHTLC asks more of its coins (vhtlc.ts S4): enough batch life that a
+  // stalled swap can still be unrolled after T before the batch sweep, and a
+  // bounded unroll depth. Its funding is an ordinary spend with change (the
+  // VHTLC holds exactly a + fee), so the same changeDust rule applies there.
+  const vhtlcLife = vhtlc ? sendFundingMinLifeSecs(policy, init.refundLocktime - nowS) : 0
+  const eligibility = vhtlc
+    ? { dust, refundLocktime: BigInt(nowS + vhtlcLife), marginSecs: 0 }
+    : { dust, refundLocktime: T, marginSecs: FUNDING_MARGIN_SECS }
+  const eligible = ownVtxos.filter((v) => isEligibleFundingInput(v, eligibility).eligible)
+  const selectOpts = { target: a + fee, changeDust: dust, exitCostOf: makeExitCostOracle(deps.db) }
+  const funding = vhtlc
+    ? await selectWithinDepthCap(eligible, selectOpts, indexer, policy.maxChainDepth)
+    : selectSpendInputs(eligible, selectOpts)
   if (funding.length === 0) {
+    const life = vhtlc
+      ? `batch life ≥ ${Math.ceil(vhtlcLife / 3600)}h, unroll depth ≤ ${policy.maxChainDepth}`
+      : `batch expiry past T+${FUNDING_MARGIN_SECS}s`
     throw new AtomicInsufficientFunds(
-      `atomic send needs eligible vtxos (regular, spendable, batch expiry past T+${FUNDING_MARGIN_SECS}s) summing to exactly ` +
+      `atomic send needs eligible vtxos (regular, spendable, ${life}) summing to exactly ` +
         `${a + fee} or to at least ${a + fee + dust} sats — a change of 1–${dust - 1} would be stranded as sub-dust; ` +
-        `sub-dust/swept funds and soon-expiring vtxos don't qualify`,
+        `sub-dust/swept funds and soon-expiring or deep-chained vtxos don't qualify — a Refresh renews them`,
     )
   }
 
@@ -230,9 +343,12 @@ export async function atomicSubdustSend(
       invoice,
       peerPubkey: hex.encode(peerXOnly),
       exitDelay: Number(d),
+      vhtlc,
     })
 
-    const Vp = funding.reduce((n, f) => n + f.value, 0)
+    // The 4-leaf takes the coins whole (its split returns the change); the
+    // VHTLC takes exactly a + fee and the wallet's send returns the change.
+    const Vp = vhtlc ? a + fee : funding.reduce((n, f) => n + f.value, 0)
     // Fund THROUGH THE WALLET rather than submitting the spend ourselves. The
     // shared script is a VtxoScript, so it encodes to an ordinary Ark address
     // and needs no special submit path; spending the selected coins WHOLE is
@@ -284,28 +400,33 @@ export async function atomicSubdustSend(
       console.warn(`atomic send ${init.swapId}: vault capture failed (swap unaffected):`, err)
     }
 
-    // 4. compute the split + pre-sign the claim pair. subdustd's output uses
-    // subdustd's own wallet-script delay (boltzScriptDelay) — building it with d
-    // would make subdustd's sendFund reconstruction reject our presigs.
-    const funderAddr = ArkAddress.decode(await deps.wallet.getAddress())
-    const peerD = init.boltzScriptDelay !== undefined ? BigInt(init.boltzScriptDelay) : d
-    const peerAddr = new DefaultVtxo.Script({
-      pubKey: peerXOnly,
-      serverPubKey: serverXOnly,
-      csvTimelock: { type: timelockType(peerD), value: peerD },
-    }).address(hrp(info.network), serverXOnly)
-    const split = computeClaimSplit({
-      funderAddress: funderAddr,
-      claimerAddress: peerAddr,
-      fundingValue: Vp,
-      amount: a,
-      dust,
-      // subdustd's advertised fee — folded into its claim output (a + fee, one
-      // note). Must mirror its sendFund reconstruction exactly.
-      feeSats: fee,
-    })
-    const presig = await presignClaim(shared, split.outputs, unroll, deps.wallet.identity)
-    repo.setPresigs(init.swapId, presig)
+    // 4. 4-leaf only: compute the split + pre-sign the claim pair. subdustd's
+    // output uses subdustd's own wallet-script delay (boltzScriptDelay) —
+    // building it with d would make subdustd's sendFund reconstruction reject
+    // our presigs. A VHTLC needs no presig: its claim leaf is subdustd + server
+    // + preimage, and the preimage is the consent.
+    let presig: AtomicPresig | undefined
+    if (!vhtlc) {
+      const funderAddr = ArkAddress.decode(await deps.wallet.getAddress())
+      const peerD = init.boltzScriptDelay !== undefined ? BigInt(init.boltzScriptDelay) : d
+      const peerAddr = new DefaultVtxo.Script({
+        pubKey: peerXOnly,
+        serverPubKey: serverXOnly,
+        csvTimelock: { type: timelockType(peerD), value: peerD },
+      }).address(hrp(info.network), serverXOnly)
+      const split = computeClaimSplit({
+        funderAddress: funderAddr,
+        claimerAddress: peerAddr,
+        fundingValue: Vp,
+        amount: a,
+        dust,
+        // subdustd's advertised fee — folded into its claim output (a + fee, one
+        // note). Must mirror its sendFund reconstruction exactly.
+        feeSats: fee,
+      })
+      presig = await presignClaim(shared, split.outputs, unroll, deps.wallet.identity)
+      repo.setPresigs(init.swapId, presig)
+    }
     repo.transition(init.swapId, 'funded')
 
     // 5. hand subdustd the presigs → it verifies, pays, claims. Handing them over =
@@ -314,7 +435,7 @@ export async function atomicSubdustSend(
     repo.transition(init.swapId, 'ln_inflight')
     const fund = await postJson<{ status: string; preimage?: string; error?: string }>(
       `${deps.subdustdUrl}/v2/subdust/atomic/send/fund`,
-      { swapId: init.swapId, fundingOutpoint: `${shared.txid}:${shared.vout}`, presigs: presig },
+      { swapId: init.swapId, fundingOutpoint: `${shared.txid}:${shared.vout}`, ...(presig ? { presigs: presig } : {}) },
     )
     if (fund.status !== 'claimed' || fund.preimage === undefined) {
       repo.transition(init.swapId, fund.status === 'failed' ? 'refund_wait' : 'failed')
@@ -488,14 +609,7 @@ export async function refundAtomicSend(
   const unroll = serverUnrollScript(info.checkpointTapscript)
   const userXOnly = toXOnly(await deps.wallet.identity.xOnlyPublicKey())
 
-  const script = new AtomicVtxoScript({
-    funder: userXOnly,
-    claimer: toXOnly(hex.decode(swap.peerPubkey)),
-    server: serverXOnly,
-    paymentHash: hex.decode(swap.paymentHash),
-    refundLocktime: BigInt(swap.refundLocktime),
-    exitDelay: BigInt(swap.exitDelay),
-  })
+  const script = sendScriptForRow(swap, userXOnly, serverXOnly)
 
   const [txid, voutStr] = swap.fundingOutpoint.split(':')
   if (!txid || voutStr === undefined) throw new Error(`bad funding outpoint ${swap.fundingOutpoint}`)
@@ -616,14 +730,7 @@ export async function cancelAtomicSend(deps: AtomicSendDeps, swapId: string): Pr
   const userXOnly = toXOnly(await deps.wallet.identity.xOnlyPublicKey())
   const dust = Number(info.dust)
 
-  const script = new AtomicVtxoScript({
-    funder: userXOnly,
-    claimer: toXOnly(hex.decode(swap.peerPubkey)),
-    server: serverXOnly,
-    paymentHash: hex.decode(swap.paymentHash),
-    refundLocktime: BigInt(swap.refundLocktime),
-    exitDelay: BigInt(swap.exitDelay),
-  })
+  const script = sendScriptForRow(swap, userXOnly, serverXOnly)
 
   const [txid, voutStr] = swap.fundingOutpoint.split(':')
   if (!txid || voutStr === undefined) throw new Error(`bad funding outpoint ${swap.fundingOutpoint}`)
@@ -746,14 +853,7 @@ async function classifyUnfundedInit(
   const info = await ark.getInfo()
   const serverXOnly = toXOnly(hex.decode(info.signerPubkey))
   const userXOnly = toXOnly(await deps.wallet.identity.xOnlyPublicKey())
-  const script = new AtomicVtxoScript({
-    funder: userXOnly,
-    claimer: toXOnly(hex.decode(swap.peerPubkey)),
-    server: serverXOnly,
-    paymentHash: hex.decode(swap.paymentHash),
-    refundLocktime: BigInt(swap.refundLocktime),
-    exitDelay: BigInt(swap.exitDelay),
-  })
+  const script = sendScriptForRow(swap, userXOnly, serverXOnly)
   // No spendableOnly: a spent coin still proves funding happened, and treating
   // that as "never funded" would terminalize a swap whose V is real.
   const { vtxos } = await indexer.getVtxos({ scripts: [hex.encode(script.pkScript)] })
@@ -1070,7 +1170,7 @@ function releaseVaultRow(db: Database, txid: string, vout: number): void {
 // preferring the funding txid).
 async function locateFunding(
   indexer: RestIndexerProvider,
-  script: AtomicVtxoScript,
+  script: SwapScript,
   value: number,
   fundingTxid: string,
 ): Promise<{ shared: SharedVtxo; coin: VirtualCoin }> {
