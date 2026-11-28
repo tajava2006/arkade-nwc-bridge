@@ -18,6 +18,15 @@ export interface SubdustKnobs {
   sendFeePercent: number
 }
 
+/**
+ * Where the on-chain executor reads the chain and broadcasts (F32_VHTLC_PLAN
+ * §7): the operator's own bitcoind (txindex=1), or an esplora that names
+ * spenders. Absent = the VHTLC's on-chain paths go unenforced (a warning at boot).
+ */
+export type ChainConfig =
+  | { kind: 'bitcoind'; url: string; user: string; passwordPath: string }
+  | { kind: 'esplora'; url: string }
+
 export interface SubdustdConfig {
   network: Network
   arkdUrl: string
@@ -27,6 +36,7 @@ export interface SubdustdConfig {
   http: { host: string; port: number }
   logLevel: LogLevel
   subdust: SubdustKnobs
+  chain?: ChainConfig
 }
 
 // The live mainnet values carried over from boltz.conf `[ark]` (my-server
@@ -110,7 +120,7 @@ const parseSocket = (socket: string): string | undefined => {
 /** Pure: validates shape and the knob inequalities. File presence is `checkConfigFiles`. */
 export const parseConfig = (raw: unknown): { config: SubdustdConfig; warnings: string[] } => {
   const r = new Reader()
-  const root = r.object(raw, 'config', ['network', 'arkdUrl', 'lnd', 'keyPath', 'dbPath', 'http', 'logLevel', 'subdust'])
+  const root = r.object(raw, 'config', ['network', 'arkdUrl', 'lnd', 'keyPath', 'dbPath', 'http', 'logLevel', 'subdust', 'chain'])
 
   const network = r.oneOf(root, 'network', 'config', NETWORKS)
   const arkdUrl = r.string(root, 'arkdUrl', 'config')
@@ -151,6 +161,26 @@ export const parseConfig = (raw: unknown): { config: SubdustdConfig; warnings: s
   }
   if (subdust.sendFeePercent >= 100) r.problems.push('config.subdust.sendFeePercent: must be < 100')
 
+  let chain: ChainConfig | undefined
+  if (root.chain !== undefined) {
+    const c = r.object(root.chain, 'config.chain', ['bitcoind', 'esplora'])
+    if ((c.bitcoind === undefined) === (c.esplora === undefined)) {
+      r.problems.push('config.chain: exactly one of bitcoind or esplora')
+    } else if (c.bitcoind !== undefined) {
+      const b = r.object(c.bitcoind, 'config.chain.bitcoind', ['url', 'user', 'passwordPath'])
+      chain = {
+        kind: 'bitcoind',
+        url: r.string(b, 'url', 'config.chain.bitcoind'),
+        user: r.string(b, 'user', 'config.chain.bitcoind'),
+        passwordPath: r.string(b, 'passwordPath', 'config.chain.bitcoind'),
+      }
+    } else {
+      const e = r.object(c.esplora, 'config.chain.esplora', ['url'])
+      chain = { kind: 'esplora', url: r.string(e, 'url', 'config.chain.esplora') }
+    }
+    if (chain && !/^https?:\/\/[^/]/.test(chain.url)) r.problems.push(`config.chain.${chain.kind}.url: must be an http(s) URL`)
+  }
+
   const config: SubdustdConfig = {
     network,
     arkdUrl,
@@ -160,6 +190,7 @@ export const parseConfig = (raw: unknown): { config: SubdustdConfig; warnings: s
     http,
     logLevel: r.oneOf(root, 'logLevel', 'config', LOG_LEVELS, 'info'),
     subdust,
+    ...(chain ? { chain } : {}),
   }
   if (r.problems.length > 0) throw new ConfigError(r.problems)
 
@@ -183,6 +214,7 @@ export const checkConfigFiles = (config: SubdustdConfig): void => {
     ['lnd.certPath', config.lnd.certPath],
     ['lnd.macaroonPath', config.lnd.macaroonPath],
     ['keyPath', config.keyPath],
+    ...(config.chain?.kind === 'bitcoind' ? ([['chain.bitcoind.passwordPath', config.chain.passwordPath]] as [string, string][]) : []),
   ]
   for (const [name, path] of readable) {
     try {

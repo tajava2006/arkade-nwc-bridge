@@ -96,6 +96,32 @@ describe('parseConfig', () => {
   })
 })
 
+describe('parseConfig — chain backend (F32_VHTLC_PLAN §7)', () => {
+  test('absent: no executor (main warns the on-chain paths go unenforced)', () => {
+    expect(parseConfig(minimal()).config.chain).toBeUndefined()
+  })
+  test('bitcoind or esplora, each fully specified', () => {
+    expect(parseConfig({ ...minimal(), chain: { bitcoind: { url: 'http://172.28.0.1:8332', user: 'u', passwordPath: '/secrets/btc.pass' } } }).config.chain).toEqual({
+      kind: 'bitcoind',
+      url: 'http://172.28.0.1:8332',
+      user: 'u',
+      passwordPath: '/secrets/btc.pass',
+    })
+    expect(parseConfig({ ...minimal(), chain: { esplora: { url: 'https://mempool.space/api' } } }).config.chain).toEqual({
+      kind: 'esplora',
+      url: 'https://mempool.space/api',
+    })
+  })
+  test('exactly one backend; no inline password; a real URL', () => {
+    expect(problemsOf({ ...minimal(), chain: {} })).toContain('config.chain: exactly one of bitcoind or esplora')
+    expect(problemsOf({ ...minimal(), chain: { bitcoind: { url: 'http://x:1', user: 'u', passwordPath: '/p' }, esplora: { url: 'http://y' } } })).toContain(
+      'config.chain: exactly one of bitcoind or esplora',
+    )
+    expect(problemsOf({ ...minimal(), chain: { bitcoind: { url: 'http://x:1', user: 'u', password: 'p' } } }).join()).toContain('unknown key')
+    expect(problemsOf({ ...minimal(), chain: { esplora: { url: 'mempool.space' } } })).toContain('config.chain.esplora.url: must be an http(s) URL')
+  })
+})
+
 describe('loadConfig / checkConfigFiles', () => {
   const dir = mkdtempSync(join(tmpdir(), 'subdustd-'))
 

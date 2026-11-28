@@ -15,6 +15,10 @@ import { PushHub } from './push.ts'
 import { Scanner } from './scanner.ts'
 import { FloatLock, FloatRenewer, lazyFloatManager } from './float.ts'
 import { SwapStore } from './store.ts'
+import { readFileSync } from 'node:fs'
+import { EsploraProvider, type OnchainProvider } from '@arkade-os/sdk'
+import { BitcoindOnchainProvider, BitcoindRpc } from '../src/chain/bitcoind.ts'
+import { OnchainExecutor } from './onchain.ts'
 
 const path = process.argv[2]
 if (!path) {
@@ -93,7 +97,30 @@ const float = new FloatRenewer({
   thresholdSecs: 2 * (config.subdust.receiveWindowSecs + config.subdust.payMarginSecs),
   log,
 })
-const scanner = new Scanner({ store, send, receive, medianTimePast: () => lnd.medianTimePast(), float, log })
+// The VHTLC's on-chain paths (F32_VHTLC_PLAN §7): without a chain backend an
+// unrolled VHTLC is not enforced — the script still guards it, nobody acts.
+let onchain: OnchainExecutor | undefined
+if (config.chain) {
+  const c = config.chain
+  const provider: OnchainProvider =
+    c.kind === 'bitcoind'
+      ? new BitcoindOnchainProvider(new BitcoindRpc({ url: c.url, user: c.user, password: readFileSync(c.passwordPath, 'utf8').trim() }))
+      : new EsploraProvider(c.url)
+  onchain = new OnchainExecutor({ store, signer, provider, network: config.network, lnd, receive, locks, log, emit })
+  void onchain
+    .fuel()
+    .then(async (w) => {
+      log.info(`onchain: ${c.kind} ${c.url} — fuel address ${w.address} (pays unroll CPFPs; on-chain takes land here)`)
+      const coins = await provider.getCoins(w.address)
+      const sats = coins.reduce((n, x) => n + x.value, 0)
+      if (sats === 0) log.warn('onchain: the fuel address is empty — an unroll we must push can’t pay its CPFP until it is funded')
+      else log.info(`onchain: fuel ${sats} sats in ${coins.length} coin(s)`)
+    })
+    .catch((e: Error) => log.warn(`onchain: fuel check failed: ${e.message}`))
+} else {
+  log.warn('onchain: no chain backend (config.chain) — an unrolled VHTLC would NOT be enforced on chain')
+}
+const scanner = new Scanner({ store, send, receive, medianTimePast: () => lnd.medianTimePast(), float, onchain, log })
 scanner.start()
 
 let stopping = false
@@ -102,6 +129,7 @@ const shutdown = (reason: string, code = 0) => {
   stopping = true
   log.info(`${reason}: shutting down`)
   scanner.stop()
+  onchain?.stop()
   server.stop(true)
   receive.close()
   lnd.close()

@@ -22,6 +22,8 @@ export interface ScannerDeps {
   medianTimePast: () => Promise<number>
   /** Float upkeep (float.ts), after the swaps; never throws. */
   float?: { pass(): Promise<unknown> }
+  /** The on-chain executor (onchain.ts); absent without a chain backend. */
+  onchain?: { scan(): Promise<void> }
   log: Logger
 }
 
@@ -68,12 +70,18 @@ export class Scanner {
           }
         }
       }
+      // A swap the on-chain executor owns has left Ark: its offchain paths
+      // (claim, T refund) would only be refused by arkd every pass.
       const ids = (dir: 'send' | 'receive', state: Parameters<SwapStore['list']>[1][number]) =>
-        store.list(dir, [state]).map((s) => s.id)
+        store
+          .list(dir, [state])
+          .filter((s) => !s.onchain)
+          .map((s) => s.id)
       await step('send ln_inflight', ids('send', 'ln_inflight'), (id) => send.resolveInflight(id))
       await step('receive invoice_issued', ids('receive', 'invoice_issued'), (id) => receive.resumeInvoiceIssued(id))
       await step('receive funded', ids('receive', 'funded'), (id) => receive.resumeFunded(id, mtp))
-      await step('receive refund_wait', ids('receive', 'refund_wait'), (id) => receive.resumeRefundWait(id))
+      await step('receive refund_wait', store.list('receive', ['refund_wait']).map((s) => s.id), (id) => receive.resumeRefundWait(id))
+      await this.d.onchain?.scan().catch((e: Error) => log.error(`scan: onchain: ${e.message}`))
       await this.d.float?.pass()
       return true
     } finally {

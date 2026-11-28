@@ -52,6 +52,13 @@ const MIGRATIONS: readonly Migration[] = [
     // from them, so they can't move between init and fund.
     sql: `ALTER TABLE swaps ADD COLUMN vhtlc TEXT;`,
   },
+  {
+    version: 3,
+    description: 'on-chain execution of a VHTLC swap (F32_VHTLC_PLAN §7)',
+    // NULL = never left Ark. JSON OnchainProgress: set once the executor takes a
+    // swap whose VHTLC an unroll reached, so the offchain paths step aside.
+    sql: `ALTER TABLE swaps ADD COLUMN onchain TEXT;`,
+  },
 ]
 
 export interface SwapRow {
@@ -71,8 +78,22 @@ export interface SwapRow {
   preimage: string | null
   /** Set for a VHTLC swap; null for the 4-leaf script. */
   vhtlc: VhtlcDelays | null
+  /** Set once the on-chain executor owns the swap. */
+  onchain: OnchainProgress | null
   createdAt: number
   updatedAt: number
+}
+
+export interface OnchainProgress {
+  /** unrolling → csv_wait → spending → done; abandoned = nothing of ours to take (see reason). */
+  stage: 'unrolling' | 'csv_wait' | 'spending' | 'done' | 'abandoned'
+  /** Height the VHTLC output confirmed at (the CSV's start, and where a spend scan begins). */
+  height?: number
+  /** Our leaf spend, once broadcast; with its fee rate and broadcast height for the re-bump. */
+  spendTxid?: string
+  feeRate?: number
+  broadcastHeight?: number
+  reason?: string
 }
 
 export interface VhtlcDelays {
@@ -123,6 +144,7 @@ interface DbRow {
   presigs: string | null
   preimage: string | null
   vhtlc: string | null
+  onchain: string | null
   created_at: number
   updated_at: number
 }
@@ -143,6 +165,7 @@ const fromDb = (r: DbRow): SwapRow => ({
   presigs: r.presigs,
   preimage: r.preimage,
   vhtlc: r.vhtlc === null ? null : (JSON.parse(r.vhtlc) as VhtlcDelays),
+  onchain: r.onchain === null ? null : (JSON.parse(r.onchain) as OnchainProgress),
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 })
@@ -201,6 +224,11 @@ export class SwapStore {
       throw e
     }
     return this.get(s.id)!
+  }
+
+  /** Record the on-chain executor's progress (no state transition). */
+  setOnchain(id: string, progress: OnchainProgress): void {
+    this.db.query('UPDATE swaps SET onchain = $p, updated_at = $now WHERE id = $id').run({ p: JSON.stringify(progress), now: nowSecs(), id })
   }
 
   get(id: string): SwapRow | undefined {
