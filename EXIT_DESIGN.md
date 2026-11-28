@@ -19,7 +19,7 @@ a VTXO's escape route is a chain of pre-signed transactions the ASP hands out on
 request. Unilateral exit is: take that chain, broadcast it to the blockchain
 (unrolling the tree back to a leaf), wait out a CSV timelock, then spend to a
 plain address you alone control. The whole point is that it must work **with no
-ASP and no Boltz** — otherwise "self-custodial" is a promise the infrastructure
+ASP and no swap service** — otherwise "self-custodial" is a promise the infrastructure
 can't keep in the one moment it matters.
 
 Three facts shape everything:
@@ -143,8 +143,8 @@ covers). A dropped row is resolved strictly by verdict — and **nothing is
 ever deleted silently**:
 
 - **spent-verified** — the indexer names `spentBy` (set for offchain sends
-  AND settlement forfeits — spike-confirmed against arkd, `test/spike/
-  spend_evidence.spike.ts`) and serves that tx, whose input consuming our
+  AND settlement forfeits — spike-confirmed against arkd; the spike is
+  retired, its logic is `src/exit/evidence.ts` + unit tests) and serves that tx, whose input consuming our
   outpoint carries a schnorr signature that verifies against **our own
   x-only pubkey** (sighash recomputed from the PSBT itself; labelled
   `tapScriptSig` first, finalized witness stack as fallback). Keying on the
@@ -190,15 +190,16 @@ ever deleted silently**:
   leaves the live list the moment it's unrolled onchain, but the sweep still
   reads the vault (the old unconditional GC could strand a ready-mode exit
   here). A completed op (swept) is its own evidence and the row is removed
-  without any server round-trip. NOTE: "leaves the live list" is enforced by
-  our own wallet boundary, not the SDK — arkd keeps serving an
-  unrolled-but-unspent vtxo as `isSpent=false` forever and the SDK's
-  `withUnrolled: false` default never actually fires for it, so
-  `installUnrolledVtxoFilter` (src/wallet.ts) drops `isUnrolled` rows from
-  every `getVtxos` read (balance, /send, settle input selection, this sync's
-  live set). Without it the exited vtxo haunts the balance permanently and
-  one ghost input fails the consolidate-all settle wholesale
-  (VTXO_ALREADY_UNROLLED — observed mainnet 2026-08-01). Ops-owned rows also
+  without any server round-trip. NOTE: arkd keeps serving an
+  unrolled-but-unspent vtxo as `isSpent=false` forever. SDK 0.4.62 let such a
+  row into every read, and the bridge carried its own wallet-boundary filter
+  (`installUnrolledVtxoFilter`, F24). SDK 0.5 checks `isUnrolled` first:
+  `getVtxos` / `getSpendableVtxos` / settle's selection drop it by default, and
+  the balance files it under its own `unrolled` bucket — regtest-checked with
+  a real unroll (test/regtest/sdk05_unrolled.test.ts), so the filter is gone.
+  Without that the exited vtxo would haunt the balance and one ghost input
+  would fail the consolidate-all settle wholesale (VTXO_ALREADY_UNROLLED —
+  observed mainnet 2026-08-01). Re-run that regtest check on every SDK bump. Ops-owned rows also
   leave the readiness math and the ASP claim symmetrically (vaultStats /
   sync_service) and surface as the dashboard's "exiting — sats in transit"
   line until the sweep lands.
@@ -298,10 +299,12 @@ exit tab works, and ready-only routes bounce to the status page. A 60s loop
 retries the full bring-up and promotes to ready in place; open tabs reload on a
 `mode-change` SSE event.
 
-**Whole-or-degraded, on purpose.** A partial-ready state (wallet up, Boltz down)
-would fork `AppState` into per-subsystem availability flags for a rare, transient
-condition the retry loop already heals — not worth the complexity. This also
-covers a Boltz-only outage: a transient Boltz failure alone used to crash boot.
+**Whole-or-degraded, on purpose.** A partial-ready state (wallet up, a swap
+service down) would fork `AppState` into per-subsystem availability flags for a
+rare, transient condition the retry loop already heals — not worth the
+complexity. The Lightning rail doesn't gate boot at all: subdustd is only
+polled, so it being down degrades Lightning, never the wallet. (A transient Boltz failure used to crash
+boot.)
 
 `bootReady` carries an **undo stack**: with a retry loop, a failure past
 `initArkWallet` would otherwise leak a `VtxoManager` poll + SSE watcher set per
@@ -531,9 +534,9 @@ bitcoind `submitpackage` RPC.
 
 - Unit/integration: `bun test` (network-free; real PSBT fixtures drive the
   actual `Unroll.Session` and sweep signing without touching mainnet).
-- Offline finalize regression after an SDK bump:
-  `bun test/spike/offline_finalize.spike.ts --replay <dump>` re-verifies stored
-  PSBTs still finalize under the new SDK's rules.
+- Offline finalize regression after an SDK bump: the SM-34 regtest
+  (`test/regtest/atomic_unroll.test.ts`, block mode) and the boost drill
+  re-verify that stored PSBTs still finalize under the new SDK's rules.
 - Full onchain drill (the one broadcast path unit tests can't cover): the
   regtest environment — bitcoin core + arkd + esplora brought up locally, bridge
   attached via `data/config.json`, driven from the browser at localhost:4282.

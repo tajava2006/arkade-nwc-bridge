@@ -6,6 +6,7 @@ import {
   ArkAddress,
   DefaultVtxo,
   RestArkProvider,
+  RestIndexerProvider,
   type Identity,
 } from '@arkade-os/sdk'
 import {
@@ -21,34 +22,33 @@ import {
   type AtomicPresig,
   type SharedVtxo,
 } from './index'
-import { boltzFetch, boltzGet } from './boltz_http'
+import { postJson, getJson } from './http'
 import { confirmSpent, hrp, timelockType, toXOnly } from './ark_util'
 import type { NotifyFn } from '../nostr/notifier'
-import { WholeSetIndexerProvider } from '../indexer'
 
 // Bridge side of the atomic sub-dust RECEIVE (LN→ARK). The bridge is the CLAIMER
-// (C): it generates the preimage, gets a HOLD invoice from boltz, and once boltz
+// (C): it generates the preimage, gets a HOLD invoice from subdustd, and once subdustd
 // funds a shared vtxo + pre-signs, the bridge verifies, claims its amount `a`
-// (revealing the preimage), and tells boltz to settle. Because the bridge owns
-// the preimage, the NIP-57 9735 receipt uses it directly — no polling boltz.
+// (revealing the preimage), and tells subdustd to settle. Because the bridge owns
+// the preimage, the NIP-57 9735 receipt uses it directly — no polling subdustd.
 //
-// Unlike the passive plain path (boltz did everything, the bridge reconciled),
+// Unlike the passive plain path (subdustd did everything, the bridge reconciled),
 // this is an ACTIVE flow the bridge drives: init → poll status → claim → settle.
 // It runs on a boot + periodic pass (driveAtomicReceives) so a restart resumes
-// any swap that boltz funded while we were down.
+// any swap that subdustd funded while we were down.
 
 export interface AtomicReceiveDeps {
   identity: Identity
   /** ASP (arkd) REST base. */
   arkServerUrl: string
   db: Database
-  /** Boltz REST base (no /v2 suffix). */
-  boltzApiUrl: string
+  /** subdustd's API base (no /v2 suffix). */
+  subdustdUrl: string
   /** Operator DM sink — fire-and-forget, never awaited on the swap path. */
   notify?: NotifyFn
 }
 
-// CLINK-originated sub-dust receives are notified by reconcileClinkAcks with
+// CLINK-originated receives are notified by the CLINK ack funnel with
 // payer/zap detail — only NWC make_invoice ones are announced here. The gate
 // read is fenced so a db hiccup can't leak into the claim/settle path.
 function notifyReceiveSettled(
@@ -60,13 +60,9 @@ function notifyReceiveSettled(
       .query('SELECT 1 FROM clink_subdust_receipts WHERE payment_hash = ?')
       .get(swap.paymentHash)
     if (clinkOwned) return
-    deps.notify?.(
-      'recv-subdust',
-      () =>
-        `recv: LN invoice settled — ${swap.amount} sats (sub-dust) [hash ${swap.paymentHash.slice(0, 8)}]`,
-    )
+    deps.notify?.('recv-ln', () => `recv: LN invoice settled — ${swap.amount} sats [hash ${swap.paymentHash.slice(0, 8)}]`)
   } catch (err) {
-    console.warn('notifier: recv-subdust gate check failed:', err)
+    console.warn('notifier: recv-ln gate check failed:', err)
   }
 }
 
@@ -84,8 +80,8 @@ export interface AtomicReceiveInvoice {
  * Walk a receive swap forward through its legal transition chain to a terminal
  * state, doing only the steps that are legal from the current state (so it's a
  * safe no-op when the swap is already there or past it). Used to converge the
- * local row when boltz reached a terminal state while we were down (F12) — e.g.
- * boltz's preimage harvester settled the hold invoice before our drive ran, so
+ * local row when subdustd reached a terminal state while we were down (F12) — e.g.
+ * subdustd's preimage harvester settled the hold invoice before our drive ran, so
  * our `/receive/status` poll never sees 'funded' again and the row would poll
  * forever otherwise.
  */
@@ -99,33 +95,31 @@ function advanceReceive(repo: SqliteAtomicSwapRepository, swapId: string, target
 }
 
 /**
- * Begin an atomic sub-dust receive: generate the preimage, have boltz mint a
+ * Begin an atomic receive — any amount since D10 (the claimer's output is a
+ * regular vtxo once a ≥ dust): generate the preimage, have the funder mint a
  * HOLD invoice for it, and persist the swap so a restart can resume the claim.
- * Returns the invoice to hand the external payer.
+ * Returns the invoice to hand the external payer. A BOLT11 carries a plain
+ * description or a description hash (NIP-57), never both — the hash wins.
  */
 export async function issueAtomicReceive(
   deps: AtomicReceiveDeps,
   amountSats: number,
   descriptionHash?: string,
+  description?: string,
 ): Promise<AtomicReceiveInvoice> {
-  const ark = new RestArkProvider(deps.arkServerUrl)
-  const info = await ark.getInfo()
-  const dust = Number(info.dust)
-  if (amountSats <= 0 || amountSats >= dust) {
-    throw new Error(`amount ${amountSats} is not sub-dust (dust ${dust})`)
-  }
+  if (!Number.isInteger(amountSats) || amountSats <= 0) throw new Error(`amount ${amountSats} is not a positive whole number of sats`)
 
   const preimage = randomBytes(32)
   const H = sha256(preimage)
   const userXOnly = toXOnly(await deps.identity.xOnlyPublicKey())
 
-  const init = await boltzFetch<{ swapId: string; invoice: string }>(
-    `${deps.boltzApiUrl}/v2/subdust/atomic/receive/init`,
+  const init = await postJson<{ swapId: string; invoice: string }>(
+    `${deps.subdustdUrl}/v2/subdust/atomic/receive/init`,
     {
       amount: amountSats,
       paymentHash: hex.encode(H),
       userPubkey: hex.encode(userXOnly),
-      ...(descriptionHash ? { descriptionHash } : {}),
+      ...(descriptionHash ? { descriptionHash } : description ? { description } : {}),
     },
   )
 
@@ -137,7 +131,7 @@ export async function issueAtomicReceive(
     paymentHash: hex.encode(H),
     state: 'invoice_issued',
     amount: amountSats,
-    // T is boltz's; we don't need it until we rebuild the script at claim time,
+    // T is subdustd's; we don't need it until we rebuild the script at claim time,
     // where /receive/status reports it. Store 0 as a placeholder.
     refundLocktime: 0,
     invoice: init.invoice,
@@ -151,22 +145,23 @@ interface ReceiveStatus {
   state: string
   fundingOutpoint?: string
   presigs?: AtomicPresig
+  /** Wire name kept from the Boltz fork contract (D3): subdustd's key. */
   boltzPubkey?: string
   refundLocktime?: number
   exitDelay?: string
   /**
-   * BIP68 delay of boltz's OWN wallet script (its change output in the
+   * BIP68 delay of subdustd's OWN wallet script (its change output in the
    * presigned claim). Differs from the arkd info delay when boltz shares the
    * fulmine wallet key (fulmine pins its delay at wallet init — mainnet
-   * hardcode 605184). Absent on older boltz → fall back to the info delay.
+   * hardcode 605184). Absent on older subdustd → fall back to the info delay.
    */
   boltzScriptDelay?: string
 }
 
 /**
- * Drive one receive swap toward completion: if boltz has funded + pre-signed,
- * verify, claim (revealing the preimage), and tell boltz to settle. Idempotent
- * and restart-safe — safe to call repeatedly; it acts only when boltz is funded
+ * Drive one receive swap toward completion: if subdustd has funded + pre-signed,
+ * verify, claim (revealing the preimage), and tell subdustd to settle. Idempotent
+ * and restart-safe — safe to call repeatedly; it acts only when subdustd is funded
  * and the swap isn't already claimed/settled. Returns true once settled.
  */
 export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string): Promise<boolean> {
@@ -175,12 +170,12 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   if (!swap || swap.direction !== SwapDirection.Receive || swap.preimage === undefined) return false
   if (isTerminal(SwapDirection.Receive, swap.state)) return swap.state === 'settled'
 
-  const status = await boltzGet<ReceiveStatus>(`${deps.boltzApiUrl}/v2/subdust/atomic/receive/status?swapId=${swapId}`)
+  const status = await getJson<ReceiveStatus>(`${deps.subdustdUrl}/v2/subdust/atomic/receive/status?swapId=${swapId}`)
 
-  // boltz reached a terminal state while we were down — converge locally so we
+  // subdustd reached a terminal state while we were down — converge locally so we
   // stop polling forever (F12). 'settled': our claim's preimage was collected
-  // (our /receive/settle, or boltz's harvester racing ahead of this drive) — a
-  // successful receive, so return true to fire the receipt. 'refunded': boltz
+  // (our /receive/settle, or subdustd's harvester racing ahead of this drive) — a
+  // successful receive, so return true to fire the receipt. 'refunded': subdustd
   // gave the payer back (unclaimed past T); nothing to claim, terminalize quietly.
   if (status.state === 'settled') {
     advanceReceive(repo, swapId, 'settled')
@@ -195,11 +190,11 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   }
 
   if (status.state !== 'funded' || !status.fundingOutpoint || !status.presigs || status.boltzPubkey === undefined || status.refundLocktime === undefined) {
-    return false // boltz hasn't funded yet
+    return false // subdustd hasn't funded yet
   }
 
   const ark = new RestArkProvider(deps.arkServerUrl)
-  const indexer = new WholeSetIndexerProvider(deps.arkServerUrl)
+  const indexer = new RestIndexerProvider(deps.arkServerUrl)
   const info = await ark.getInfo()
   const server = toXOnly(hex.decode(info.signerPubkey))
   const d = info.unilateralExitDelay
@@ -207,10 +202,10 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   const a = swap.amount
   const preimage = hex.decode(swap.preimage)
   const userXOnly = toXOnly(await deps.identity.xOnlyPublicKey())
-  const boltzXOnly = toXOnly(hex.decode(status.boltzPubkey))
+  const peerXOnly = toXOnly(hex.decode(status.boltzPubkey))
 
   const script = new AtomicVtxoScript({
-    funder: boltzXOnly,
+    funder: peerXOnly,
     claimer: userXOnly,
     server,
     paymentHash: hex.decode(swap.paymentHash),
@@ -227,15 +222,15 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
 
   const shared: SharedVtxo = { txid, vout: Number(voutStr), value: v.value, script }
   const netHrp = hrp(info.network)
-  // boltz's change output rides on boltz's OWN wallet-script delay, not the
+  // subdustd's change output rides on subdustd's OWN wallet-script delay, not the
   // info delay — a wrong guess shifts the reconstructed claim txid off the
-  // presig. Only boltz's money depends on this value; our output stays pinned
+  // presig. Only subdustd's money depends on this value; our output stays pinned
   // to our own derivation below.
-  const boltzD = status.boltzScriptDelay !== undefined ? BigInt(status.boltzScriptDelay) : d
-  const boltzAddr = new DefaultVtxo.Script({ pubKey: boltzXOnly, serverPubKey: server, csvTimelock: { type: timelockType(boltzD), value: boltzD } }).address(netHrp, server)
+  const peerD = status.boltzScriptDelay !== undefined ? BigInt(status.boltzScriptDelay) : d
+  const peerAddr = new DefaultVtxo.Script({ pubKey: peerXOnly, serverPubKey: server, csvTimelock: { type: timelockType(peerD), value: peerD } }).address(netHrp, server)
   // The claimer receive address is the bridge wallet's default vtxo address.
   const bridgeAddr = new DefaultVtxo.Script({ pubKey: userXOnly, serverPubKey: server, csvTimelock: { type: timelockType(d), value: d } }).address(netHrp, server)
-  const split = computeClaimSplit({ funderAddress: boltzAddr, claimerAddress: bridgeAddr, fundingValue: v.value, amount: a, dust })
+  const split = computeClaimSplit({ funderAddress: peerAddr, claimerAddress: bridgeAddr, fundingValue: v.value, amount: a, dust })
   const unroll = serverUnrollScript(info.checkpointTapscript)
 
   // Phase on the persisted state so a failed pass can retry: an attempt that
@@ -252,18 +247,18 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
     repo.transition(swapId, 'claimed')
   }
 
-  // Verify-before-reveal (F18, symmetry with the send-side F4): only tell boltz
+  // Verify-before-reveal (F18, symmetry with the send-side F4): only tell subdustd
   // to settle once our claim is actually on-chain. If finishClaim ACKed but
-  // didn't register, the preimage isn't public yet — revealing it would let boltz
+  // didn't register, the preimage isn't public yet — revealing it would let subdustd
   // collect the LN payment while we hold nothing. Not confirmed → leave for the
-  // next pass (once the claim really lands, boltz's own harvester is the backstop).
+  // next pass (once the claim really lands, subdustd's own harvester is the backstop).
   if (!(await confirmSpent(indexer, txid, Number(voutStr)))) {
     console.warn(`atomic receive ${swapId}: claim not confirmed on-chain yet — deferring settle`)
     return false
   }
 
-  // Reveal the preimage to boltz so it settles the hold invoice.
-  await boltzFetch(`${deps.boltzApiUrl}/v2/subdust/atomic/receive/settle`, { swapId, preimage: swap.preimage })
+  // Reveal the preimage to subdustd so it settles the hold invoice.
+  await postJson(`${deps.subdustdUrl}/v2/subdust/atomic/receive/settle`, { swapId, preimage: swap.preimage })
   repo.transition(swapId, 'settled')
   notifyReceiveSettled(deps, swap)
   return true
@@ -271,7 +266,7 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
 
 /**
  * Boot + periodic pass: drive every non-terminal atomic receive swap. Best-
- * effort — one swap failing (boltz not funded yet, transient) is left for the
+ * effort — one swap failing (subdustd not funded yet, transient) is left for the
  * next pass. Returns the swapIds that settled this pass (for receipt publish).
  */
 export async function driveAtomicReceives(deps: AtomicReceiveDeps): Promise<string[]> {

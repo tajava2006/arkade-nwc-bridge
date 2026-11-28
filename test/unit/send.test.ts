@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { ArkInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
+import type { OperatorInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   classifyDestination,
   classifyVtxos,
@@ -22,15 +22,17 @@ function vtxo(opts: {
     value: opts.value,
     isSpent: opts.isSpent ?? false,
     createdAt: new Date(),
-    virtualStatus: {
-      state: opts.state ?? 'settled',
-      batchExpiry: opts.batchExpiry ?? Date.now() + 30 * 86_400_000,
-    },
+    // SDK 0.5 coin shape: flat flags + expiresAt (the 0.4 virtualStatus object is gone).
+    // `state` / `batchExpiry` stay as the fixture's vocabulary.
+    isSwept: opts.state === 'swept',
+    isPreconfirmed: opts.state === 'preconfirmed',
+    isUnrolled: false,
+    expiresAt: new Date(opts.batchExpiry ?? Date.now() + 30 * 86_400_000),
   } as unknown as ExtendedVirtualCoin
 }
 
-function arkInfo(intentFee: Record<string, string> = {}): ArkInfo {
-  return { dust: DUST, fees: { intentFee, txFeeRate: '1' } } as unknown as ArkInfo
+function arkInfo(intentFee: Record<string, string> = {}): OperatorInfo {
+  return { dust: DUST, fees: { intentFee, txFeeRate: '1' } } as unknown as OperatorInfo
 }
 
 describe('classifyVtxos', () => {

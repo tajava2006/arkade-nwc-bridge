@@ -1,15 +1,16 @@
 import {
+  canRecoverOnchain,
   Estimator,
-  isExpired,
-  isRecoverable,
-  isSpendable,
   isSubdust,
   isVtxoExpiringSoon,
+  isVtxoSpent,
   isValidArkAddress,
-  type ArkInfo,
   type ExtendedVirtualCoin,
+  type OperatorInfo,
 } from '@arkade-os/sdk'
-import { decodeInvoice, type FeesResponse } from '@arkade-os/boltz-swap'
+import { getJson } from './atomic/http'
+import { sendFeeSats } from './atomic/fees'
+import { decodeInvoice } from './lib/bolt11'
 import { decode as decodeBolt11 } from 'light-bolt11-decoder'
 
 // Pure send-side logic shared by the web routes and views: destination → rail
@@ -44,13 +45,12 @@ export function classifyDestination(raw: string): Rail | null {
 }
 
 /**
- * The reads the /send breakdown needs, fetched together: the two ark-side ones
- * plus the boltz fee table (for the LN drain hint — see lnDrainInvoiceSat).
+ * The reads the /send breakdown needs, fetched together. Lightning fees aren't
+ * here: the preview asks subdustd for its fee rule when an invoice is pasted.
  */
 export interface SendData {
-  arkInfo: ArkInfo
+  arkInfo: OperatorInfo
   vtxos: ExtendedVirtualCoin[]
-  fees: FeesResponse
 }
 
 export interface VtxoBuckets {
@@ -79,15 +79,20 @@ export function classifyVtxos(vtxos: ExtendedVirtualCoin[], dust: bigint): VtxoB
   const subdust: ExtendedVirtualCoin[] = []
   const recoverable: ExtendedVirtualCoin[] = []
 
+  // SDK 0.5 port (money path — balance buckets): 0.4's isSpendable / isRecoverable /
+  // isExpired became flat flags + capability predicates. Same buckets: skip
+  // spent (and unrolled — the F24 boundary already drops those upstream),
+  // sub-dust first, then swept-or-expired (= canRecoverOnchain) as recoverable.
+  const now = { timestamp: new Date() }
   for (const v of vtxos) {
-    if (!isSpendable(v)) continue
+    if (isVtxoSpent(v) || v.isUnrolled) continue
     // Sub-dust label takes priority over swept/expired: a sub-dust vtxo is
     // sub-dust regardless of its expiry, and that's the more useful thing to
     // surface. Both buckets are round-only recoverable, so this only changes
     // the display label, not behavior.
     if (isSubdust(v, dust)) {
       subdust.push(v)
-    } else if (isRecoverable(v) || isExpired(v)) {
+    } else if (canRecoverOnchain(v, now)) {
       recoverable.push(v)
     } else {
       spendable.push(v)
@@ -123,7 +128,7 @@ export function isExpiringSoon(v: ExtendedVirtualCoin): boolean {
  * The fee actually deducted is whatever `Ramps.offboard` computes at round time
  * — this is only the pre-submit preview.
  */
-export function offboardFeeSat(arkInfo: ArkInfo, amountSat: number): number {
+export function offboardFeeSat(arkInfo: OperatorInfo, amountSat: number): number {
   const estimator = new Estimator(arkInfo.fees.intentFee)
   const fee = estimator.evalOnchainOutput({ amount: BigInt(amountSat), script: '' })
   return Number(fee.satoshis)
@@ -136,7 +141,7 @@ export function offboardFeeSat(arkInfo: ArkInfo, amountSat: number): number {
  * deduction — only the single onchain-output fee comes off the top. Returns
  * null if the result would be below dust (no valid output → genuinely stuck).
  */
-export function offboardMaxSat(arkInfo: ArkInfo, buckets: VtxoBuckets): number | null {
+export function offboardMaxSat(arkInfo: OperatorInfo, buckets: VtxoBuckets): number | null {
   const fee = offboardFeeSat(arkInfo, buckets.roundTotalSat)
   const out = buckets.roundTotalSat - fee
   if (out < Number(arkInfo.dust)) return null
@@ -163,7 +168,7 @@ export interface OffboardDustChange {
  * round total needs no per-input deduction.
  */
 export function offboardDustChange(
-  arkInfo: ArkInfo,
+  arkInfo: OperatorInfo,
   buckets: VtxoBuckets,
   recipientSat: number,
 ): OffboardDustChange | null {
@@ -182,69 +187,46 @@ export function offboardDustChange(
   return { changeSat, maxKeepingChangeSat: candidate > 0 ? candidate : null }
 }
 
-/**
- * Boltz submarine-swap fee for paying a `amountSats` invoice. Deterministic:
- * the LN routing cost is Boltz's (covered by its margin / our boltz.conf
- * `swapInFee`), not charged to us per-route — we pay invoice + this fee up
- * front and Boltz takes responsibility for delivery. Matches the PWA's
- * calcSubmarineSwapFee. Ceil per Boltz's own rounding.
- */
-export function submarineFeeSat(fees: FeesResponse, amountSats: number): number {
-  const { percentage, minerFees } = fees.submarine
-  return Math.ceil((amountSats * percentage) / 100 + minerFees)
-}
-
-/**
- * Invoice amount whose LN-send total (invoice + Boltz fee) lands as close to
- * `targetSat` as possible without exceeding it — the number to show for
- * "empty this wallet over Lightning". Mirrors boltz's expectedAmount
- * arithmetic (`invoice + ceil(pct·invoice) + baseFee`; baseFee is 0 on ARK
- * but kept for formula fidelity). Because the fee is a ceil, some targets are
- * unreachable exactly — and the server's own ceil can disagree with ours by
- * ±1 sat at float boundaries — so this number is advisory: execution funds
- * the swap all-in and folds a residue of up to DRAIN_SLACK_SATS into the
- * swap margin (see ln_send.ts), never stranding it as sub-dust change.
- * Null when no positive invoice amount fits under the target.
- */
-export function lnDrainInvoiceSat(fees: FeesResponse, targetSat: number): number | null {
-  const p = fees.submarine.percentage / 100
-  const base = fees.submarine.minerFees
-  const total = (x: number) => x + Math.ceil(p * x) + base
-  let x = Math.floor((targetSat - base) / (1 + p))
-  if (x <= 0) return null
-  // Float estimate can land a step off in either direction; walk to the
-  // largest x whose total still fits.
-  while (total(x + 1) <= targetSat) x++
-  while (x > 0 && total(x) > targetSat) x--
-  return x > 0 ? x : null
-}
-
 export interface LnPreview {
   amountSats: number
   description: string
   paymentHash: string
   payee: string | undefined
+  /** subdustd's fee rule (percent), as it answered at preview. */
+  feePercent: number
   feeSat: number
+  /** What leaves the wallet: invoice + fee. subdustd pays the routing itself. */
   totalSat: number
 }
 
 /**
- * Pre-send breakdown for a bolt11 invoice: what's billed (invoice amount),
- * the Boltz swap fee, and the total that leaves the wallet. `decodeInvoice`
- * gives the typed amount/description/hash; the payee node key isn't in that
- * shape, so pull it best-effort from light-bolt11-decoder's raw sections.
+ * Pre-send breakdown for a bolt11 invoice: what's billed (invoice amount), the
+ * fee and the total that leaves the wallet. Exact, because subdustd's fee is a
+ * fixed percentage and it fronts the routing cost (`sendFeeSats` is the formula
+ * it charges with). The payee node key isn't in decodeInvoice's shape, so it's
+ * pulled best-effort from the raw sections.
  */
-export function lightningPreview(invoice: string, fees: FeesResponse): LnPreview {
+export function lightningPreview(invoice: string, feePercent: number): LnPreview {
   const decoded = decodeInvoice(invoice)
-  const feeSat = submarineFeeSat(fees, decoded.amountSats)
+  const feeSat = sendFeeSats(decoded.amountSats, feePercent)
   return {
     amountSats: decoded.amountSats,
     description: decoded.description,
     paymentHash: decoded.paymentHash,
     payee: payeeNodeKey(invoice),
+    feePercent,
     feeSat,
     totalSat: decoded.amountSats + feeSat,
   }
+}
+
+/** subdustd's send fee rule, read before anything is initiated. */
+export async function subdustdFeePercent(subdustdUrl: string): Promise<number> {
+  const { feePercent } = await getJson<{ feePercent: unknown }>(`${subdustdUrl}/v2/subdust/atomic/send/fees`)
+  if (typeof feePercent !== 'number' || !Number.isFinite(feePercent) || feePercent < 0 || feePercent >= 100) {
+    throw new Error(`unexpected fee rule ${JSON.stringify(feePercent)}`)
+  }
+  return feePercent
 }
 
 function payeeNodeKey(invoice: string): string | undefined {

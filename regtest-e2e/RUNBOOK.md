@@ -14,9 +14,10 @@ full local regtest stack. This is the existence proof for the exit feature
   an already-present copy: the initialized submodule first, else the operator
   workspace's sibling `../ts-sdk/regtest` (same repo, ts-sdk's submodule).
   `REGTEST_DIR` overrides everything.
-- **Not** a Lightning setup: sub-dust / LN receive is out of scope here (needs
-  the custom sub-dust Boltz + two LN nodes + a channel). Unilateral exit uses
-  only arkd + esplora, so none of that matters for this drill.
+- **Not** a Lightning setup: the bridge boots Ark-only here (no `lightning`
+  block in its config.json). Unilateral exit uses only arkd + esplora; the
+  Lightning drills — including exiting a stuck solver lockup — run on the
+  operator workspace's solver harness.
 
 ## You are the miner
 
@@ -202,8 +203,18 @@ child's own prevout (the hard path). ~4 minutes, exit code 0 = proven.
 First green run 2026-07-12: child 278 sats → 433 sats, sweep 148 → 287, both
 replacements accepted by bitcoind.
 
+Steps 13–16 (since 2026-11-22) finish with the final send, unattended. The
+drill makes a throwaway P2TR key (`bip322-sign.ts`), challenges it as the
+destination, and answers with a BIP-322 signature. It then sends everything
+on the fuel P2TR there and checks the destination holds it all, less one fee,
+with no change output. That was the one step only the browser drill covered.
+It runs on the operator's fork arkd images (env.sh refuses if they are not
+built). Write the output to a file, not a pipe: the bridge it starts keeps a
+pipe open.
+
 ```bash
-regtest-e2e/boost-drill.sh   # brings the stack up itself (wipes previous)
+regtest-e2e/boost-drill.sh > /tmp/boost-drill.log 2>&1   # brings the stack up itself (wipes previous)
+FINAL_SEND_ONLY=1 regtest-e2e/boost-drill.sh               # just steps 13–16 on a leftover runtime
 ```
 
 ### 7. Tear down

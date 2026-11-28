@@ -21,7 +21,7 @@ src/
   server_config.ts           — bridge_server single-row CRUD +
                                resolveServerSet (config.json > row >
                                defaults) + validateServerSet. The fresh-
-                               start ark/boltz choice, then immutable
+                               start Ark server choice, then immutable
   db.ts                      — bun:sqlite + WAL + append-only MIGRATIONS
   history.ts                 — unified wallet-history ledger (HISTORY_DESIGN.md):
                                one row per money event on every rail; mirrored
@@ -36,11 +36,20 @@ src/
                                baselines — no backfill), own-boarding-input
                                sweep suppression, esplora-confirmed settles
   wallet.ts                  — privateKey → SingleKey → Wallet (in-memory repos)
-  boltz.ts                   — ArkadeSwaps + SqliteSwapRepository,
-                               SwapManager auto-claim/refund + listener +
-                               boot-time reconcile for incoming swaps
-  boltz_repository.ts        — SqliteSwapRepository: rows keyed on swap.id,
-                               full BoltzSwap stashed as JSON blob
+  lightning_config.ts        — data/config.json `lightning` block (subdustd
+                               URL), strict; the solver-era keys refuse with
+                               the reason; absent ⇒ Ark-only boot, LN
+                               methods refuse
+  ln_send.ts                 — sendLightning: every amount → atomic send
+                               (subdustd, D11); LnSendUnresolved keeps the
+                               NWC row pending, too few coins → LnSendRefused
+                               (insufficientFunds)
+  ln_receive.ts              — issueInvoice: EVERY amount → atomic receive on
+                               subdustd (D10: NIP-57 description hash) + the
+                               reconcile that claims and flips NWC rows
+  ln_ledger.ts               — settle/failOutgoing (pending-gated, + budget
+                               counter), reconcileAtomicSendRows (M1 — the
+                               crash-window settle, also at boot)
   exit/                      — unilateral exit (EXIT_DESIGN.md). ASP-free:
                                vault.ts (offline proof store — exit_proof_txs
                                + exit_vtxos incl. quarantine), proof_sync.ts +
@@ -68,16 +77,12 @@ src/
                                BIP-322/legacy signature proof of control,
                                exit_dest table — then an exact-fee no-change
                                send-all of the fuel P2TR, RBF-boostable)
-  atomic/boltz_ws.ts         — push channel for sub-dust swaps: subscribes
-                               the fork's swap.update ws (sidecar) by swap id
+  atomic/push_ws.ts          — push channel for atomic swaps: subscribes
+                               subdustd's swap.update ws (/v2/ws) by swap id
                                and pokes the reconciler on transitions. Pure
                                accelerator — the 30s reconciler stays the
                                backstop; dead endpoint degrades to polling.
-                               URL: config.boltzWsUrl > derived
-                               ws(s)://host/v2/ws — the SDK's own single-host
-                               path-split convention, already served by both
-                               the VPS nginx and the compose boltz-proxy, so
-                               no deployment needs to set anything
+                               URL derived from lightning.subdustdUrl
   polyfills.ts               — @noble/curves + @scure/btc-signer ESM warming
                                (bun async-ESM require trap) + EventSource shim
   index.ts                   — three-mode boot (setup / ready / degraded);
@@ -131,13 +136,13 @@ src/
     get_info.ts              — capabilities; no notifications advertised
     get_balance.ts           — (available + recoverable) × 1000 msat
     make_invoice.ts          — invoice via the shared LN-receive core
-                               (ln_receive.ts, same core as the CLINK noffer:
-                               reverse swap ≥ dust; sub-dust <330 → ATOMIC
-                               receive, issueAtomicReceive + driveAtomicReceives
-                               reconciler, see atomic_receive.ts / ATOMIC_SUBDUST_PLAN.md)
-    pay_invoice.ts           — submarine swap one-shot; amount stays the
-                               invoice nominal, fees_paid = our cost
-                               (+ sub-dust <330 → ATOMIC send, atomicSubdustSend, see ln_send.ts)
+                               (ln_receive.ts, same core as the CLINK noffer):
+                               an atomic receive on subdustd for any amount,
+                               1:1 (ATOMIC_SUBDUST_PLAN.md)
+    pay_invoice.ts           — via ln_send.ts (atomic, any amount);
+                               amount stays the invoice nominal, fees_paid =
+                               our cost; an unresolved outcome leaves the row
+                               pending (INTERNAL, do not retry)
     lookup_invoice.ts        — connection-scoped SELECT
     list_transactions.ts     — connection-scoped, from/until/limit/offset
   lib/
@@ -165,6 +170,15 @@ src/
     views/                   — server-rendered pages incl. setup.ts,
                                degraded.ts, exit.ts + exit_detail.ts;
                                layout.ts injects the SSE client JS
+subdustd/                    — separate service (own entrypoint + Dockerfile,
+                               build context = this repo root): the server side
+                               of the atomic swaps (every send and receive, any
+                               amount — D10/D11), imports src/atomic so
+                               client and server share one protocol lib. Same
+                               no-env rule: one strict JSON config (unknown keys
+                               fail boot). See subdustd/README.md for the knob
+                               table carried over from the Boltz fork;
+                               float.ts renews its own float (SM-29)
 scripts/
   show-nsec.ts               — recovery: print npub/nsec from sqlite
   show-btc-key.ts            — recovery: same key as WIF + tr() descriptor
@@ -244,24 +258,28 @@ row exists. Logs go to stdout; when running in background pipe to
 ## Hot footguns
 
 - **No env vars.** Static defaults live in [`src/defaults.ts`](src/defaults.ts);
-  the nsec lives in the `accounts` sqlite table and the chosen ark/boltz
-  pair in the single-row `bridge_server` table — both written at `/setup`.
+  the nsec lives in the `accounts` sqlite table and the chosen Ark server
+  in the single-row `bridge_server` table — both written at `/setup`.
   Don't reintroduce `.env` parsing — it was deliberately removed so the
   bridge is "clone + `bun run dev`" with no setup ritual. The one
   opt-in override is `./data/config.json` (loaded by
   [`src/config.ts`](src/config.ts)) for the docker deployment case —
   any `Config` field present overrides the matching default, missing
-  fields fall through. For **ark/boltz specifically** the runtime value is
+  fields fall through. For **the Ark server specifically** the runtime value is
   `resolveServerSet` ([`src/server_config.ts`](src/server_config.ts)):
   `data/config.json` > `bridge_server` row > defaults, so a docker/regtest
   config.json still wins over the fresh-start row. The file is intentionally
   absent from a fresh clone; don't add it to defaults or examples checked
-  into the repo.
+  into the repo. Lightning is config.json-only (`lightning`: the subdustd
+  URL — operator infrastructure, strictly parsed); without it the bridge
+  boots Ark-only. `nostrRelays` in the same
+  file replaces OUTBOX_BOOTSTRAP_RELAYS + NWC_RELAYS_FALLBACK (private
+  relay / regtest): the bridge then opens no other relay.
 - **Two-phase boot.** [`src/index.ts`](src/index.ts) starts the web
   server first, then either calls `bootReady` immediately (account
   exists) or waits for POST `/setup` to call it. Don't reorder this
-  to "wallet first" — there's no nsec (nor a chosen ark/boltz) to hand
-  the wallet until setup completes. `bootReady` resolves ark/boltz from
+  to "wallet first" — there's no nsec (nor a chosen Ark server) to hand
+  the wallet until setup completes. `bootReady` resolves the Ark server from
   the `bridge_server` row at entry (not at process start — the row
   doesn't exist yet on a fresh boot) and stamps them into the ready
   AppState; POST `/setup` validates then writes the row + account
@@ -280,33 +298,33 @@ row exists. Logs go to stdout; when running in background pipe to
   Don't link to them from anything that gets committed — public links
   will 404. External URLs are in [DESIGN.md §10](DESIGN.md). Refresh
   them via the workspace's `update-refs.sh`, not a bridge npm script.
-- **A "degraded — checkpoint exit delay rejected" boot is an encoding
-  artifact, not a misconfigured ASP.** arkd's stock checkpoint exit delay is
-  86400s (24h), but BIP-68 relative timelocks count in 512-second units and
-  86400 is not a multiple of 512 — the script carries 168 units and decodes
-  back as 86016s. SDK 0.4.62 enforces a mainnet floor of exactly 86400s
-  against that decoded value, so a stock ASP can never clear it. `wallet.ts`
-  restates the floor at `MIN_CHECKPOINT_EXIT_DELAY_SECONDS` (86016n, mainnet
-  only — regtest keeps the SDK's lower floor). Do NOT "fix" this by reading
-  the delay from the server: the floor's whole job is to reject an ASP that
-  advertises a shorter delay than we accept. Note this only affects the
-  checkpoint script; vtxo addresses derive from `unilateralExitDelay`, so
-  nothing here forks the address space.
+- **A "degraded — checkpoint exit delay rejected" boot means the ASP
+  advertises a checkpoint exit delay below our floor.** The floor is
+  `MIN_CHECKPOINT_EXIT_DELAY_SECONDS` (86016n, mainnet-class only) in
+  `wallet.ts`, enforced by the bridge itself (`assertCheckpointExitDelay`)
+  before the wallet is built — SDK 0.5 dropped its own 86400s floor and the
+  option that used to carry ours (its floor is 512s). 86016 is arkd's stock
+  86400s as it survives BIP-68's 512-second units, so a stock ASP passes. Do
+  NOT "fix" a rejection by reading the delay from the server: the floor's
+  whole job is to reject an ASP that advertises a shorter delay than we
+  accept. This only concerns the checkpoint script; vtxo addresses derive
+  from `unilateralExitDelay`.
 - **The ark dependency chain must stay a single instance.**
-  `@arkade-os/boltz-swap` pins `@arkade-os/sdk` to an *exact* version,
-  and that SDK in turn pins `@noble/curves` / `@scure/base` /
+  `@arkade-os/sdk` pins `@noble/curves` / `@scure/base` /
   `@scure/btc-signer` exactly. Running ahead of those pins puts two
   copies of the same library in the tree: `tsc` rejects it outright
   (`Wallet` vs `IWallet`, "separate declarations of a private property"),
   and the failure mode where it *doesn't* is worse — two `Transaction`
   classes on a money path. The `overrides` block in package.json is what
-  holds the line; `./update-deps.sh` prints boltz-swap's required SDK
-  next to the override so a drift is visible. Bump those four by hand
-  only when boltz-swap bumps its own pin.
-- **Boltz endpoint is *not* `api.ark.boltz.exchange`.** The d.ts
-  docstring lies; the real SDK default is `api.boltz.exchange` and
-  that's what the production wallet uses. Don't pass `swapProvider`
-  explicitly unless someone has a specific reason.
+  holds the line; `./update-deps.sh` compares each override with what the
+  SDK declares and stops on a mismatch. Bump those three by hand only when
+  the SDK bumps its own pins. (`@noble/hashes` 2.0.1 also
+  sits in the tree via nostr-tools — off the ark signing path, left alone.)
+- **Atomic sends trust the funder (D11).** The 4-leaf script gives
+  subdustd, the claimer on a send, no unilateral path: a funder who unrolls
+  while subdustd's HTLC is held keeps both sides, up to `a`. Fine while the
+  funder is the operator's own bridge; before subdustd serves anyone else it
+  needs a v2 script with a claimer unilateral leaf.
 - **`transactions.amount_msat` = the BOLT11 nominal, both
   directions; `fees_paid_msat` = our cost.** Wallet movement is
   derived (incoming credits amount − fees, outgoing debits
@@ -314,11 +332,9 @@ row exists. Logs go to stdout; when running in background pipe to
   in clients that render amount and fee side by side, and NIP-57
   receipt validation requires the bolt11 amount to equal the zap
   request's (a 21-sat zap must read 21). Invoices are never
-  inflated: the swap cut comes out of what lands on Ark — the
-  receiver's cost, not the payer's. Mind the SDK trap here:
-  `createLightningInvoice` result.amount is the **post-fee on-Ark
-  amount** (what lands), NOT the invoice nominal — don't record it
-  as `amount`. Rationale: DESIGN.md §5 "Amount semantics".
+  inflated; receives are 1:1 today (no fee on the atomic receive), and
+  any future receive fee comes out of what lands on Ark — the receiver's
+  cost, not the payer's. Rationale: DESIGN.md §5 "Amount semantics".
 - **`recoverable` balance is sub-dust VTXOs, not "broken funds".**
   Include it in `get_balance` responses.
 - **One subscription per connection, on `conn.relays`.** Each
@@ -371,8 +387,9 @@ row exists. Logs go to stdout; when running in background pipe to
   add handler under `src/handlers/`. NIP-47 spec: §10 of DESIGN.md.
 - *schema change* → [`src/db.ts`](src/db.ts) (append migration).
   TransactionRow shape lives in [`src/lib/transaction.ts`](src/lib/transaction.ts).
-- *swap lifecycle questions* → [`src/boltz.ts`](src/boltz.ts) for the
-  listener / reconcile, [DESIGN.md §5](DESIGN.md) for the flow.
+- *swap lifecycle questions* → [`src/ln_send.ts`](src/ln_send.ts) /
+  [`src/ln_receive.ts`](src/ln_receive.ts) / [`src/ln_ledger.ts`](src/ln_ledger.ts),
+  [DESIGN.md §5](DESIGN.md) for the flow.
 - *UI change* → [`src/web/views/`](src/web/views/); routes in
   [`src/web/server.ts`](src/web/server.ts).
 - *relay status / outbox behavior* → [`src/nostr/outbox.ts`](src/nostr/outbox.ts)

@@ -1,18 +1,10 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet, WalletBalance, RestArkProvider } from '@arkade-os/sdk'
-import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
-import { SqliteSwapRepository } from '../boltz_repository'
+import { decodeInvoice } from '../lib/bolt11'
 
 import type { Config } from '../config'
 import { readServerOverrides } from '../config'
-import {
-  ARK_SERVER_URL,
-  BOLTZ_API_URL,
-  EXIT_QUARANTINE_DM_GRACE_MS,
-  OFFICIAL_ARK_SERVER_URL,
-  OFFICIAL_BOLTZ_API_URL,
-  type Network,
-} from '../defaults'
+import { ARK_SERVER_URL, EXIT_QUARANTINE_DM_GRACE_MS, type Network } from '../defaults'
 import {
   setServerRow,
   clearServerRow,
@@ -20,19 +12,21 @@ import {
   type ServerSet,
   type ValidateResult,
 } from '../server_config'
-import { sendLightning } from '../ln_send'
+import { sendLightning, type LightningRails } from '../ln_send'
 import {
+  claimWebLnSend,
   failWebLn,
   listHistoryPage,
   parseHistoryCursor,
   recordArkSend,
   recordOffboard,
-  recordWebLnPending,
   settleWebLn,
   syncHistoryFromSources,
 } from '../history'
 import { historyView } from './views/history'
-import { createAccount, generatePrivateKey, parseNsecInput } from '../account'
+import { createAccount, generatePrivateKey, loadAccount, parseNsecInput } from '../account'
+import { getPublicKey } from 'nostr-tools/pure'
+import { hexToBytes } from 'nostr-tools/utils'
 import { nip19 } from 'nostr-tools'
 import type { SimplePool } from 'nostr-tools/pool'
 import { cycleSpentMsat, parseBudgetRenewal, type BudgetRenewal } from '../lib/budget'
@@ -102,6 +96,8 @@ import {
   classifyDestination,
   classifyVtxos,
   lightningPreview,
+  subdustdFeePercent,
+  type LnPreview,
   offboardDustChange,
   offboardFeeSat,
   offboardMaxSat,
@@ -125,8 +121,8 @@ export interface SwrCaches {
 export type AppState =
   | { mode: 'setup' }
   | {
-      // Account exists but the full bring-up (wallet/boltz/nostr) failed —
-      // typically the ASP or Boltz being unreachable, which is exactly the
+      // Account exists but the full bring-up (wallet/Lightning/nostr) failed —
+      // typically the ASP being unreachable, which is exactly the
       // scenario unilateral exit exists for (EXIT_PLAN #07). Everything here
       // works without the ASP: the vault is sqlite, the onchain address is
       // derived from the nsec. index.ts retries the full boot every 60s and
@@ -142,13 +138,13 @@ export type AppState =
     }
   | {
       mode: 'ready'
-      // The ASP endpoint pair this ready session is bound to — resolved from the
+      // The Ark server this ready session is bound to — resolved from the
       // fresh-start row (config.json > row > defaults) at bootReady. /send and
-      // /swaps/refund read these; cfg no longer carries the runtime ark/boltz.
+      // /swaps/refund read it; cfg no longer carries the runtime URL.
       arkServerUrl: string
-      boltzApiUrl: string
       wallet: Wallet
-      swaps: ArkadeSwaps
+      /** Lightning rails; undefined = Ark-only. */
+      lightning?: LightningRails
       nostr: NostrService
       offers: OfferService
       caches: SwrCaches
@@ -194,16 +190,16 @@ export interface WebServerDeps {
    */
   notify?: NotifyFn
   /**
-   * Brings up wallet → boltz → nostr inside the same process. Called from
-   * POST /setup after the account row is written. Throws if wiring up the
-   * Ark/Boltz/relay clients fails — caller is responsible for cleaning up
+   * Brings up wallet → Lightning rails → nostr inside the same process. Called
+   * from POST /setup after the account row is written. Throws if wiring up the
+   * Ark/Lightning/relay clients fails — caller is responsible for cleaning up
    * the partial state (POST /setup deletes the just-created row on error).
    */
   bootReady: (privateKey: Uint8Array) => Promise<void>
   /**
    * Validate the chosen server set before the /setup POST commits it. Injected
    * so tests can stub the network probe; production defaults to
-   * validateServerSet (arkd getInfo network assert + boltz reachability).
+   * validateServerSet (arkd getInfo network assert).
    */
   validateServer?: (set: ServerSet, network: Network) => Promise<ValidateResult>
 }
@@ -270,6 +266,12 @@ export function startWebServer(deps: WebServerDeps): WebServer {
       )
     }
     return null
+  }
+  // The account's x-only key — the Ark identity and the nostr key are the same
+  // secp256k1 key — so the exit views count down OUR leaf (SM-55).
+  const ourExitKey = (): Uint8Array | undefined => {
+    const account = loadAccount(db)
+    return account ? hexToBytes(getPublicKey(account.privateKey)) : undefined
   }
   // R4: GET (read) routes carry no Origin from most browsers, so the CSRF guard
   // can't see them — but DNS-rebinding reads (balance / history / exit / swaps)
@@ -347,7 +349,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             setupView({
               choice: 'hoppe',
-              configPinned: override.arkServerUrl != null || override.boltzApiUrl != null,
+              configPinned: override.arkServerUrl != null,
             }),
           )
         },
@@ -360,34 +362,21 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const pastedNsec =
             typeof form.get('nsec') === 'string' ? (form.get('nsec') as string) : ''
 
-          // Server selection (fresh-start only, then immutable). Two fixed
-          // presets — the operator's own pair (default) and the official Arkade
-          // pair — plus a custom pair. Read first so a re-render after any later
-          // error preserves the choice. Trailing slash trimmed so URL joins
-          // don't double up.
+          // Server selection (fresh-start only, then immutable): the operator's
+          // own Ark server (default) or a custom one. Read first so a re-render
+          // after any later error preserves the choice. Trailing slash trimmed
+          // so URL joins don't double up.
           const override = readServerOverrides()
-          const configPinned = override.arkServerUrl != null || override.boltzApiUrl != null
-          const choiceRaw = (form.get('server_choice') ?? 'hoppe').toString()
-          const choice: ServerChoice =
-            choiceRaw === 'official' ? 'official' : choiceRaw === 'custom' ? 'custom' : 'hoppe'
+          const configPinned = override.arkServerUrl != null
+          const choice: ServerChoice = (form.get('server_choice') ?? 'hoppe').toString() === 'custom' ? 'custom' : 'hoppe'
           const trimUrl = (raw: string): string => raw.trim().replace(/\/+$/, '')
           const customArk = trimUrl((form.get('ark_url') ?? '').toString())
-          const customBoltz = trimUrl((form.get('boltz_url') ?? '').toString())
-          const chosen =
-            choice === 'official'
-              ? { arkServerUrl: OFFICIAL_ARK_SERVER_URL, boltzApiUrl: OFFICIAL_BOLTZ_API_URL }
-              : choice === 'custom'
-                ? { arkServerUrl: customArk, boltzApiUrl: customBoltz }
-                : { arkServerUrl: ARK_SERVER_URL, boltzApiUrl: BOLTZ_API_URL }
-          const serverArgs = { choice, customArk, customBoltz, configPinned }
+          const chosen = { arkServerUrl: choice === 'custom' ? customArk : ARK_SERVER_URL }
+          const serverArgs = { choice, customArk, configPinned }
 
-          if (choice === 'custom' && (!chosen.arkServerUrl || !chosen.boltzApiUrl)) {
+          if (choice === 'custom' && !chosen.arkServerUrl) {
             return htmlResponse(
-              setupView({
-                error: 'Enter both the Ark server URL and the Boltz API URL for a custom server.',
-                pastedNsec,
-                ...serverArgs,
-              }),
+              setupView({ error: 'Enter the Ark server URL for a custom server.', pastedNsec, ...serverArgs }),
               { status: 400 },
             )
           }
@@ -428,10 +417,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           // install, and a wrong-network arkd could silently strand funds on a
           // chain we can't reach (the load-bearing check). Nothing is persisted
           // until this passes.
-          const effective = {
-            arkServerUrl: override.arkServerUrl ?? chosen.arkServerUrl,
-            boltzApiUrl: override.boltzApiUrl ?? chosen.boltzApiUrl,
-          }
+          const effective = { arkServerUrl: override.arkServerUrl ?? chosen.arkServerUrl }
           const check = await validateServer(effective, cfg.network)
           if (!check.ok) {
             return htmlResponse(setupView({ error: check.reason, pastedNsec, ...serverArgs }), {
@@ -446,7 +432,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           try {
             await bootReady(privateKey)
           } catch (err) {
-            // Bring-up failed (usually ASP/Boltz unreachable). Undo BOTH rows so
+            // Bring-up failed (usually the ASP unreachable). Undo BOTH rows so
             // the user retries from a clean DB. The just-generated (or pasted)
             // nsec is only in memory here — surface it in the error so a generate
             // run doesn't silently lose the key.
@@ -496,7 +482,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
               arkAddress: r.ready.arkAddress,
               boardingAddress: r.ready.boardingAddress,
               onboardingFeeProgram: r.ready.onboardingFeeProgram,
-              reverseFeePct: r.ready.caches.sendData.snapshot().value?.fees.reverse.percentage ?? null,
               noffer: r.ready.offers.snapshot().noffer,
               offerRelay: r.ready.offers.getRelayStatus(),
               activeConnections: active.length,
@@ -571,7 +556,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const vout = Number.parseInt(req.params.vout, 10)
           if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
           const feeRate = await st.exitEngine.feeRate()
-          const stepper = buildExitStepper({ db }, txid, vout, feeRate)
+          const stepper = buildExitStepper({ db, ourXOnly: ourExitKey() }, txid, vout, feeRate)
           if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
           let estimate = null
           try {
@@ -621,7 +606,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           } catch {
             return new Response('esplora unavailable', { status: 503 })
           }
-          const probe = await probeExitStep({ db, explorer }, txid, vout, stepTxid)
+          const probe = await probeExitStep({ db, explorer, ourXOnly: ourExitKey() }, txid, vout, stepTxid)
           if (!probe) return new Response('no such step', { status: 404 })
           // a step sitting in the mempool gets its fee context (package rate
           // vs next block, boost button) — priced best-effort, the plain
@@ -656,7 +641,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           const vout = Number.parseInt(req.params.vout, 10)
           if (!Number.isInteger(vout)) return new Response('bad vout', { status: 400 })
           const feeRate = await st.exitEngine.feeRate()
-          const stepper = buildExitStepper({ db }, txid, vout, feeRate)
+          const stepper = buildExitStepper({ db, ourXOnly: ourExitKey() }, txid, vout, feeRate)
           if (!stepper) return new Response('no such vtxo in the exit vault', { status: 404 })
           let info = null
           try {
@@ -1044,7 +1029,6 @@ export function startWebServer(deps: WebServerDeps): WebServer {
           return htmlResponse(
             swapsView({
               swaps: new SqliteAtomicSwapRepository(db).list(),
-              dustSwaps: await new SqliteSwapRepository(db).getAllSwaps({ orderDirection: 'desc' }),
               nowSec: Math.floor(Date.now() / 1000),
               notice: msg ? { ok: url.searchParams.get('ok') === '1', text: msg } : undefined,
             }),
@@ -1052,7 +1036,7 @@ export function startWebServer(deps: WebServerDeps): WebServer {
         },
       },
       // Manual refund of an atomic send whose T has passed (refund leaf,
-      // F+server — boltz not involved). PRG: redirect back with the outcome
+      // F+server — subdustd not involved). PRG: redirect back with the outcome
       // so a reload can't re-fire the spend.
       '/swaps/refund': {
         POST: async (req) => {
@@ -1166,15 +1150,8 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             }
             if (!result.ok) return sendError('clink', clinkErrorMessage(result))
 
-            let clinkPreview
-            try {
-              clinkPreview = lightningPreview(result.bolt11, await ready.swaps.getFees())
-            } catch (err) {
-              return sendError('clink', `offer returned an invalid invoice: ${errMsg(err)}`)
-            }
-            if (!clinkPreview.amountSats || clinkPreview.amountSats <= 0) {
-              return sendError('clink', 'offer returned a 0-amount invoice')
-            }
+            const clinkPreview = await previewInvoice(ready, result.bolt11)
+            if (typeof clinkPreview === 'string') return sendError('clink', `offer invoice: ${clinkPreview}`)
             return htmlResponse(
               sendConfirmView({
                 title: 'CLINK offer (Lightning)',
@@ -1184,25 +1161,16 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 rows: [
                   { label: 'Payee', value: clinkPreview.payee ?? '—' },
                   { label: 'Description', value: clinkPreview.description || '—' },
-                  { label: 'Invoice amount', value: fmtSats(clinkPreview.amountSats) },
-                  { label: 'Swap fee', value: fmtSats(clinkPreview.feeSat) },
-                  { label: 'Total leaving wallet', value: fmtSats(clinkPreview.totalSat) },
+                  ...lnFeeRows(clinkPreview),
                 ],
-                note: 'Resolved from a CLINK noffer to a Lightning invoice. Confirm pays the invoice; LN routing is handled by Boltz out of the swap fee.',
+                note: `Resolved from a CLINK noffer to a Lightning invoice. Confirm pays the invoice. ${lnRailNote(clinkPreview)}`,
               }),
             )
           }
 
           if (rail === 'lightning') {
-            let preview
-            try {
-              preview = lightningPreview(destination, await ready.swaps.getFees())
-            } catch (err) {
-              return sendError('lightning', `invalid invoice: ${errMsg(err)}`)
-            }
-            if (!preview.amountSats || preview.amountSats <= 0) {
-              return sendError('lightning', '0-amount invoices are not supported')
-            }
+            const preview = await previewInvoice(ready, destination)
+            if (typeof preview === 'string') return sendError('lightning', preview)
             return htmlResponse(
               sendConfirmView({
                 title: 'Lightning payment',
@@ -1212,11 +1180,9 @@ export function startWebServer(deps: WebServerDeps): WebServer {
                 rows: [
                   { label: 'Payee', value: preview.payee ?? '—' },
                   { label: 'Description', value: preview.description || '—' },
-                  { label: 'Invoice amount', value: fmtSats(preview.amountSats) },
-                  { label: 'Swap fee', value: fmtSats(preview.feeSat) },
-                  { label: 'Total leaving wallet', value: fmtSats(preview.totalSat) },
+                  ...lnFeeRows(preview),
                 ],
-                note: 'LN routing is handled by Boltz out of this fee — the total above is what leaves your wallet.',
+                note: lnRailNote(preview),
               }),
             )
           }
@@ -1314,17 +1280,30 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             // Ledger row before the await (can take minutes) so an in-flight
             // send is visible on /history; a restart mid-send terminalizes it
             // via sweepInterruptedWebSends (the swap itself resumes safely).
-            recordWebLnPending(db, {
+            const claim = claimWebLnSend(db, {
               paymentHash: decoded.paymentHash,
               amountMsat: (decoded.amountSats ?? 0) * 1000,
               description: decoded.description || null,
             })
+            if (claim !== 'claimed') {
+              return htmlResponse(
+                sendResultView({
+                  label: 'lightning',
+                  ok: claim === 'settled' ? true : 'pending',
+                  detail:
+                    claim === 'settled'
+                      ? 'this invoice is already paid — see History'
+                      : 'this invoice is already being paid by an earlier confirm — its outcome lands on History and Swaps',
+                }),
+                { status: 409 },
+              )
+            }
             try {
+              if (!ready.lightning) throw new Error('this wallet has no Lightning rail configured')
               const res = await sendLightning(
                 {
-                  swaps: ready.swaps,
+                  lightning: ready.lightning,
                   wallet: ready.wallet,
-                  boltzApiUrl: ready.boltzApiUrl,
                   arkServerUrl: ready.arkServerUrl,
                   db,
                   notify,
@@ -1630,4 +1609,38 @@ export function startWebServer(deps: WebServerDeps): WebServer {
     },
     url: `http://${cfg.httpBind}:${server.port}`,
   }
+}
+
+/**
+ * The /send confirm breakdown for a bolt11: decoded, then priced with
+ * subdustd's fee rule (exact — it fronts the routing). A string is the
+ * user-facing refusal.
+ */
+async function previewInvoice(ready: { lightning?: LightningRails }, invoice: string): Promise<LnPreview | string> {
+  if (!ready.lightning) return 'this wallet has no Lightning rail configured'
+  let feePercent: number
+  try {
+    feePercent = await subdustdFeePercent(ready.lightning.subdustdUrl)
+  } catch (err) {
+    return `subdustd did not answer its fee rule: ${(err instanceof Error ? err.message : String(err))}`
+  }
+  let preview: LnPreview
+  try {
+    preview = lightningPreview(invoice, feePercent)
+  } catch (err) {
+    return `invalid invoice: ${(err instanceof Error ? err.message : String(err))}`
+  }
+  if (!preview.amountSats || preview.amountSats <= 0) return '0-amount invoices are not supported'
+  return preview
+}
+
+function lnFeeRows(p: LnPreview): Array<{ label: string; value: string }> {
+  return [
+    { label: 'Fee', value: `${p.feeSat.toLocaleString()} sats (${p.feePercent}%, routing included)` },
+    { label: 'Total leaving wallet', value: `${p.totalSat.toLocaleString()} sats` },
+  ]
+}
+
+function lnRailNote(_p: LnPreview): string {
+  return "Paid through subdustd's atomic swap: the total above leaves your wallet and subdustd pays the Lightning routing. The swap spends whole coins worth at least the total plus dust, and the excess comes straight back as one coin. If the payment fails, the funds come back."
 }

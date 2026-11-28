@@ -1,24 +1,23 @@
 import type { Database } from 'bun:sqlite'
-import { NetworkError, type ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { Wallet } from '@arkade-os/sdk'
 
 import { NwcError } from '../lib/errors'
 import { recordNwcLn } from '../history'
 import { issueInvoice, type IssuedInvoice } from '../ln_receive'
+import type { LightningRails } from '../ln_send'
 import { msatsToSats, satsToMsats } from '../lib/msat'
 import type { Connection } from '../nostr/connections'
 
 export interface MakeInvoiceDeps {
-  swaps: ArkadeSwaps
+  /** Undefined when no Lightning rails are configured (Ark-only bridge). Receives use subdustd. */
+  lightning?: Pick<LightningRails, 'subdustdUrl'>
   db: Database
   conn: Connection
   eventId: string
-  /** Ark wallet — sub-dust receives are paid out to its address by Boltz. */
+  /** Ark wallet — the receive is claimed to its address. */
   wallet: Wallet
-  /** ASP (arkd) REST base — the atomic sub-dust receive needs server params. */
+  /** ASP (arkd) REST base — the claim needs server params. */
   arkServerUrl: string
-  /** Boltz REST base (no /v2 suffix). */
-  boltzApiUrl: string
 }
 
 export async function handleMakeInvoice(
@@ -42,21 +41,21 @@ export async function handleMakeInvoice(
     throw new NwcError('OTHER', 'description_hash must be a 32-byte hex SHA256')
   }
 
-  // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: a Boltz
-  // reverse swap ≥ dust, the atomic sub-dust receive below it. We return the
-  // invoice immediately; the row stays pending until settlement flips it —
-  // via onSwapCompleted → syncSwapToDb (boltz.ts) for the swap branch, via
-  // reconcileAtomicReceives (no swap object → no settlement event) for the
-  // sub-dust branch.
+  // issueInvoice (src/ln_receive.ts) is the shared LN-receive core: an atomic
+  // receive against subdustd for every amount (D10). We return the invoice
+  // immediately; the row stays pending until reconcileAtomicReceives flips it
+  // (matched by payment hash — there is no settlement event of its own).
+  if (!deps.lightning) throw new NwcError('NOT_IMPLEMENTED', 'this wallet has no Lightning rail configured')
   let issued: IssuedInvoice
   try {
-    issued = await issueInvoice(deps, { amountSats, description, descriptionHash })
+    issued = await issueInvoice(
+      { wallet: deps.wallet, subdustdUrl: deps.lightning.subdustdUrl, arkServerUrl: deps.arkServerUrl, db: deps.db },
+      { amountSats, description, descriptionHash },
+    )
   } catch (err) {
-    if (err instanceof NetworkError) {
-      const boltzMessage = (err.errorData as { error?: string } | undefined)?.error
-      throw new NwcError('OTHER', `boltz rejected the request: ${boltzMessage ?? err.message}`)
-    }
-    throw err
+    // subdustd refuses what it cannot fund right now (503) rather than hold a
+    // payer's HTLC it would have to cancel.
+    throw new NwcError('OTHER', `cannot issue an invoice right now: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   const createdAt = Math.floor(Date.now() / 1000)
@@ -85,7 +84,8 @@ export async function handleMakeInvoice(
       amountMsat,
       feesPaidMsat,
       description ?? null,
-      issued.kind === 'swap' ? issued.swapId : null,
+      // NULL: atomic receives match their row by payment hash (reconcileAtomicReceives).
+      null,
       createdAt,
       issued.expiresAt,
     )

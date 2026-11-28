@@ -64,6 +64,9 @@ export class VaultIndexer implements IndexerProvider {
   getSubscription(): never {
     offlineUnavailable('getSubscription')
   }
+  getFilteredSubscription(): never {
+    offlineUnavailable('getFilteredSubscription')
+  }
   getVtxos(): never {
     offlineUnavailable('getVtxos')
   }

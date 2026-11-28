@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { MIN_CHECKPOINT_EXIT_DELAY_SECONDS } from '../../src/wallet'
+import { CSVMultisigTapscript } from '@arkade-os/sdk'
+import { hex } from '@scure/base'
+import { assertCheckpointExitDelay, MIN_CHECKPOINT_EXIT_DELAY_SECONDS } from '../../src/wallet'
 
 // The scenario under guard: arkd's stock 24h checkpoint exit delay (86400s)
 // travels to us inside a BIP-68 relative timelock, which counts in 512-second
@@ -34,5 +36,27 @@ describe('checkpoint exit delay floor', () => {
     expect(
       ARKD_NOMINAL_CHECKPOINT_EXIT_DELAY - MIN_CHECKPOINT_EXIT_DELAY_SECONDS,
     ).toBeLessThan(SECONDS_PER_TIMELOCK_UNIT)
+  })
+
+  // SDK 0.5 no longer enforces this (its floor is 512s), so the bridge does.
+  describe('assertCheckpointExitDelay (bridge-side since SDK 0.5)', () => {
+    const tapscript = (timelock: { type: 'seconds' | 'blocks'; value: bigint }) =>
+      hex.encode(CSVMultisigTapscript.encode({ timelock, pubkeys: [new Uint8Array(32).fill(2)] }).script)
+
+    test("accepts arkd's stock 24h as encoded (86016s)", () => {
+      expect(() => assertCheckpointExitDelay({ checkpointTapscript: tapscript({ type: 'seconds', value: 86016n }) })).not.toThrow()
+    })
+
+    test('rejects one 512s unit below the floor — the ASP shortening our reaction window', () => {
+      expect(() => assertCheckpointExitDelay({ checkpointTapscript: tapscript({ type: 'seconds', value: 85504n }) })).toThrow(
+        'checkpoint exit delay rejected: 85504 seconds is below the 86016s floor',
+      )
+    })
+
+    test('rejects a block-based delay on mainnet', () => {
+      expect(() => assertCheckpointExitDelay({ checkpointTapscript: tapscript({ type: 'blocks', value: 144n }) })).toThrow(
+        'checkpoint exit delay rejected',
+      )
+    })
   })
 })

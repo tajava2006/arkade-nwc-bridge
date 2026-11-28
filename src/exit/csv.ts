@@ -1,7 +1,7 @@
 import { hex } from '@scure/base'
 import {
+  CSVMultisigTapscript,
   VtxoScript,
-  type CSVMultisigTapscript,
   type ConditionCSVMultisigTapscript,
 } from '@arkade-os/sdk'
 
@@ -28,12 +28,33 @@ export interface CsvPathStatus {
   path: ExitPath
 }
 
+/**
+ * The exit paths WE can take: a plain CSV multisig over exactly our key. A
+ * wallet coin has one (its own exit), an atomic shared vtxo one (`uexit`, the
+ * funder's), but a swap lockup like a VHTLC has several CSV leaves — the
+ * provider's claim (preimage + provider), a refund that still needs the
+ * provider's signature, and the client-only `unilateralRefundWithoutReceiver`
+ * — and only the last is ours to sign. Picking the first one whose timelock
+ * elapsed would hand the sweep a leaf it cannot satisfy (found with a solver
+ * lockup, SM-55; kept because any multi-leaf script can do it). Without `ourXOnly`, every exit path
+ * (display / estimates that don't care whose it is).
+ */
+export function exitPathsFor(tapTreeHex: string, ourXOnly?: Uint8Array): ExitPath[] {
+  const exits = VtxoScript.decode(hex.decode(tapTreeHex)).exitPaths()
+  if (!ourXOnly) return exits
+  const ours = hex.encode(ourXOnly)
+  return exits.filter(
+    (p) => CSVMultisigTapscript.is(p) && p.params.pubkeys.length === 1 && hex.encode(p.params.pubkeys[0]!) === ours,
+  )
+}
+
 export function csvPathStatuses(
   tapTreeHex: string,
   confirmedAt: BlockTime,
   tip: BlockTime,
+  ourXOnly?: Uint8Array,
 ): CsvPathStatus[] {
-  const exits = VtxoScript.decode(hex.decode(tapTreeHex)).exitPaths()
+  const exits = exitPathsFor(tapTreeHex, ourXOnly)
   return exits.map((path) => {
     const { type, value } = path.params.timelock
     const need = Number(value)
@@ -43,11 +64,12 @@ export function csvPathStatuses(
   })
 }
 
-/** First exit path whose timelock has elapsed — mirrors the SDK's availableExitPath. */
+/** First exit path whose timelock has elapsed — of the ones we can sign alone when `ourXOnly` is given. */
 export function availableExitPath(
   tapTreeHex: string,
   confirmedAt: BlockTime,
   tip: BlockTime,
+  ourXOnly?: Uint8Array,
 ): ExitPath | undefined {
-  return csvPathStatuses(tapTreeHex, confirmedAt, tip).find((s) => s.satisfied)?.path
+  return csvPathStatuses(tapTreeHex, confirmedAt, tip, ourXOnly).find((s) => s.satisfied)?.path
 }

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { Database } from 'bun:sqlite'
 import {
+  claimWebLnSend,
   failWebLn,
   formatHistoryCursor,
   listHistoryPage,
@@ -10,7 +11,6 @@ import {
   recordNwcLn,
   recordOffboard,
   recordOnboardPending,
-  recordWebLnPending,
   settleOnboard,
   settleWebLn,
   sweepInterruptedWebSends,
@@ -165,12 +165,12 @@ describe('record helpers', () => {
   })
 
   test('web_ln: pending → settled, and a retry of the same invoice resets the row', () => {
-    recordWebLnPending(db, { paymentHash: 'ph', amountMsat: 77_000 })
-    failWebLn(db, 'ph', 'boltz: routing failed')
+    expect(claimWebLnSend(db, { paymentHash: 'ph', amountMsat: 77_000 })).toBe('claimed')
+    failWebLn(db, 'ph', 'routing failed')
     expect(allRows()[0]!.state).toBe('failed')
 
     // Same bolt11 retried: one invoice stays one row, back to pending.
-    recordWebLnPending(db, { paymentHash: 'ph', amountMsat: 77_000 })
+    expect(claimWebLnSend(db, { paymentHash: 'ph', amountMsat: 77_000 })).toBe('claimed')
     const rows = allRows()
     expect(rows.length).toBe(1)
     expect(rows[0]!.state).toBe('pending')
@@ -181,9 +181,24 @@ describe('record helpers', () => {
     expect(allRows()[0]!.txid).toBe('ark-txid')
   })
 
+  test('web_ln: a second confirm of an invoice in flight or paid leaves the row alone', () => {
+    // 2026-11-28 mainnet: a double-submitted /send confirm. The second request
+    // re-took the row, hit the swap's duplicate-hash refusal, and its failWebLn
+    // marked the invoice failed while the first one paid it.
+    expect(claimWebLnSend(db, { paymentHash: 'ph', amountMsat: 5_000_000 })).toBe('claimed')
+    expect(claimWebLnSend(db, { paymentHash: 'ph', amountMsat: 5_000_000 })).toBe('pending')
+    settleWebLn(db, 'ph', { feesMsat: 25_000, txid: 'ark-txid' })
+    expect(allRows()[0]!.state).toBe('settled')
+
+    expect(claimWebLnSend(db, { paymentHash: 'ph', amountMsat: 5_000_000 })).toBe('settled')
+    expect(allRows().length).toBe(1)
+    expect(allRows()[0]!.state).toBe('settled')
+    expect(allRows()[0]!.fees_msat).toBe(25_000)
+  })
+
   test('sweepInterruptedWebSends closes only pending web_ln rows', () => {
-    recordWebLnPending(db, { paymentHash: 'stuck', amountMsat: 1000 })
-    recordWebLnPending(db, { paymentHash: 'done', amountMsat: 1000 })
+    claimWebLnSend(db, { paymentHash: 'stuck', amountMsat: 1000 })
+    claimWebLnSend(db, { paymentHash: 'done', amountMsat: 1000 })
     settleWebLn(db, 'done', { feesMsat: 0 })
     recordNwcLn(db, { direction: 'out', requestEventId: 'ev', amountMsat: 1000, createdAt: 1 })
 

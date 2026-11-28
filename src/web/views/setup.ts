@@ -1,23 +1,17 @@
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
-import {
-  ARK_SERVER_URL,
-  BOLTZ_API_URL,
-  OFFICIAL_ARK_SERVER_URL,
-  OFFICIAL_BOLTZ_API_URL,
-} from '../../defaults'
+import { ARK_SERVER_URL } from '../../defaults'
 
-export type ServerChoice = 'hoppe' | 'official' | 'custom'
+export type ServerChoice = 'hoppe' | 'custom'
 
 export function setupView(args?: {
   error?: string
   pastedNsec?: string
   // Which server radio is checked. Default the operator's own (`hoppe`).
   choice?: ServerChoice
-  // Custom Ark/Boltz inputs, preserved across error re-renders.
+  // Custom Ark input, preserved across error re-renders.
   customArk?: string
-  customBoltz?: string
-  // data/config.json pins ark/boltz → it overrides the chosen row at runtime.
+  // data/config.json pins the Ark server → it overrides the chosen row at runtime.
   configPinned?: boolean
 }): RawHtml {
   const choice = args?.choice ?? 'hoppe'
@@ -45,7 +39,7 @@ export function setupView(args?: {
         treat it as a wallet for small, everyday spending amounts only.
       </div>
 
-      <p>This bridge needs the server it will talk to (an Ark + Boltz pair) and an Ark identity (nsec). Both are set once, here. The <strong>server choice is then locked to this wallet</strong> — changing it means draining the funds and starting over from a fresh database (there is no multi-server wallet). The nsec is stored in this machine's SQLite file and never sent to the browser again after this flow.</p>
+      <p>This bridge needs the Ark server it will talk to and an Ark identity (nsec). Both are set once, here. The <strong>server choice is then locked to this wallet</strong> — changing it means draining the funds and starting over from a fresh database (there is no multi-server wallet). The nsec is stored in this machine's SQLite file and never sent to the browser again after this flow.</p>
 
       ${args?.error ? html`<p style="color:#c00"><strong>${args.error}</strong></p>` : null}
 
@@ -53,27 +47,19 @@ export function setupView(args?: {
         <div class="setup-server">
           <h2>Server</h2>
           ${args?.configPinned
-            ? html`<p class="note bad"><code>data/config.json</code> pins the server URLs, so it overrides this choice at runtime — what you pick here is only recorded.</p>`
+            ? html`<p class="note bad"><code>data/config.json</code> pins the Ark server, so it overrides this choice at runtime — what you pick here is only recorded.</p>`
             : null}
 
           <label class="opt"><input type="radio" name="server_choice" value="hoppe" ${checked('hoppe')} /> This bridge's operator — recommended</label>
-          <p class="note muted">${ARK_SERVER_URL} + ${BOLTZ_API_URL}<br />Full <strong>atomic sub-dust</strong> support — Lightning swaps for <strong>any amount below the 330-sat dust limit, down to a 1-sat zap</strong>, work here.</p>
+          <p class="note muted">${ARK_SERVER_URL}<br />Lightning runs on the operator's own atomic swap server, so <strong>any amount, down to a 1-sat zap</strong>, works in both directions, with no third party in the refund path.</p>
           <p class="note muted">A one-person server, so liquidity is finite: <strong>sending out of Ark</strong> — a cooperative offboard to the chain, or a Lightning payment — is capped at what the operator has stocked. That does <strong>not</strong> make it custodial. In Ark your ownership is the <strong>unilateral-exit</strong> right, not the operator's cooperation: whatever the server's liquidity, you can move <strong>every sat you put here</strong> onto the chain yourself, without the operator — only <em>cooperative</em> exit is liquidity-bound. Funds coming <strong>in</strong> have no cap.</p>
 
-          <label class="opt"><input type="radio" name="server_choice" value="official" ${checked('official')} /> Official Arkade (Ark Labs)</label>
-          <p class="note muted">${OFFICIAL_ARK_SERVER_URL} + ${OFFICIAL_BOLTZ_API_URL}<br />Standard swaps, offboarding, full balance drain and unilateral exit all work. But the official Boltz has <strong>no sub-dust endpoints</strong>, so anything below the 330-sat dust limit (a 1-sat zap, say) won't swap.</p>
-          <p class="note muted">Paste that same official Arkade wallet's nsec (below) and the bridge shows <em>its</em> balance too — the same key on the same server is the same wallet. Catch: only with <strong>delegation turned OFF</strong>. An Ark address is a script address, and delegation adds a tapleaf that changes the address itself, so a delegation-on wallet lands on a different address the bridge never sees. To try it: create a fresh official Arkade wallet, switch delegation off, then fund it — that one is tracked correctly.</p>
-
-          <label class="opt"><input type="radio" name="server_choice" value="custom" ${checked('custom')} /> Custom — your own Ark + Boltz</label>
-          <p class="note muted">Nothing can verify a pair is matched — an Ark server doesn't advertise which Boltz serves it — so <strong>make sure both belong to the same operator</strong>. A mismatch is accepted at setup but misbehaves later. (Fields below are used only with this option.)</p>
+          <label class="opt"><input type="radio" name="server_choice" value="custom" ${checked('custom')} /> Custom — your own Ark server</label>
+          <p class="note muted">Ark only: Lightning needs that server's operator to run the matching swap services, configured in <code>data/config.json</code> (<code>lightning</code>). Without them the wallet works for Ark sends, onchain deposits and withdrawals, and unilateral exit. (The field below is used only with this option.)</p>
           <div class="setup-custom">
             <label>
               Ark server URL
               <input type="text" name="ark_url" placeholder="https://ark.example.com" value="${args?.customArk ?? ''}" autocomplete="off" spellcheck="false" />
-            </label>
-            <label>
-              Boltz API URL
-              <input type="text" name="boltz_url" placeholder="https://boltz.example.com" value="${args?.customBoltz ?? ''}" autocomplete="off" spellcheck="false" />
             </label>
           </div>
         </div>
@@ -118,7 +104,7 @@ export function setupGeneratedView(args: { nsec: string }): RawHtml {
 }
 
 // Standalone version for the "wallet is still booting" interstitial after
-// /setup POST returns — the wallet/boltz/nostr bring-up is already done by
+// /setup POST returns — the wallet/Lightning/nostr bring-up is already done by
 // the time the response renders, so this is mainly a tidy success page.
 export function setupImportedView(): RawHtml {
   return layout({

@@ -147,12 +147,21 @@ function outpointKey(v: { txid: string; vout: number }): string {
   return `${v.txid}:${v.vout}`
 }
 
-/** virtualStatus.batchExpiry comes in ms from the SDK; the vault stores unix seconds. */
-export function expirySec(v: { virtualStatus?: unknown }): number | null {
-  const raw = (v.virtualStatus as { batchExpiry?: number | bigint } | undefined)?.batchExpiry
-  if (raw === undefined || raw === null) return null
-  const n = Number(raw)
-  return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+/** The vault stores unix seconds; SDK 0.5 carries the batch expiry as `expiresAt` (a Date). */
+export function expirySec(v: { expiresAt?: Date }): number | null {
+  return v.expiresAt ? Math.floor(v.expiresAt.getTime() / 1000) : null
+}
+
+/**
+ * The vault's status column, in the 0.4 `virtualStatus.state` vocabulary the
+ * exit views and GC already read ('swept' above all). SDK 0.5 dropped that
+ * object for flat flags; this maps them back.
+ */
+export function vtxoStatus(v: { isSpent?: boolean; isSwept?: boolean; isPreconfirmed?: boolean }): string {
+  if (v.isSpent) return 'spent'
+  if (v.isSwept) return 'swept'
+  if (v.isPreconfirmed) return 'preconfirmed'
+  return 'settled'
 }
 
 function toSnapshot(v: ExtendedVirtualCoin, chain: ChainTx[]): VaultVtxoSnapshot {
@@ -163,7 +172,7 @@ function toSnapshot(v: ExtendedVirtualCoin, chain: ChainTx[]): VaultVtxoSnapshot
     source: 'wallet',
     script: v.script,
     tapTree: hex.encode(v.tapTree),
-    status: v.virtualStatus?.state ?? 'unknown',
+    status: vtxoStatus(v),
     expiresAt: expirySec(v),
     chain,
   }
@@ -324,9 +333,9 @@ export async function syncProofs(
     }
     // Our own exit engine explains (or still needs) some disappearances
     // before the server is even asked. An unrolled vtxo leaves the live
-    // list while the exit is still in flight (our own doing —
-    // installUnrolledVtxoFilter in wallet.ts; arkd itself never
-    // reclassifies an unrolled row) — sweep reads the vault row, so GC
+    // list while the exit is still in flight (the SDK's default read drops
+    // unrolled coins; arkd itself never reclassifies an unrolled row) —
+    // sweep reads the vault row, so GC
     // must not touch it (under the old unconditional GC this could
     // strand a ready-mode exit). And a completed exit (state 'swept',
     // sweep broadcast by US) is its own evidence — without this check

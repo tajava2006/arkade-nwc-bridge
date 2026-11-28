@@ -11,13 +11,14 @@ import {
   type Identity,
   type TapLeafScript,
 } from '@arkade-os/sdk'
+import type { ArkAddress } from '@arkade-os/sdk'
 import type { AtomicVtxoScript } from './script'
 import type { AtomicOutput } from './split'
 
 // Deterministic tx builders + presign for the atomic sub-dust protocol
 // (ATOMIC_SUBDUST_PLAN.md §3.2, §5). Formalizes the exact flow proven in spikes
 // #01 (claim/refund/cancel) and #02 (uexit sweep). The wire format is PSBT
-// base64 so the boltz vendored copy (§8 [#03]) uses these functions unchanged.
+// base64 so the subdustd vendored copy (§8 [#03]) uses these functions unchanged.
 
 // ── wire format ────────────────────────────────────────────────────────────
 export const encodePsbt = (tx: Transaction): string => base64.encode(tx.toPSBT())
@@ -53,7 +54,7 @@ function arkInput(shared: SharedVtxo, leaf: TapLeafScript): ArkTxInput {
  * rebuild whose txid the caller already matched, so a sig under `pubkey` can
  * only be over that leaf — a pubkey-presence check is equivalent to a leaf-hash
  * match here, and avoids importing @scure/btc-signer's tapLeafHash (which would
- * mix btc-signer versions against the SDK in the boltz vendored copy).
+ * mix btc-signer versions against the SDK in the subdustd vendored copy).
  */
 function hasSig(tx: Transaction, i: number, pubkey: Uint8Array): boolean {
   const input = tx.getInput(i)
@@ -372,7 +373,7 @@ export function cancelSpend(
 /**
  * Fund a shared vtxo: the funder spends one or two of its own regular vtxos
  * WHOLE into the 4-leaf shared output (which MUST be `outputs[0]`) — no funding
- * change — and submits/finalizes the offchain tx. For a no-Wallet funder (boltz
+ * change — and submits/finalizes the offchain tx. For a no-Wallet funder (subdustd
  * on receive); a Wallet-backed funder can use `Wallet.sendBitcoin` instead. Each
  * `funderInput` is one of the funder's vtxos spent via its forfeit leaf
  * (DefaultVtxo.Script.forfeit); one checkpoint is produced per input. Returns
@@ -448,3 +449,29 @@ export function buildUexitSweep(args: UexitSweepArgs): Transaction {
   tx.addOutput({ script: args.outputScript, amount: BigInt(out) })
   return tx
 }
+
+// ── poisoned-txid recovery (shared by the funder's send refund and the server's receive refund) ──
+/**
+ * arkd rejects a refund submitted before chain MTP passes T — and that rejected
+ * arkTxid is then POISONED: later submits ACK but never register (mainnet
+ * false-refund 2026-07-17). The tx is deterministic in (input, leaf, outputs),
+ * so the only way to a fresh txid is a different output split. Attempt 1 is the
+ * clean single output; the rest split V across a regular and a sub-dust output
+ * to the same owner (same total, new txid), with the regular part kept ≥ dust.
+ */
+export function freshTxidAttempts(ourAddr: ArkAddress, value: number, dust: number): AtomicOutput[][] {
+  const maxK = Math.min(20, value - dust)
+  const attempts: AtomicOutput[][] = [[{ script: ourAddr.pkScript, amount: BigInt(value) }]]
+  for (let k = 1; k <= maxK; k++) {
+    attempts.push([
+      { script: ourAddr.pkScript, amount: BigInt(value - k) },
+      { script: ourAddr.subdustPkScript, amount: BigInt(k) },
+    ])
+  }
+  return attempts
+}
+
+/** arkd's answer for a CLTV refund submitted before the chain clock reached T. */
+export const isBlocktimeLocked = (e: unknown): boolean =>
+  e instanceof Error &&
+  (/FORFEIT_CLOSURE_LOCKED/.test(e.message) || (e as { code?: number }).code === 11)

@@ -1,4 +1,4 @@
-import { isRecoverable, isSpendable, type VirtualCoin } from '@arkade-os/sdk'
+import { canRecoverOnchain, canSpendOffchain, type VirtualCoin } from '@arkade-os/sdk'
 
 // Funding-input eligibility (ATOMIC_SUBDUST_PLAN.md §3.5). The funder spends one
 // regular vtxo into the shared 4-leaf output. It must be:
@@ -23,17 +23,17 @@ export interface EligibilityArgs {
   marginSecs: number
 }
 
-// batchExpiry is milliseconds in the wallet model but the raw indexer can hand
-// back seconds; normalize by magnitude (a unix ms timestamp is ~1e12+).
+// SDK 0.5: the batch expiry is `expiresAt` (a Date) on the coin itself.
 function batchExpirySecs(vtxo: VirtualCoin): number | undefined {
-  const raw = vtxo.virtualStatus.batchExpiry
-  if (raw === undefined) return undefined
-  return raw > 1e12 ? Math.floor(raw / 1000) : raw
+  return vtxo.expiresAt ? Math.floor(vtxo.expiresAt.getTime() / 1000) : undefined
 }
 
 export function isEligibleFundingInput(vtxo: VirtualCoin, args: EligibilityArgs): FundingEligibility {
-  if (!isSpendable(vtxo)) return no('not spendable (spent/pending)')
-  if (isRecoverable(vtxo)) return no('recoverable (swept) — arkd rejects it as an input')
+  // SDK 0.5 capability predicates. canSpendOffchain is false for swept/expired/unrolled too,
+  // so test recoverable first to keep the precise reason.
+  const now = { timestamp: new Date() }
+  if (canRecoverOnchain(vtxo, now)) return no('recoverable (swept/expired) — arkd rejects it as an input')
+  if (!canSpendOffchain(vtxo, now)) return no('not spendable offchain (spent/pending/unrolled)')
   if (vtxo.value < args.dust) return no(`sub-dust value ${vtxo.value} < dust ${args.dust}`)
 
   const expiry = batchExpirySecs(vtxo)

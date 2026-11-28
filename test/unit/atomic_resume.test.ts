@@ -39,7 +39,7 @@ const deps: AtomicSendDeps = {
   wallet: {} as Wallet, // never reached — refund is injected, status is fetch
   arkServerUrl: 'http://ark',
   db: undefined as never, // set in makeDeps
-  boltzApiUrl: 'http://boltz',
+  subdustdUrl: 'http://boltz',
 }
 const makeDeps = (): AtomicSendDeps => ({ ...deps, db })
 
@@ -287,7 +287,7 @@ describe('resumeAtomicSends', () => {
     }
     await resumeAtomicSends(deps, noRefund, spent)
     expect(calls.length).toBe(1)
-    expect(calls[0]!.kind).toBe('send-subdust')
+    expect(calls[0]!.kind).toBe('send-ln')
     expect(calls[0]!.text).toContain('after restart')
     expect(calls[0]!.text).toContain('21 sats')
 

@@ -1,5 +1,4 @@
-import type { ArkInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
-import type { FeesResponse } from '@arkade-os/boltz-swap'
+import type { OperatorInfo, ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { html, raw, type RawHtml } from '../../lib/html'
 import { layout } from './layout'
 import { copyable, localTime } from './ui'
@@ -7,7 +6,6 @@ import type { OffboardRow } from '../../offboards'
 import {
   classifyVtxos,
   isExpiringSoon,
-  lnDrainInvoiceSat,
   offboardFeeSat,
   offboardMaxSat,
   type SendData,
@@ -29,9 +27,9 @@ function fmtSats(n: number): string {
 }
 
 function expiryHint(v: ExtendedVirtualCoin): RawHtml {
-  const expiry = v.virtualStatus.batchExpiry
+  const expiry = v.expiresAt
   if (!expiry) return html`<span class="muted">—</span>`
-  const ms = expiry - Date.now()
+  const ms = expiry.getTime() - Date.now()
   if (ms <= 0) return html`<span class="muted">expired</span>`
   const days = Math.floor(ms / 86_400_000)
   const hours = Math.floor((ms % 86_400_000) / 3_600_000)
@@ -119,13 +117,12 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
  * Standing "how do I empty this wallet" guidance, independent of the Max
  * button. Onchain: the offboard rail is the one path that always works — a
  * settlement round consumes sub-dust and swept/expired VTXOs directly, no
- * Refresh needed. Lightning: the drain works by making the invoice amount
- * fit the balance (lnDrainInvoiceSat) and needs a Refresh first whenever
- * sub-dust/swept funds exist, since those can't back an offchain send.
- * Amounts are computed from arkInfo + the boltz fee table, never hardcoded:
- * either fee config can change without this copy going stale.
+ * Refresh needed. Lightning can't empty the wallet: the atomic send funds
+ * whole coins worth at least invoice + fee + dust and the excess (≥ dust)
+ * comes back as one coin, so dust always stays. Amounts come from arkInfo,
+ * never hardcoded.
  */
-function drainHint(arkInfo: ArkInfo, fees: FeesResponse, buckets: VtxoBuckets): RawHtml {
+function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets): RawHtml {
   if (buckets.roundTotalSat === 0) return html``
   const fee = offboardFeeSat(arkInfo, buckets.roundTotalSat)
   const dust = Number(arkInfo.dust)
@@ -149,28 +146,17 @@ function drainHint(arkInfo: ArkInfo, fees: FeesResponse, buckets: VtxoBuckets): 
             of 1–${(dust - 1).toLocaleString()} sats is rejected before anything moves.
           </p>`
 
-  // LN drain targets the full balance (Refresh is a free round, so the total
-  // is unchanged by it — the same invoice amount stays valid before/after).
-  const lnInvoice = lnDrainInvoiceSat(fees, buckets.roundTotalSat)
   const needsRefresh = buckets.subdustSat + buckets.recoverableSat > 0
-  const ln =
-    lnInvoice === null
-      ? html``
-      : needsRefresh
-        ? html`
-            <p class="muted">
-              <strong>Emptying the wallet — Lightning:</strong> hit Refresh first (free, the
-              total doesn't change), then pay a self-made invoice of exactly
-              <strong>${fmtSats(lnInvoice)}</strong>. Sub-dust/swept funds can't back an LN
-              send, so skipping the Refresh just fails cleanly before anything moves.
-            </p>`
-        : html`
-            <p class="muted">
-              <strong>Emptying the wallet — Lightning:</strong> pay a self-made invoice of
-              exactly <strong>${fmtSats(lnInvoice)}</strong> — the bridge funds the swap with
-              the entire balance, so nothing is left behind (a rounding residue of up to 2 sats
-              is folded into the swap fee instead of stranding as sub-dust).
-            </p>`
+  const ln = html`
+    <p class="muted">
+      <strong>Emptying the wallet — Lightning:</strong> not all the way. A Lightning send spends whole
+      coins worth at least the invoice + fee + ${fmtSats(dust)}, and the excess comes back as one coin,
+      so at least ${fmtSats(dust)} stays. ${needsRefresh
+        ? html`Hit Refresh first (free, the total doesn't change) — sub-dust/swept funds can't back an
+            LN send. `
+        : html``}The confirm page shows the exact total (invoice + fee) before anything moves; to take
+      the rest out, use the onchain withdraw above.
+    </p>`
 
   return html`${onchain}${ln}`
 }
@@ -184,7 +170,7 @@ function drainHint(arkInfo: ArkInfo, fees: FeesResponse, buckets: VtxoBuckets): 
 export function renderBreakdownFragment(value: SendData | null): RawHtml {
   if (!value) return html`<p class="muted">Loading…</p>`
   const buckets = classifyVtxos(value.vtxos, value.arkInfo.dust)
-  return html`${breakdownTable(buckets)}${drainHint(value.arkInfo, value.fees, buckets)}`
+  return html`${breakdownTable(buckets)}${drainHint(value.arkInfo, buckets)}`
 }
 
 export function sendView(args: {
@@ -285,7 +271,11 @@ export function sendConfirmView(args: {
         )}
       </table>
       ${args.note ? html`<p class="muted">${args.note}</p>` : ''}
-      <form method="post" action="/send/confirm">
+      <form
+        method="post"
+        action="/send/confirm"
+        onsubmit="var b = this.querySelector('button'); if (b.disabled) return false; b.disabled = true; b.textContent = 'Sending…';"
+      >
         <input type="hidden" name="destination" value="${args.destination}" />
         <input type="hidden" name="amount" value="${args.amountField}" />
         <input type="hidden" name="max" value="${args.isMax ? '1' : ''}" />
@@ -298,18 +288,19 @@ export function sendConfirmView(args: {
   })
 }
 
-/** Blocking result for Ark / LN sends (instant–seconds). */
+/** Blocking result for Ark / LN sends (instant–seconds). 'pending' = an earlier send of the same thing is still running. */
 export function sendResultView(args: {
   label: string
-  ok: boolean
+  ok: boolean | 'pending'
   detail: string
 }): RawHtml {
+  const [pill, word] = args.ok === 'pending' ? ['pending', 'In progress'] : args.ok ? ['settled', 'Sent'] : ['failed', 'Failed']
   return layout({
     title: 'Send',
     current: 'send',
     body: html`
-      <p class="pill ${args.ok ? 'settled' : 'failed'}" style="display:inline-block">
-        ${args.ok ? 'Sent' : 'Failed'} · ${args.label}
+      <p class="pill ${pill}" style="display:inline-block">
+        ${word} · ${args.label}
       </p>
       <pre>${args.detail}</pre>
       <p><a href="/send">Back to send</a></p>

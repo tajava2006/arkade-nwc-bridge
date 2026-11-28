@@ -10,8 +10,8 @@ cd "$(dirname "$0")"
 echo "== JS 의존성 (전부 latest) =="
 bun update --latest
 
-# package.json의 `overrides`가 ark 커플링을 지킨다: @arkade-os/boltz-swap은 @arkade-os/sdk를
-# 정확한 버전으로 핀하고, 그 sdk는 다시 @noble/curves·@scure/*를 정확한 버전으로 핀한다.
+# package.json의 `overrides`가 ark 커플링을 지킨다: @arkade-os/sdk는 @noble/curves·@scure/*를
+# 정확한 버전으로 핀한다. (D11로 @arkade-os/swap이 빠져 sdk 자체를 핀하던 층은 사라졌다.)
 # 우리가 그보다 앞서 나가면 트리에 같은 라이브러리가 두 벌 생기고, 타입 정체성이 갈려
 # 컴파일이 깨진다(운 나쁘면 런타임에 조용히 갈린다). --latest는 dependencies는 밀지만
 # overrides는 안 건드리므로 해소는 유지된다.
@@ -23,7 +23,7 @@ echo "== ark 커플링 검사 =="
 node - <<'JS'
 const ours = require('./package.json').overrides || {}
 const claims = {} // name -> [{owner, range}]
-for (const owner of ['@arkade-os/boltz-swap', '@arkade-os/sdk']) {
+for (const owner of ['@arkade-os/sdk']) {
   let deps
   try {
     deps = require(`./node_modules/${owner}/package.json`).dependencies || {}
@@ -67,4 +67,7 @@ bun run test
 
 echo ""
 echo "⚠️ @arkade-os/* 는 pre-1.0 — minor에도 breaking 가능."
+echo "   SDK가 올라갔으면 regtest 스택에서 bun run test:regtest 도 돌릴 것 —"
+echo "   sdk05_pager(F23: 100개 넘는 지갑을 끝까지 읽나)·sdk05_unrolled(F24: 일방탈출 코인이"
+echo "   잔고·지출 선택·consolidate에서 빠지나)가 bridge가 더는 직접 막지 않는 SDK 동작을 고정한다."
 echo "   운영 배포 전 mainnet 스모크(잔고 조회 + 소액 송금 1회) 할 것."

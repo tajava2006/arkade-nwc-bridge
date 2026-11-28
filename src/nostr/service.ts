@@ -1,6 +1,5 @@
 import type { Database } from 'bun:sqlite'
 import type { Wallet } from '@arkade-os/sdk'
-import type { ArkadeSwaps } from '@arkade-os/boltz-swap'
 import type { SimplePool } from 'nostr-tools/pool'
 import { finalizeEvent, type EventTemplate, type NostrEvent } from 'nostr-tools/pure'
 import { NWCWalletInfo, NWCWalletRequest, NWCWalletResponse } from 'nostr-tools/kinds'
@@ -23,6 +22,7 @@ import { handleGetInfo } from '../handlers/get_info'
 import { handleGetBalance } from '../handlers/get_balance'
 import { handleMakeInvoice } from '../handlers/make_invoice'
 import { handlePayInvoice } from '../handlers/pay_invoice'
+import type { LightningRails } from '../ln_send'
 import { handleLookupInvoice } from '../handlers/lookup_invoice'
 import { handleListTransactions } from '../handlers/list_transactions'
 import { SUPPORTED_METHODS, type SupportedMethod } from '../lib/methods'
@@ -37,7 +37,8 @@ export interface NostrServiceDeps {
   cfg: Config
   db: Database
   wallet: Wallet
-  swaps: ArkadeSwaps
+  /** Lightning rails; undefined = Ark-only (pay_invoice/make_invoice refuse). */
+  lightning?: LightningRails
   /**
    * Shared SimplePool. Same instance the outbox watcher uses — so every
    * subsystem reads listConnectionStatus from one place and the UI
@@ -286,12 +287,11 @@ async function dispatch(
     case 'make_invoice':
       return handleMakeInvoice(
         {
-          swaps: deps.swaps,
+          lightning: deps.lightning,
           db: deps.db,
           conn,
           eventId: event.id,
           wallet: deps.wallet,
-          boltzApiUrl: deps.cfg.boltzApiUrl,
           arkServerUrl: deps.cfg.arkServerUrl,
         },
         params,
@@ -299,12 +299,11 @@ async function dispatch(
     case 'pay_invoice':
       return handlePayInvoice(
         {
-          swaps: deps.swaps,
+          lightning: deps.lightning,
           db: deps.db,
           conn,
           eventId: event.id,
           wallet: deps.wallet,
-          boltzApiUrl: deps.cfg.boltzApiUrl,
           arkServerUrl: deps.cfg.arkServerUrl,
           notify: deps.notify,
         },

@@ -1,49 +1,58 @@
-import { afterEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 
+import { SqliteAtomicSwapRepository } from '../../src/atomic'
 import { issueInvoice } from '../../src/ln_receive'
-import { INVOICE_2000_SAT, fakeInvoiceResponse, makeSwapsStub, makeWalletStub } from '../helpers/mocks'
+import { openTempDb, type TempDb } from '../helpers/db'
+import { makeWalletStub, stubSubdustdReceive } from '../helpers/mocks'
 
-// The sub-dust receive branch now routes through the ATOMIC path
-// (issueAtomicReceive → boltz /v2/subdust/atomic/receive/*), which needs the
-// SDK's ark providers + a live boltz — too coupled to mock here. It's validated
-// end-to-end by the #14 receive drill (atomic_receive_e2e), which replaced the
-// removed non-atomic plain-path unit tests (issueInvoice sub-dust +
-// reconcileSubdustReceives). This file keeps the ≥dust reverse-swap branch,
-// which the atomic change doesn't touch.
+// The LN-receive core (D10): every amount is an atomic receive against
+// subdustd. What this pins offline: the request subdustd gets (amount, our
+// payment hash, the description XOR its hash), the swap persisted before the
+// invoice is handed out (claim secrets must outlive a crash), and the 1:1
+// result. The claim/settle half runs on regtest (subdustd_receive, ln_receive).
 
+const SUBDUSTD = 'http://subdustd.invalid'
 const realFetch = globalThis.fetch
+let temp: TempDb
+beforeEach(() => {
+  temp = openTempDb()
+})
 afterEach(() => {
   globalThis.fetch = realFetch
+  temp.cleanup()
 })
 
-// The ≥dust reverse-swap branch never touches the atomic sub-dust deps; a
-// throwaway db and empty ASP url satisfy the type without being read.
-const noAtomic = { arkServerUrl: '', db: new Database(':memory:') }
+const deps = () => ({ wallet: makeWalletStub(), subdustdUrl: SUBDUSTD, arkServerUrl: 'http://arkd.invalid', db: temp.db })
+const sha256 = (h: string) => createHash('sha256').update(Buffer.from(h, 'hex')).digest('hex')
 
-describe('issueInvoice — ≥dust reverse swap', () => {
-  test('≥dust creates a reverse swap and never touches the sub-dust path', async () => {
-    globalThis.fetch = (async () => {
-      throw new Error('sub-dust path must not be used at/above dust')
-    }) as unknown as typeof fetch
-    const swaps = makeSwapsStub({
-      createLightningInvoice: async (args) => {
-        expect(args.amount).toBe(330)
-        // Real decodable bolt11: issueInvoice decodes it for absoluteExpiry.
-        return fakeInvoiceResponse({ amount: 320, invoice: INVOICE_2000_SAT, paymentHash: 'aa'.repeat(32) })
-      },
+describe('issueInvoice — atomic receive for every amount', () => {
+  for (const amount of [21, 330, 50_000]) {
+    test(`${amount} sats: subdustd mints it, the swap is persisted with our preimage, 1:1`, async () => {
+      const { bodies } = stubSubdustdReceive(SUBDUSTD)
+      const issued = await issueInvoice(deps(), { amountSats: amount, description: 'tea' })
+      expect(bodies).toHaveLength(1)
+      expect(bodies[0]).toMatchObject({ amount, description: 'tea' })
+      expect(bodies[0]!.descriptionHash).toBeUndefined()
+      expect(issued.kind).toBe('subdust')
+      expect(issued.receivedSats).toBe(amount)
+      expect(sha256(issued.preimage)).toBe(issued.paymentHash)
+      expect(bodies[0]!.paymentHash).toBe(issued.paymentHash)
+      const row = new SqliteAtomicSwapRepository(temp.db).getByPaymentHash(issued.paymentHash)
+      expect(row).toMatchObject({ state: 'invoice_issued', amount, preimage: issued.preimage, invoice: issued.invoice })
     })
+  }
 
-    const issued = await issueInvoice(
-      { swaps, wallet: makeWalletStub(), boltzApiUrl: 'http://boltz', ...noAtomic },
-      { amountSats: 330 },
-    )
+  test('a NIP-57 description hash goes alone — the plain description is dropped, never both', async () => {
+    const { bodies } = stubSubdustdReceive(SUBDUSTD)
+    await issueInvoice(deps(), { amountSats: 1_000, description: 'zap', descriptionHash: 'ab'.repeat(32) })
+    expect(bodies[0]!.descriptionHash).toBe('ab'.repeat(32))
+    expect(bodies[0]!.description).toBeUndefined()
+  })
 
-    expect(issued.kind).toBe('swap')
-    if (issued.kind !== 'swap') throw new Error('unreachable')
-    expect(issued.swapId).toBe('swap-id-fake')
-    expect(issued.invoice).toBe(INVOICE_2000_SAT)
-    expect(issued.paymentHash).toBe('aa'.repeat(32))
-    expect(issued.receivedSats).toBe(320) // post-fee on-Ark amount
+  test('a subdustd refusal (float cannot fund it) surfaces and persists nothing', async () => {
+    globalThis.fetch = (async () => new Response('cannot fund a receive right now', { status: 503 })) as unknown as typeof fetch
+    await expect(issueInvoice(deps(), { amountSats: 1_000 })).rejects.toThrow(/503/)
+    expect(new SqliteAtomicSwapRepository(temp.db).list()).toEqual([])
   })
 })

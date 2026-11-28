@@ -77,10 +77,14 @@ describe('computeClaimSplit', () => {
     expect(sum(r.outputs)).toBe(1000n)
   })
 
-  test('rejects a ≥ dust and a + fee > V', () => {
-    expect(() => computeClaimSplit({ funderAddress: funder, claimerAddress: claimer, fundingValue: 1000, amount: 330, dust: DUST })).toThrow(
-      SubdustEdgeError,
-    )
+  test('a ≥ dust (a receive of any size, D10) pays the claimer a regular vtxo', () => {
+    const r = computeClaimSplit({ funderAddress: funder, claimerAddress: claimer, fundingValue: 6000, amount: 5000, dust: DUST })
+    expect(r.outputs[0]).toEqual({ script: claimer.pkScript, amount: 5000n })
+    expect(r.outputs[1]).toEqual({ script: funder.pkScript, amount: 1000n })
+    expect(r.opReturns).toBe(0)
+  })
+
+  test('rejects a + fee > V', () => {
     expect(() => computeClaimSplit({ funderAddress: funder, claimerAddress: claimer, fundingValue: 100, amount: 200, dust: DUST })).toThrow(
       /exceeds funding value/,
     )

@@ -100,16 +100,18 @@ export function faqView(): RawHtml {
         mining fee of your own deposit transaction). Moving <strong>within</strong>
         Ark is free — offchain sends and refreshes cost nothing. Money going
         <strong>out</strong> is charged: onchain withdrawals pay a flat withdraw fee,
-        Lightning sends a percentage swap fee. The live numbers are always shown
-        before you confirm on the <a href="/send">Send tab</a>.
+        Lightning sends pay a small fixed share of the amount (the operator pays
+        the routing out of it). The live numbers are always shown before you
+        confirm on the <a href="/send">Send tab</a>.
       </p>
 
       <h2>Are deposits and withdrawals atomic?</h2>
       <p>
-        Lightning, both directions, runs on the Boltz swap protocol: trustless and
-        atomic. If the counterparty takes one side and fails to deliver the other,
-        the script guarantees a refund after a timeout — nobody can end up holding
-        both sides. Onchain deposits are protected by a timelock of their own: if a
+        Lightning, both directions and any amount, runs on the operator's own swap
+        service, and it is atomic: each payment uses a shared vtxo with pre-signed
+        spends. The preimage that pays one side is the one that settles the other;
+        a failed payment is unwound at once, and a timeout refund covers the rest.
+        Nobody can end up holding both sides. Onchain deposits are protected by a timelock of their own: if a
         deposit is never converted into a VTXO, you reclaim it unilaterally onchain
         once the timelock expires. Onchain withdrawals happen inside a settlement
         round — you give up the VTXO only in the same transaction that creates your

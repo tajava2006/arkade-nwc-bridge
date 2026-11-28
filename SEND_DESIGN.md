@@ -1,5 +1,16 @@
 # SEND_DESIGN.md — bridge-native send
 
+> **2026-11 — Lightning moved off Boltz.** Every Lightning send, any amount,
+> is now the atomic send against the operator's `subdustd` (`src/ln_send.ts`,
+> D11; an intent solver carried dust+ sends briefly before that). The fee is
+> subdustd's fixed share (`src/atomic/fees.ts`, read from `/send/fees` for the
+> preview), and the funding is whole coins worth at least invoice + fee + dust
+> with the excess back as one coin — so an LN send can't empty the wallet
+> (dust stays). Sections that describe Boltz submarine swaps, `boltz.conf` or
+> `FeesResponse` are history; coin selection, the hot pockets, offboard and
+> consolidate-all are unchanged. Record: the operator workspace's
+> `SOLVER_MIGRATION_PLAN.md` (SM-43, SM-46, SM-81).
+
 The bridge already *spends* through NWC `pay_invoice`, but only on behalf of a
 connected Nostr client. This is the design for a **bridge-native send**: the
 operator moves their own funds straight from the web UI, no NWC client in the

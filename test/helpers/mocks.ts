@@ -1,5 +1,5 @@
-// Hand-rolled minimal stubs for @arkade-os/sdk Wallet and
-// @arkade-os/boltz-swap ArkadeSwaps. Cast through `unknown` so we don't have
+// Hand-rolled minimal stubs for the @arkade-os/sdk Wallet and the bridge's
+// Lightning rails. Cast through `unknown` so we don't have
 // to satisfy the full interface — handlers only touch a small slice. If an
 // SDK upgrade changes one of the methods we *do* use, the cast surfaces the
 // drift at the call site rather than silently swallowing it.
@@ -9,18 +9,10 @@ import type {
   Wallet,
   WalletBalance,
   ArkTransaction,
-  ArkInfo,
+  OperatorInfo,
   ExtendedVirtualCoin,
   RestArkProvider,
 } from '@arkade-os/sdk'
-import type {
-  ArkadeSwaps,
-  BoltzSubmarineSwap,
-  CreateLightningInvoiceRequest,
-  CreateLightningInvoiceResponse,
-  SendLightningPaymentRequest,
-  SendLightningPaymentResponse,
-} from '@arkade-os/boltz-swap'
 import { AsyncCache } from '../../src/lib/cache'
 import type { SwrCaches } from '../../src/web/server'
 import type { SendData } from '../../src/send'
@@ -65,19 +57,43 @@ export function makeWalletStub(opts: WalletStubOptions = {}): Wallet {
     async getVtxos() {
       return opts.vtxos ?? []
     },
-    async send(args: { address: string; amount: number }) {
-      return opts.sendImpl ? opts.sendImpl(args) : 'arktxid-stub'
+    async getSpendableVtxos() {
+      return opts.vtxos ?? []
     },
-    // Routed through the same recorder as send(): the spend funnel
-    // (wallet_spend.sendSelected) picks inputs itself and calls sendBitcoin,
-    // so a stub that ignored sendImpl would make every send look like a no-op.
-    async sendBitcoin(args: { address: string; amount: number }) {
-      return opts.sendImpl ? opts.sendImpl(args) : 'arktxid-stub'
+    // SDK 0.5 has one send(): a Recipient, or { recipients, selectedVtxos } — the
+    // explicit-selection form the spend funnel (wallet_spend.sendSelected) uses.
+    // Both land in the same recorder, so neither path looks like a no-op.
+    async send(
+      args:
+        | { address: string; amount: number }
+        | { recipients: { address: string; amount: number }[]; selectedVtxos?: unknown[] },
+    ) {
+      const flat = 'recipients' in args ? { ...args.recipients[0]!, selectedVtxos: args.selectedVtxos } : args
+      return opts.sendImpl ? opts.sendImpl(flat as never) : 'arktxid-stub'
     },
     async settle() {
       return 'settletxid-stub'
     },
+    // The atomic receive puts the wallet's x-only key into the swap script.
+    identity: { xOnlyPublicKey: async () => new Uint8Array(32).fill(7) },
   } as unknown as Wallet
+}
+
+/**
+ * subdustd's /receive/init, offline: records each request body and answers
+ * with `invoice` (default: INVOICE_2000_SAT re-hashed to the request's own
+ * payment hash, so the returned invoice and the stored swap agree).
+ */
+export function stubSubdustdReceive(subdustdUrl: string, invoice?: string): { bodies: Record<string, unknown>[] } {
+  const bodies: Record<string, unknown>[] = []
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url) !== `${subdustdUrl}/v2/subdust/atomic/receive/init`) throw new Error(`unexpected fetch ${url}`)
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    bodies.push(body)
+    const inv = invoice ?? invoiceWithHash(String(body.paymentHash))
+    return new Response(JSON.stringify({ swapId: `swap-${bodies.length}`, invoice: inv }), { status: 201, headers: { 'content-type': 'application/json' } })
+  }) as unknown as typeof fetch
+  return { bodies }
 }
 
 /**
@@ -90,7 +106,7 @@ export function makeArkProviderStub(
   const info = {
     dust: opts.dust ?? 330n,
     fees: { intentFee: opts.intentFee ?? {}, txFeeRate: '1' },
-  } as unknown as ArkInfo
+  } as unknown as OperatorInfo
   return {
     async getInfo() {
       return info
@@ -122,82 +138,6 @@ export function makeSwrCaches(wallet: Wallet, balance: WalletBalance): SwrCaches
   return caches
 }
 
-export interface SwapsStubOptions {
-  createLightningInvoice?: (
-    args: CreateLightningInvoiceRequest,
-  ) => Promise<CreateLightningInvoiceResponse>
-  sendLightningPayment?: (
-    args: SendLightningPaymentRequest,
-  ) => Promise<SendLightningPaymentResponse>
-  createSubmarineSwap?: (args: SendLightningPaymentRequest) => Promise<BoltzSubmarineSwap>
-  waitForSwapSettlement?: (pendingSwap: BoltzSubmarineSwap) => Promise<{ preimage: string }>
-}
-
-export function makeSwapsStub(opts: SwapsStubOptions = {}): ArkadeSwaps {
-  return {
-    createLightningInvoice:
-      opts.createLightningInvoice ??
-      (async () => {
-        throw new Error('createLightningInvoice not stubbed')
-      }),
-    sendLightningPayment:
-      opts.sendLightningPayment ??
-      (async () => {
-        throw new Error('sendLightningPayment not stubbed')
-      }),
-    createSubmarineSwap:
-      opts.createSubmarineSwap ??
-      (async () => {
-        throw new Error('createSubmarineSwap not stubbed')
-      }),
-    waitForSwapSettlement:
-      opts.waitForSwapSettlement ??
-      (async () => {
-        throw new Error('waitForSwapSettlement not stubbed')
-      }),
-    async getFees() {
-      return {
-        submarine: { percentage: 0.1, minerFees: 0 },
-        reverse: { percentage: 0.25, minerFees: { lockup: 0, claim: 0 } },
-      }
-    },
-  } as unknown as ArkadeSwaps
-}
-
-/**
- * A pre-baked pending submarine swap, shaped like createSubmarineSwap's
- * return: ln_send only reads response.address + response.expectedAmount.
- */
-export function fakeSubmarineSwap(
-  overrides: { expectedAmount?: number; address?: string } = {},
-): BoltzSubmarineSwap {
-  return {
-    id: 'swap-id-fake',
-    type: 'submarine',
-    response: {
-      address: overrides.address ?? 'tark1boltzlockup',
-      expectedAmount: overrides.expectedAmount ?? 105,
-    },
-  } as unknown as BoltzSubmarineSwap
-}
-
-/**
- * A pre-baked CreateLightningInvoiceResponse-shaped record. Tests can spread
- * over it to tweak individual fields without re-specifying the rest.
- */
-export function fakeInvoiceResponse(
-  overrides: Partial<CreateLightningInvoiceResponse> = {},
-): CreateLightningInvoiceResponse {
-  return {
-    amount: 99,
-    expiry: Math.floor(Date.now() / 1000) + 3600,
-    invoice: 'lnbcfake',
-    paymentHash: 'ff'.repeat(32),
-    pendingSwap: { id: 'swap-id-fake' },
-    ...overrides,
-  } as unknown as CreateLightningInvoiceResponse
-}
-
 /**
  * 20μBTC = 2000 sat mainnet invoice with a valid bech32 checksum, borrowed
  * from light-bolt11-decoder's own test vectors. Long expired — tests only
@@ -223,3 +163,69 @@ export const INVOICE_21_SAT = reAmount('lnbc210n')
 export const INVOICE_328_SAT = reAmount('lnbc3280n')
 export const INVOICE_NO_AMOUNT = reAmount('lnbc')
 
+
+/**
+ * INVOICE_2000_SAT (or a reAmount variant) with its payment-hash tag replaced,
+ * so a test can know the preimage: the ledger only accepts a preimage that
+ * hashes to the invoice's own payment hash. Same caveat as reAmount — the
+ * signature stops matching, which the decoder never checks.
+ */
+export function invoiceWithHash(paymentHashHex: string, base: string = INVOICE_2000_SAT): string {
+  const { prefix, words } = bech32.decode(base as never, false)
+  const out = [...words]
+  const sigStart = out.length - 104
+  for (let i = 7; i < sigStart; ) {
+    const type = out[i]!
+    const len = out[i + 1]! * 32 + out[i + 2]!
+    if (type === 1 && len === 52) {
+      const hashWords = bech32.toWords(Buffer.from(paymentHashHex, 'hex'))
+      out.splice(i + 3, 52, ...hashWords)
+      return bech32.encode(prefix, out, false)
+    }
+    i += 3 + len
+  }
+  throw new Error('no payment hash tag')
+}
+
+/** A preimage and the INVOICE_2000_SAT-shaped invoice locked to its hash. */
+export function knownPreimageInvoice(base?: string): { preimage: string; paymentHash: string; invoice: string } {
+  const preimage = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex')
+  const paymentHash = new Bun.CryptoHasher('sha256').update(Buffer.from(preimage, 'hex')).digest('hex')
+  return { preimage, paymentHash, invoice: invoiceWithHash(paymentHash, base) }
+}
+
+export interface LightningStubOptions {
+  /** Thrown before any value moved (e.g. LnSendRefused). */
+  payError?: Error
+  /** How the send ends. Default 'paid'. */
+  outcome?: 'paid' | 'failed' | 'unresolved'
+  /** Fee in sats (what left the wallet = invoice + fee). */
+  feeSats?: number
+  /** The preimage a paid send returns. */
+  preimage?: string
+  swapId?: string
+}
+
+/**
+ * The bridge's Lightning rail plus a scripted `send` for handlers that take
+ * one (pay_invoice): the real atomic send needs arkd and subdustd and runs on
+ * regtest; this one returns or throws the way sendLightning does.
+ */
+export function makeLightningStub(opts: LightningStubOptions = {}): {
+  lightning: import('../../src/ln_send').LightningRails
+  send: typeof import('../../src/ln_send').sendLightning
+  paid: string[]
+} {
+  const paid: string[] = []
+  const send: typeof import('../../src/ln_send').sendLightning = async (_deps, invoice) => {
+    if (opts.payError) throw opts.payError
+    paid.push(invoice)
+    const { decodeInvoice } = await import('../../src/lib/bolt11')
+    const { LnSendUnresolved } = await import('../../src/ln_send')
+    if (opts.outcome === 'failed') throw new Error('LN pay failed (FAILURE_REASON_NO_ROUTE)')
+    if (opts.outcome === 'unresolved') throw new LnSendUnresolved('payment outcome unknown — resolving in the background')
+    const sats = decodeInvoice(invoice).amountSats ?? 0
+    return { amount: sats + (opts.feeSats ?? 0), preimage: opts.preimage ?? '', txid: 'arktxid-funding', swapId: opts.swapId ?? 'atomic-swap-1' }
+  }
+  return { lightning: { subdustdUrl: 'http://subdustd.invalid' }, send, paid }
+}

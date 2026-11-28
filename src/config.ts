@@ -1,26 +1,22 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import * as defaults from './defaults'
+import { parseLightningConfig, type LightningConfig } from './lightning_config'
 
 export type { Network } from './defaults'
 
 export interface Config {
   network: defaults.Network
   arkServerUrl: string
-  boltzApiUrl: string
-  /**
-   * boltz `swap.update` WebSocket endpoint (the Rust sidecar). Unset =
-   * derived from the resolved boltzApiUrl as ws(s)://host/v2/ws — the same
-   * single-host path-split convention @arkade-os/boltz-swap already imposes
-   * for its own ws, so every deployment that serves the SDK (public
-   * boltz.exchange, the operator's VPS nginx, the compose-internal
-   * boltz-proxy) already routes /v2/ws to the sidecar and the derivation
-   * just works with no setting anywhere. This override is the escape hatch
-   * for a topology that breaks that convention. Wrong/absent endpoint just
-   * means no push — the 30s reconciler still covers.
-   */
-  boltzWsUrl?: string
   esploraUrls: readonly string[]
+  /** subdustd (data/config.json only); undefined = Ark-only. */
+  lightning?: LightningConfig
+  /**
+   * Replace the public bootstrap + fallback relay lists with these (a private
+   * relay deployment, or regtest). The bridge then opens no other relay.
+   * Unset = the static defaults in defaults.ts.
+   */
+  nostrRelays?: readonly string[]
   httpBind: string
   httpPort: number
   dbPath: string
@@ -48,12 +44,13 @@ export function loadConfig(): Config {
   return {
     network: overrides.network ?? defaults.NETWORK,
     arkServerUrl: overrides.arkServerUrl ?? defaults.ARK_SERVER_URL,
-    boltzApiUrl: overrides.boltzApiUrl ?? defaults.BOLTZ_API_URL,
-    boltzWsUrl: overrides.boltzWsUrl,
     esploraUrls:
       overrides.esploraUrls && overrides.esploraUrls.length > 0
         ? overrides.esploraUrls
         : defaults.ESPLORA_URLS,
+    // Throws on a malformed block — boot must not guess at payment endpoints.
+    lightning: parseLightningConfig((overrides as { lightning?: unknown }).lightning),
+    nostrRelays: overrides.nostrRelays && overrides.nostrRelays.length > 0 ? overrides.nostrRelays : undefined,
     httpBind: overrides.httpBind ?? defaults.HTTP_BIND,
     httpPort: overrides.httpPort ?? defaults.HTTP_PORT,
     // A relative override resolves against the loaded config's own base
@@ -65,16 +62,14 @@ export function loadConfig(): Config {
 }
 
 /**
- * The ark/boltz endpoints set by data/config.json only (each undefined when the
- * file is absent or doesn't pin it). Kept separate from loadConfig so
- * resolveServerSet (src/server_config.ts) can layer this override *over* the
- * fresh-start DB row: config.json > row > defaults.ts. loadConfig's own
- * arkServerUrl/boltzApiUrl are unchanged — they stay the setup-mode display
- * fallback for a process that hasn't resolved the row yet.
+ * The Ark server set by data/config.json only (undefined when the file is
+ * absent or doesn't pin it). Kept separate from loadConfig so
+ * resolveServerSet (src/server_config.ts) can layer it over the fresh-start
+ * row: config.json > row > defaults.ts.
  */
-export function readServerOverrides(): { arkServerUrl?: string; boltzApiUrl?: string } {
+export function readServerOverrides(): { arkServerUrl?: string } {
   const { overrides } = readOverrides()
-  return { arkServerUrl: overrides.arkServerUrl, boltzApiUrl: overrides.boltzApiUrl }
+  return { arkServerUrl: overrides.arkServerUrl }
 }
 
 function readOverrides(): { overrides: Partial<Config>; baseDir: string } {

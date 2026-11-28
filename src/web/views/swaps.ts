@@ -3,19 +3,12 @@ import { layout } from './layout'
 import { copyable, localTime } from './ui'
 import type { AtomicSwapRow } from '../../atomic'
 import { isTerminal } from '../../atomic'
-import {
-  isChainFinalStatus,
-  isChainSuccessStatus,
-  isReverseFinalStatus,
-  isReverseSuccessStatus,
-  isSubmarineFinalStatus,
-  isSubmarineSuccessStatus,
-  type BoltzSwap,
-} from '@arkade-os/boltz-swap'
 
-// Atomic sub-dust swap monitor (ATOMIC_SUBDUST_PLAN.md #13). Swaps are
-// initiated over NWC/CLINK, not here — this page is for watching in-flight
-// ones and pulling the manual refund lever on a send whose T has passed.
+// Swap monitor: every Lightning swap is an atomic swap on subdustd, both
+// directions, any amount (ATOMIC_SUBDUST_PLAN.md #13, D11). Swaps are
+// initiated over NWC/CLINK or /send, not here — this page is for watching
+// in-flight ones and pulling the manual refund lever on a send whose T has
+// passed.
 // Server-rendered snapshot; reload to refresh (swaps are seconds-to-minutes
 // affairs, a live ticker isn't worth the machinery).
 
@@ -23,7 +16,7 @@ function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 12)}…` : id
 }
 
-// swap ids are boltz-issued (not txids), so they're never chain-lookup targets;
+// swap ids are server-issued (not txids), so they're never chain-lookup targets;
 // still click-to-copy for parity, since operators do paste them into logs.
 function swapIdCell(id: string): RawHtml {
   const short = shortId(id)
@@ -46,14 +39,14 @@ function refundReadyAt(s: AtomicSwapRow): number {
 
 /**
  * The refund-T cell = countdown to when the refund can actually land (T + the
- * blocktime lag). RECEIVE rows store 0 (T is boltz's) → "— (boltz)", never a
+ * blocktime lag). RECEIVE rows store 0 (T is subdustd's) → "— (subdustd)", never a
  * garbage countdown. Terminal rows (claimed/refunded/failed) → "—": the
  * refund clock is moot once the swap resolved, and a stale "Nd ago" on a
  * claimed row reads like something still needs doing.
  */
 function refundTCell(s: AtomicSwapRow, nowSec: number): RawHtml {
   if (s.direction !== 'send' || s.refundLocktime <= 0) {
-    return html`<span class="muted" title="receive 환불은 boltz 관리 — bridge측 T 없음">— (boltz)</span>`
+    return html`<span class="muted" title="receive 환불은 subdustd 관리 — bridge측 T 없음">— (subdustd)</span>`
   }
   if (isTerminal(s.direction, s.state)) {
     return html`<span class="muted" title="종결된 스왑 — 환불 시계 해당 없음">—</span>`
@@ -94,63 +87,8 @@ function stateBadge(s: AtomicSwapRow): RawHtml {
   return html`<span style="color: ${color}; font-weight: ${terminal ? 'normal' : '600'}">${s.state}</span>`
 }
 
-// Regular dust+ LN swaps (reverse = receive, submarine = send) go through
-// @arkade-os/boltz-swap's own SwapManager, which auto-claims/refunds and
-// persists to boltz_swaps — no bridge-side state machine or manual refund
-// lever, unlike the atomic sub-dust swaps above. 'chain' is part of the SDK's
-// type union but this bridge never creates one; handled defensively so an
-// unexpected row still renders instead of throwing.
-function dustDirection(swap: BoltzSwap): 'send' | 'receive' {
-  return swap.type === 'reverse' ? 'receive' : 'send'
-}
-
-function dustAmount(swap: BoltzSwap): number {
-  if (swap.type === 'reverse') return swap.request.invoiceAmount
-  if (swap.type === 'submarine') return swap.response.expectedAmount ?? 0
-  return swap.amount
-}
-
-/** undefined = still in flight; true/false = terminal success/failure. */
-function dustTerminalGood(swap: BoltzSwap): boolean | undefined {
-  if (swap.type === 'reverse') {
-    return isReverseFinalStatus(swap.status) ? isReverseSuccessStatus(swap.status) : undefined
-  }
-  if (swap.type === 'submarine') {
-    return isSubmarineFinalStatus(swap.status) ? isSubmarineSuccessStatus(swap.status) : undefined
-  }
-  return isChainFinalStatus(swap.status) ? isChainSuccessStatus(swap.status) : undefined
-}
-
-function dustStateBadge(swap: BoltzSwap): RawHtml {
-  const good = dustTerminalGood(swap)
-  const color = good === undefined ? '#b60' : good ? '#080' : '#c00'
-  return html`<span style="color: ${color}; font-weight: ${good === undefined ? '600' : 'normal'}">${swap.status}</span>`
-}
-
-const dustRow = (swap: BoltzSwap) => html`
-  <tr>
-    <td>${swapIdCell(swap.id)}</td>
-    <td>${dustDirection(swap)}</td>
-    <td>${dustStateBadge(swap)}</td>
-    <td class="num">${dustAmount(swap).toLocaleString()} sats</td>
-    <td class="muted">${localTime(swap.createdAt * 1000)}</td>
-  </tr>
-`
-
-function dustTable(swaps: BoltzSwap[]): RawHtml {
-  return swaps.length === 0
-    ? html`<p class="muted">No swaps yet.</p>`
-    : html`<table>
-        <tr>
-          <th>swap</th><th>dir</th><th>status</th><th class="num">amount</th><th>created</th>
-        </tr>
-        ${swaps.map(dustRow)}
-      </table>`
-}
-
 export function swapsView(args: {
   swaps: AtomicSwapRow[]
-  dustSwaps: BoltzSwap[]
   nowSec: number
   notice?: { ok: boolean; text: string }
 }): RawHtml {
@@ -171,7 +109,7 @@ export function swapsView(args: {
         ${refundable(s, nowSec)
           ? html`<form method="post" action="/swaps/refund" style="max-width:none">
               <input type="hidden" name="swapId" value="${s.id}" />
-              <button class="danger" title="Reclaim the full funding through the refund leaf (T has passed — no boltz needed)">Refund</button>
+              <button class="danger" title="Reclaim the full funding through the refund leaf (T has passed — subdustd not needed)">Refund</button>
             </form>`
           : html``}
       </td>
@@ -194,24 +132,17 @@ export function swapsView(args: {
       ? html`<p style="color: ${args.notice.ok ? '#080' : '#c00'}">${args.notice.text}</p>`
       : html``}
 
-    <h2>Sub-dust swaps <span class="muted">(custom, beta)</span></h2>
+    <h2>Atomic swaps <span class="muted">(subdustd, custom, beta)</span></h2>
     <p class="muted">
-      Sub-dust Lightning swaps ride a shared 4-leaf vtxo — a custom, beta protocol built for this
-      bridge, not a stock Ark/Boltz feature. In-flight <em>send</em> funding is mirrored into the
-      exit vault (visible on the Exit tab) until the swap resolves; if boltz never pays, the full
-      funding is reclaimable here once T passes.
+      Every Lightning payment, both ways and any amount, rides a shared 4-leaf vtxo — a custom, beta
+      protocol built for this bridge, served by the operator's subdustd. In-flight <em>send</em>
+      funding is mirrored into the exit vault (visible on the Exit tab) until the swap resolves; if
+      subdustd never pays, the full funding is reclaimable here once T passes.
     </p>
     <h3>In flight (${inflight.length})</h3>
     ${table(inflight, 'No swaps in flight.')}
     <h3>Recent</h3>
     ${table(done, 'No completed swaps yet.')}
-
-    <h2>Dust+ swaps</h2>
-    <p class="muted">
-      Regular Lightning swaps (≥ dust) — stock Ark/Boltz reverse &amp; submarine swaps, auto-claimed
-      and auto-refunded by the SDK. Read-only here; no manual refund lever needed.
-    </p>
-    ${dustTable(args.dustSwaps)}
   `
   return layout({ title: 'Swaps', current: 'swaps', body })
 }

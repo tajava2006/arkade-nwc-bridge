@@ -24,7 +24,7 @@ remnant of a removed RPC. So the bridge keeps its own ledger.
   transition reaches history exclusively via `syncHistoryFromSources()` — two
   idempotent `UPDATE … FROM` statements run before each /history read. The
   alternative (pairing a history UPDATE with each of the ~6 transition sites
-  across pay_invoice / boltz.ts / ln_receive.ts / offboards) invites drift for
+  across pay_invoice / ln_ledger.ts / ln_receive.ts / offboards) invites drift for
   zero gain.
 - **Self-owned kinds are written by their flow.** `web_ln` (pending → settle/
   fail around `sendLightning`; a bolt11 retry upserts the same row back to
@@ -55,7 +55,7 @@ Recording only — conversion is the SDK's job (VtxoManager auto-settles
 confirmed boarding UTXOs; `settlementConfig` is on in wallet.ts) and it
 exposes no event for it, so the watcher observes `wallet.getBoardingUtxos()`
 on its own 60s interval (deliberately NOT a `reconcileReceives` pass: that
-loop is poked by the boltz ws for sub-dust latency and must not wait on
+loop is poked by the subdustd ws for receive latency and must not wait on
 esplora reads).
 
 - New outpoint → `pending` history row + operator DM (`onboard` notify kind).

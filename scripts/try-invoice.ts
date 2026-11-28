@@ -1,17 +1,15 @@
 // Mint one LN invoice through the real receive path and print what happens.
 //
-// LN receive has two rails and they fail for different reasons, but a phone
-// only ever shows its own rendering of the error — Zeus turns any CLINK
-// failure into "could not connect to the CLINK relay", and an NWC client
-// shows whatever it feels like. This runs the SAME core both rails use
+// A phone only ever shows its own rendering of a receive error — Zeus turns
+// any CLINK failure into "could not connect to the CLINK relay", and an NWC
+// client shows whatever it feels like. This runs the SAME core both rails use
 // (ln_receive.issueInvoice) straight from the host and prints the raw error,
 // so diagnosing does not need a working phone.
 //
-//   >= 330 sats -> Boltz reverse swap (boltz locks a VHTLC on Ark)
-//   <  330 sats -> atomic sub-dust receive (boltz funds a shared vtxo)
-//
-// Both make BOLTZ spend its own Ark-side funds, which is the usual reason
-// receive breaks while sending stays fine. Sending needs none.
+// Every receive is an atomic receive against subdustd (D10), funded from
+// subdustd's own Ark float — the usual reason receive breaks while sending
+// stays fine (sending needs no float: subdustd refuses with 503 when it
+// cannot fund the amount).
 //
 // Minting is cheap and reversible: an unpaid BOLT11 just expires, and no
 // capital is committed until someone pays it. Nothing is written to the
@@ -25,7 +23,6 @@ import { Database } from 'bun:sqlite'
 import { loadConfig } from '../src/config'
 import { resolveServerSet } from '../src/server_config'
 import { initArkWallet } from '../src/wallet'
-import { initBoltz } from '../src/boltz'
 import { issueInvoice } from '../src/ln_receive'
 import { hexToBytes } from 'nostr-tools/utils'
 
@@ -52,28 +49,27 @@ if (!row) {
 
 const cfg = loadConfig()
 const servers = resolveServerSet(db)
-console.log(`ark   : ${servers.arkServerUrl}`)
-console.log(`boltz : ${servers.boltzApiUrl}`)
-console.log(`amount: ${sats} sats (${sats < 330 ? 'atomic sub-dust receive' : 'reverse swap'})\n`)
+if (!cfg.lightning) {
+  console.error('no lightning block in data/config.json — this bridge is Ark-only')
+  process.exit(1)
+}
+console.log(`ark      : ${servers.arkServerUrl}`)
+console.log(`subdustd : ${cfg.lightning.subdustdUrl}`)
+console.log(`amount   : ${sats} sats\n`)
 
 const { wallet } = await initArkWallet({ ...cfg, ...servers }, hexToBytes(row.nsec_hex))
-const { swaps } = await initBoltz({ db, wallet, cfg: { ...cfg, ...servers } })
 
 try {
   const issued = await issueInvoice(
-    { swaps, wallet, db, boltzApiUrl: servers.boltzApiUrl, arkServerUrl: servers.arkServerUrl },
+    { wallet, db, subdustdUrl: cfg.lightning.subdustdUrl, arkServerUrl: servers.arkServerUrl },
     { amountSats: sats, description: 'bridge receive probe' },
   )
-  console.log(`OK   kind=${issued.kind} swap=${issued.swapId}`)
-  console.log(`     lands on Ark: ${issued.receivedSats} sats (fee ${sats - issued.receivedSats})`)
+  console.log(`OK   swap=${issued.swapId}`)
+  console.log(`     lands on Ark: ${issued.receivedSats} sats`)
   console.log(`     expires: ${new Date(issued.expiresAt * 1000).toISOString()}`)
   console.log(`\n${issued.invoice}`)
 } catch (err) {
   console.error(`\nFAILED: ${err instanceof Error ? err.message : String(err)}`)
-  // boltz's own words are what actually identify the cause; the SDK wraps them
-  // in errorData rather than the message.
-  const data = (err as { errorData?: unknown }).errorData
-  if (data !== undefined) console.error(`boltz said: ${JSON.stringify(data)}`)
   if (err instanceof Error && err.stack) console.error(`\n${err.stack.split('\n').slice(1, 6).join('\n')}`)
   process.exitCode = 1
 }

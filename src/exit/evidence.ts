@@ -178,7 +178,7 @@ export interface AbsorptionCandidate {
  */
 export function resolveAbsorbedByConservation(
   disappeared: readonly AbsorptionCandidate[],
-  liveVtxos: readonly Pick<VirtualCoin, 'value' | 'virtualStatus'>[],
+  liveVtxos: readonly Pick<VirtualCoin, 'value' | 'commitmentTxIds'>[],
 ): Set<string> {
   const groups = new Map<string, AbsorptionCandidate[]>()
   for (const c of disappeared) {
@@ -195,7 +195,7 @@ export function resolveAbsorbedByConservation(
     // onward or received C-descendants carry different/multiple ids and drop
     // out, which can only break the equality — the safe direction.
     const createdSat = liveVtxos.reduce((s, v) => {
-      const ids = v.virtualStatus?.commitmentTxIds
+      const ids = v.commitmentTxIds
       const fromThisRound = !!ids && ids.length > 0 && ids.every((id) => id === commitment)
       return s + (fromThisRound ? v.value : 0)
     }, 0)
@@ -246,7 +246,7 @@ export async function classifyDisappearance(
     }
     return {
       kind: 'unproven',
-      reason: `outpoint still ${row.virtualStatus?.state ?? 'unspent'} per the indexer, yet dropped from the live set`,
+      reason: `outpoint still ${row.isSwept ? 'swept' : row.isPreconfirmed ? 'preconfirmed' : 'settled'} per the indexer, yet dropped from the live set`,
     }
   }
 

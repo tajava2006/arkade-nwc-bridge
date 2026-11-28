@@ -4,7 +4,6 @@ import { SimplePool, useWebSocketImplementation } from 'nostr-tools/pool'
 import { loadConfig, readServerOverrides } from './config'
 import {
   ARK_SERVER_URL,
-  BOLTZ_API_URL,
   NWC_RELAYS_FALLBACK,
   OUTBOX_BOOTSTRAP_RELAYS,
   OUTBOX_FALLBACK_PUBKEY,
@@ -16,17 +15,18 @@ import { loadAccount } from './account'
 import { resolveServerSet, getServerRow, setServerRow } from './server_config'
 import { EsploraProvider, OnchainWallet, RestArkProvider, SingleKey } from '@arkade-os/sdk'
 import { initArkWallet } from './wallet'
-import { initBoltz, reconcilePendingIncoming } from './boltz'
 import { startProofSync, type ProofSyncService } from './exit/sync_service'
 import { startExitEngine, type ExitEngine } from './exit/engine'
 import { startNostrService } from './nostr/service'
-import { startOfferService, sendOfferReceipt, sendSubdustAck, reconcileClinkAcks } from './clink/offers'
+import { startOfferService, sendClinkAck, reconcileClinkAcks } from './clink/offers'
 import { reconcileAtomicReceives } from './ln_receive'
+import { reconcileAtomicSendRows } from './ln_ledger'
+import type { LightningRails } from './ln_send'
 import { sweepInterruptedWebSends } from './history'
 import { makeBoardingEsplora, reconcileBoardingHistory } from './boarding_history'
 import { autoRefreshPass } from './auto_refresh'
 import { resumeAtomicSends } from './atomic/send'
-import { startBoltzWs, deriveBoltzWsUrl, type BoltzWs } from './atomic/boltz_ws'
+import { startPushWs, derivePushWsUrl, type PushWs } from './atomic/push_ws'
 import { normalizeRelayUrl, startOutboxWatcher } from './nostr/outbox'
 import { PingableWebSocket } from './nostr/ping_ws'
 import { createRelayGate } from './nostr/relay_gate'
@@ -43,7 +43,6 @@ import {
 import { renderBalanceFragment, renderExitReadinessFragment } from './web/views/dashboard'
 import { renderBreakdownFragment } from './web/views/send'
 import { splitHotPocket } from './wallet_spend'
-import { WholeSetIndexerProvider } from './indexer'
 
 async function main(): Promise<void> {
   const cfg = loadConfig()
@@ -59,14 +58,13 @@ async function main(): Promise<void> {
     .get()
   console.log(`  schema         v${migrationCount?.count ?? 0}`)
 
-  // ark/boltz come from the fresh-start row, not the process cfg: they resolve
+  // The Ark server comes from the fresh-start row, not the process cfg: it resolves
   // (config.json > bridge_server row > defaults) only after the DB is open, and
   // on a fresh install the row doesn't exist until /setup writes it — the
   // default shown then is exactly what /setup pre-fills. A config.json that
   // overrides a disagreeing row is warned inside resolveServerSet.
   const bootServer = resolveServerSet(db)
   console.log(`  ark server     ${bootServer.arkServerUrl}`)
-  console.log(`  boltz          ${bootServer.boltzApiUrl}`)
 
   const appState: AppStateRef = { current: { mode: 'setup' } }
   const sseHub = new SseHub()
@@ -106,12 +104,16 @@ async function main(): Promise<void> {
   // opens /connections/new. Watcher keeps running afterward; later
   // 10002 updates change new-connection defaults but don't touch
   // existing connections.
+  // data/config.json `nostrRelays` (private relay / regtest) replaces both
+  // public lists, so the bridge opens no relay outside it.
+  const bootstrapRelays = cfg.nostrRelays ?? OUTBOX_BOOTSTRAP_RELAYS
+  if (cfg.nostrRelays) console.log(`  relays         config.json only: ${cfg.nostrRelays.join(', ')}`)
   const outbox = await startOutboxWatcher({
     pool,
     connect: (url) => relayGate.ensure(url),
     fallbackPubkey: OUTBOX_FALLBACK_PUBKEY,
-    bootstrapRelays: OUTBOX_BOOTSTRAP_RELAYS,
-    fallback: NWC_RELAYS_FALLBACK,
+    bootstrapRelays,
+    fallback: cfg.nostrRelays ?? NWC_RELAYS_FALLBACK,
     initialTimeoutMs: OUTBOX_INITIAL_TIMEOUT_MS,
   })
   console.log(
@@ -171,7 +173,7 @@ async function main(): Promise<void> {
   const RELAY_WATCHDOG_INTERVAL_MS = 5000
   const knownRelayUrls = (): Set<string> => {
     const urls = new Set<string>()
-    for (const url of OUTBOX_BOOTSTRAP_RELAYS) urls.add(normalizeRelayUrl(url))
+    for (const url of bootstrapRelays) urls.add(normalizeRelayUrl(url))
     for (const url of outbox.getOutboxRelays()) urls.add(url)
     for (const conn of listActiveConnections(db)) {
       for (const url of conn.relays) urls.add(url)
@@ -189,7 +191,7 @@ async function main(): Promise<void> {
   }, RELAY_WATCHDOG_INTERVAL_MS)
 
   // Receive-side reconciler interval (CLINK acks + NWC sub-dust invoice rows)
-  // — assigned once bootReady runs (needs the account key + swaps). Cleared on
+  // — assigned once bootReady runs (needs the account key). Cleared on
   // shutdown.
   let receiveReconcilerInterval: ReturnType<typeof setInterval> | undefined
   // Onchain-deposit history watcher (src/boarding_history.ts) — recording
@@ -197,7 +199,7 @@ async function main(): Promise<void> {
   let boardingHistoryInterval: ReturnType<typeof setInterval> | undefined
   // Consolidate-all auto-refresh (src/auto_refresh.ts) — assigned in bootReady.
   let autoRefreshInterval: ReturnType<typeof setInterval> | undefined
-  let boltzWs: BoltzWs | undefined
+  let pushWs: PushWs | undefined
 
   // Exit-proof mirroring — assigned in bootReady, torn down on shutdown.
   let proofSync: ProofSyncService | undefined
@@ -265,17 +267,17 @@ async function main(): Promise<void> {
     10 * 60 * 1000,
   )
 
-  // Lift the wallet/boltz/nostr bring-up into a function so it can run
+  // Lift the wallet/Lightning/nostr bring-up into a function so it can run
   // either at boot (if an account row exists) or post-setup from the web
   // handler (after the user submits /setup). Same path either way; mutates
   // appState in place so the web server's open closures see the new mode.
   const bootReady = async (privateKey: Uint8Array): Promise<void> => {
-    // ark/boltz for THIS bring-up come from the fresh-start row, resolved here
+    // The Ark server for THIS bring-up comes from the fresh-start row, resolved here
     // (not at process start): the row doesn't exist until /setup writes it, and
     // this runs on both boot paths. Precedence config.json > row > defaults
     // (src/server_config.ts). network/esplora/http stay from the process cfg.
     const server = resolveServerSet(db)
-    const bootCfg = { ...cfg, arkServerUrl: server.arkServerUrl, boltzApiUrl: server.boltzApiUrl }
+    const bootCfg = { ...cfg, arkServerUrl: server.arkServerUrl }
 
     // The account key is the bridge's own nostr identity (noffer pubkey,
     // NWC service pubkey). Make it the primary outbox target so relay
@@ -304,48 +306,26 @@ async function main(): Promise<void> {
         `  balance        total=${balance.total} available=${balance.available} settled=${balance.settled} boarding=${balance.boarding.total}`,
       )
 
-      const { swaps } = await initBoltz({
-        db,
-        wallet,
-        cfg: bootCfg,
-        notify,
-        // When an offer-originated reverse swap settles, ack the payer with a
-        // CLINK Payment Receipt. No-op for NWC make_invoice swaps.
-        onReverseSettled: (swap) => {
-          try {
-            // Offer-originated settles are notified by sendOfferReceipt with
-            // payer/zap detail; only the non-CLINK ones (NWC make_invoice)
-            // are ours. The receipt row still exists here — it's deleted
-            // after the receipt publishes.
-            const offerOwned = db
-              .query('SELECT 1 FROM clink_offer_receipts WHERE swap_id = ?')
-              .get(swap.id)
-            if (!offerOwned) {
-              notify(
-                'recv-ln',
-                () =>
-                  `recv: LN invoice settled — ${swap.request.invoiceAmount} sats [swap ${swap.id.slice(0, 8)}]`,
-              )
-            }
-          } catch (err) {
-            console.warn('notifier: recv-ln gate check failed:', err)
-          }
-          sendOfferReceipt({ pool, db, secretKey: privateKey, notify }, swap).catch((err) =>
-            console.error('clink: receipt send failed:', err),
-          )
-        },
-      })
-      undo.push(() => swaps.dispose())
-      const fees = await swaps.getFees()
-      console.log(
-        `  boltz fees     submarine=${fees.submarine.percentage}% reverse=${fees.reverse.percentage}%`,
-      )
+      // Second provider for ArkInfo reads (/send's dust + intent-fee programs).
+      // Stateless REST; the wallet keeps its own internal one for signing.
+      const arkProvider = new RestArkProvider(bootCfg.arkServerUrl)
+
+      // Lightning: subdustd, every amount both ways (D11), from data/config.json's
+      // `lightning` block. Absent → Ark-only: NWC LN methods refuse rather than
+      // reach anything else.
+      let lightning: LightningRails | undefined
+      if (bootCfg.lightning) {
+        lightning = { subdustdUrl: bootCfg.lightning.subdustdUrl }
+        console.log(`  lightning      subdustd ${bootCfg.lightning.subdustdUrl}`)
+      } else {
+        console.log('  lightning      not configured — Ark-only')
+      }
 
       const nostr = await startNostrService({
         cfg: bootCfg,
         db,
         wallet,
-        swaps,
+        lightning,
         pool,
         notify,
         onClientRequest: (conn) =>
@@ -357,36 +337,38 @@ async function main(): Promise<void> {
       // key (same key as the Ark wallet). Minted from the current outbox relay
       // and persisted; on boot it listens on the relay frozen into the stored
       // code (see clink/offers.ts). Operator regenerates by hand if it dies.
-      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl })
+      const offers = startOfferService({ pool, db, secretKey: privateKey, outbox, wallet, subdustdUrl: lightning?.subdustdUrl, arkServerUrl: bootCfg.arkServerUrl })
       console.log(`  noffer         ${offers.snapshot().noffer}`)
       undo.push(() => offers.stop())
 
-      // Restart-safe receive reconcile, boot + every 30s. Two passes: CLINK
-      // acks the live onReverseSettled missed (swaps that settled while we
-      // were down) + sub-dust acks, and NWC make_invoice sub-dust rows — those
-      // have no settlement event at all (no swap object), so this poll is the
-      // only thing that ever flips them (see ln_receive.ts).
-      // arkd indexer for M3's landing verification (exact VHTLC-spend → our-coin
-      // txid binding) — same server the wallet trusts, never boltz.
-      const reconcileIndexer = new WholeSetIndexerProvider(bootCfg.arkServerUrl)
-      const ackDeps = { pool, db, secretKey: privateKey, boltzApiUrl: bootCfg.boltzApiUrl, wallet, indexer: reconcileIndexer, notify }
-      const atomicDeps = { wallet, arkServerUrl: bootCfg.arkServerUrl, db, boltzApiUrl: bootCfg.boltzApiUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
+      // Restart-safe atomic reconcile, boot + every 30s: drive every receive
+      // (claim + settle) and flip its NWC row, publish pending CLINK receipts,
+      // resume interrupted sub-dust sends and settle their NWC rows (M1). The
+      // receives have no settlement event of their own, so this poll (and the
+      // subdustd push pokes) is the only thing that ever flips them.
+      const ackDeps = { pool, db, secretKey: privateKey, notify }
+      // Atomic swaps (every receive, sub-dust sends) live on subdustd; without
+      // a configured Lightning block there is nothing to drive them against.
+      const subdustdUrl = lightning?.subdustdUrl
+      const atomicDeps = subdustdUrl
+        ? { wallet, arkServerUrl: bootCfg.arkServerUrl, db, subdustdUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
+        : undefined
       const runReconcilePasses = async (): Promise<void> => {
         const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
-        // M3 self-heal for dust+ reverse swaps: a boltz-reported success that
-        // wasn't confirmed on-Ark (or a swap that settled while we were down) is
-        // settled here on a later pass, once the vtxo visibly lands. This is also
-        // the (M1) crash-window reconcile for interrupted sub-dust sends.
-        const incoming = reconcilePendingIncoming(db, wallet, reconcileIndexer, notify)
-          .catch((err) => console.error('boltz: pending reconcile failed:', err))
-        const receives = reconcileAtomicReceives({ swaps, wallet, boltzApiUrl: bootCfg.boltzApiUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
+        // (M1) Crash-window reconcile for interrupted sub-dust sends.
+        const incoming = Promise.resolve()
+          .then(() => reconcileAtomicSendRows(db))
+          .catch((err) => console.error('ln: atomic send row reconcile failed:', err))
+        const receives = (subdustdUrl
+          ? reconcileAtomicReceives({ wallet, subdustdUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
+          : Promise.resolve([] as string[]))
           .then((settledHashes) => {
             // Ack same-pass settles immediately — otherwise the CLINK receipt
             // (+9735) waits for the NEXT reconcile tick, because the ack pass
             // above was dispatched before this one settled the swap.
             for (const hash of settledHashes) {
-              void sendSubdustAck(ackDeps, hash).catch((err) =>
-                console.error('clink: inline sub-dust ack failed:', err),
+              void sendClinkAck(ackDeps, hash).catch((err) =>
+                console.error('clink: inline ack failed:', err),
               )
             }
           })
@@ -395,10 +377,11 @@ async function main(): Promise<void> {
           )
         // Send-side resume (§3.4 classifyResume): failed-but-pre-T rows are
         // unwound through the cancel leaf, post-T rows are refunded (the
-        // T-refund executor), crash-orphaned rows reconcile against boltz
+        // T-refund executor), crash-orphaned rows reconcile against subdustd
         // status. Blocktime lag counts as waiting — the next tick retries.
-        const sends = resumeAtomicSends(atomicDeps)
+        const sends = (atomicDeps ? resumeAtomicSends(atomicDeps) : Promise.resolve(undefined))
           .then((r) => {
+            if (!r) return
             if (
               r.refunded.length ||
               r.cancelled.length ||
@@ -445,7 +428,7 @@ async function main(): Promise<void> {
       // Onchain-deposit watcher: record boarding deposits into the unified
       // history (pending on arrival, settled once the outpoint leaves the
       // boarding set). Own interval, NOT a reconcileReceives pass — that one
-      // is poked by the boltz ws for sub-dust settle latency, and a slow
+      // is poked by the subdustd ws for settle latency, and a slow
       // esplora read in its single-flight would delay those pokes. 60s
       // matches the VtxoManager poll that does the actual auto-settle.
       // History rows already terminal: web LN sends interrupted by the last
@@ -474,20 +457,18 @@ async function main(): Promise<void> {
       runBoardingPass()
       boardingHistoryInterval = setInterval(runBoardingPass, 60_000)
 
-      // Push channel: the boltz fork emits subdust transitions on its public
+      // Push channel: subdustd emits atomic swap transitions on its
       // swap.update ws — a poke re-runs the same reconcile passes immediately,
       // collapsing the 30s poll latency. Pure accelerator; a dead endpoint
       // degrades to the interval above.
-      boltzWs = startBoltzWs({
-        url: bootCfg.boltzWsUrl ?? deriveBoltzWsUrl(bootCfg.boltzApiUrl),
-        db,
-        onPoke: reconcileReceives,
-        log: (msg) => console.log(msg),
-      })
-
-      // Second provider for /send's ArkInfo reads (dust + intent-fee programs).
-      // Stateless REST; the wallet keeps its own internal one for signing.
-      const arkProvider = new RestArkProvider(bootCfg.arkServerUrl)
+      if (subdustdUrl) {
+        pushWs = startPushWs({
+          url: derivePushWsUrl(subdustdUrl),
+          db,
+          onPoke: reconcileReceives,
+          log: (msg) => console.log(msg),
+        })
+      }
 
       // SWR caches for the slow ark-side reads. minIntervalMs keeps
       // back-to-back page visits from hammering the upstream — opening
@@ -500,20 +481,16 @@ async function main(): Promise<void> {
           fetcher: () => wallet.getBalance(),
           minIntervalMs: 2000,
         }),
-        // /send's breakdown needs ArkInfo (dust + fee programs), the full VTXO
-        // set and the boltz fee table (LN drain hint) together — fetched in
-        // parallel so the page renders from a snapshot instead of blocking on
-        // sequential round-trips. The set churns, but we push the whole table
-        // fragment over SSE (no diffing).
+        // /send's breakdown needs ArkInfo (dust + fee programs) and the full
+        // VTXO set together — fetched in parallel so the page renders from a
+        // snapshot instead of blocking on sequential round-trips. The set
+        // churns, but we push the whole table fragment over SSE (no diffing).
+        // LN fees aren't here: /send asks subdustd for its fee rule at preview.
         sendData: new AsyncCache<SendData>({
           label: 'send-data',
           fetcher: async () => {
-            const [arkInfo, vtxos, fees] = await Promise.all([
-              arkProvider.getInfo(),
-              wallet.getVtxos({ withRecoverable: true }),
-              swaps.getFees(),
-            ])
-            return { arkInfo, vtxos, fees }
+            const [arkInfo, vtxos] = await Promise.all([arkProvider.getInfo(), wallet.getVtxos({ withRecoverable: true })])
+            return { arkInfo, vtxos }
           },
           minIntervalMs: 2000,
         }),
@@ -629,8 +606,7 @@ async function main(): Promise<void> {
         // CEL program for the onchain-input intent fee (onboarding); flat
         // configs look like "1000.0", rendered best-effort on the dashboard.
         onboardingFeeProgram = arkInfo.fees?.intentFee?.onchainInput
-        // `fees` reuses the boot-time getFees read from above.
-        caches.sendData.seed({ arkInfo, vtxos, fees })
+        caches.sendData.seed({ arkInfo, vtxos })
       } catch (err) {
         console.warn(
           `boot: send-data prefetch failed (onboarding fee + /send breakdown lazy-load): ${err instanceof Error ? err.message : err}`,
@@ -639,12 +615,11 @@ async function main(): Promise<void> {
 
       appState.current = {
         mode: 'ready',
-        // the ASP pair this ready session is bound to — /send and /swaps/refund
-        // read these, since cfg no longer carries the runtime ark/boltz URLs
+        // the Ark server this ready session is bound to — /send and
+        // /swaps/refund read it, since cfg no longer carries the runtime URL
         arkServerUrl: bootCfg.arkServerUrl,
-        boltzApiUrl: bootCfg.boltzApiUrl,
         wallet,
-        swaps,
+        lightning,
         nostr,
         offers,
         caches,
@@ -674,8 +649,8 @@ async function main(): Promise<void> {
         clearInterval(autoRefreshInterval)
         autoRefreshInterval = undefined
       }
-      boltzWs?.stop()
-      boltzWs = undefined
+      pushWs?.stop()
+      pushWs = undefined
       for (const step of undo.reverse()) {
         try {
           await step()
@@ -687,13 +662,13 @@ async function main(): Promise<void> {
     }
   }
 
-  // Boot-path wrapper (EXIT_PLAN #07): the ASP or Boltz being down must not
+  // Boot-path wrapper (EXIT_PLAN #07): the ASP being down must not
   // keep the bridge from starting — that is exactly when the operator needs
   // the exit tab. Any bootReady failure lands in mode:'degraded' (vault +
   // esplora + nsec-derived onchain wallet still work, no ASP required) and
   // a 60s loop keeps re-attempting the full bring-up; success promotes to
   // ready in place and tells open tabs to reload. Whole-or-nothing on
-  // purpose: partial-ready (e.g. wallet up, boltz down) would fork the
+  // purpose: partial-ready (e.g. wallet up, a dependency down) would fork the
   // AppState into per-subsystem availability flags for a rare, transient
   // state the retry loop already heals.
   const BOOT_RETRY_MS = 60_000
@@ -749,8 +724,8 @@ async function main(): Promise<void> {
     // silently repoint an existing wallet. Skip when data/config.json pins the
     // URLs — that override is the source there and wins over the row anyway.
     const override = readServerOverrides()
-    if (!getServerRow(db) && !override.arkServerUrl && !override.boltzApiUrl) {
-      setServerRow(db, { arkServerUrl: ARK_SERVER_URL, boltzApiUrl: BOLTZ_API_URL })
+    if (!getServerRow(db) && !override.arkServerUrl) {
+      setServerRow(db, { arkServerUrl: ARK_SERVER_URL })
       console.log('  server         backfilled fresh-start row from defaults (grandfathered DB)')
     }
     // Before the boot attempt, not inside it — the first degraded
@@ -771,7 +746,7 @@ async function main(): Promise<void> {
     if (receiveReconcilerInterval) clearInterval(receiveReconcilerInterval)
     if (boardingHistoryInterval) clearInterval(boardingHistoryInterval)
     if (autoRefreshInterval) clearInterval(autoRefreshInterval)
-    boltzWs?.stop()
+    pushWs?.stop()
     proofSync?.stop()
     stopIncomingFunds?.()
     if (bootRetryTimer) clearTimeout(bootRetryTimer)
@@ -784,7 +759,6 @@ async function main(): Promise<void> {
     if (appState.current.mode === 'ready') {
       appState.current.offers.stop()
       await appState.current.nostr.stop()
-      await appState.current.swaps.dispose()
       // Wallet.dispose tears down the VtxoManager poll loop, ContractWatcher's
       // SSE subscription, and ArkProvider's settlement-event stream so the
       // Ark server sees a clean disconnect rather than a half-open socket.

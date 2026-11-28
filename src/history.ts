@@ -123,22 +123,33 @@ export function recordNofferReceive(
 }
 
 /**
- * Web /send LN rail: pending before the (possibly minutes-long) await.
- * Upsert, not insert-or-ignore: retrying the same bolt11 after a failure is a
- * normal move, and one invoice should stay one row — the retry resets the
- * existing row to pending (latest attempt wins) instead of silently recording
- * nothing.
+ * Web /send LN rail: claim the invoice's row before the (possibly
+ * minutes-long) await. One invoice stays one row: a retry after a failure
+ * re-arms it to pending (latest attempt wins). A row that is already pending
+ * or settled is NOT touched — that is a second confirm of the same invoice
+ * (double click, browser resubmit) while the first is running or done. Taking
+ * it would send the second confirm into the swap create, which refuses the
+ * duplicate payment hash, and its failWebLn would mark the paying invoice
+ * failed while the first confirm's settle then finds no pending row.
  */
-export function recordWebLnPending(
+export function claimWebLnSend(
   db: Database,
   args: { paymentHash: string; amountMsat: number; description?: string | null },
-): void {
-  db.query(
-    `INSERT INTO history (kind, direction, state, amount_msat, description, ref, created_at)
-     VALUES ('web_ln', 'out', 'pending', ?, ?, ?, ?)
-     ON CONFLICT(kind, ref) DO UPDATE SET
-       state = 'pending', error = NULL, settled_at = NULL, created_at = excluded.created_at`,
-  ).run(args.amountMsat, args.description ?? null, args.paymentHash, nowSec())
+): 'claimed' | 'pending' | 'settled' {
+  const r = db
+    .query(
+      `INSERT INTO history (kind, direction, state, amount_msat, description, ref, created_at)
+       VALUES ('web_ln', 'out', 'pending', ?, ?, ?, ?)
+       ON CONFLICT(kind, ref) DO UPDATE SET
+         state = 'pending', error = NULL, settled_at = NULL, created_at = excluded.created_at
+       WHERE history.state = 'failed'`,
+    )
+    .run(args.amountMsat, args.description ?? null, args.paymentHash, nowSec())
+  if (r.changes > 0) return 'claimed'
+  const row = db
+    .query<{ state: string }, [string]>(`SELECT state FROM history WHERE kind = 'web_ln' AND ref = ?`)
+    .get(args.paymentHash)
+  return row?.state === 'settled' ? 'settled' : 'pending'
 }
 
 export function settleWebLn(

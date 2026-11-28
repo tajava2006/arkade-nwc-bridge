@@ -1,34 +1,32 @@
 import type { Database } from 'bun:sqlite'
-import { NetworkError, decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { decodeInvoice } from '../lib/bolt11'
 import type { Wallet } from '@arkade-os/sdk'
 
 import { cycleSpentMsat } from '../lib/budget'
 import { NwcError } from '../lib/errors'
 import { recordNwcLn } from '../history'
-import { sendLightning, type LnSendDeps } from '../ln_send'
+import { failOutgoing, settleOutgoing } from '../ln_ledger'
+import { LnSendRefused, LnSendUnresolved, sendLightning, type LightningRails } from '../ln_send'
 import { satsToMsats } from '../lib/msat'
 import type { Connection } from '../nostr/connections'
 import type { NotifyFn } from '../nostr/notifier'
 
 export interface PayInvoiceDeps {
-  swaps: ArkadeSwaps
+  /** Undefined when no Lightning rails are configured (Ark-only bridge). */
+  lightning?: LightningRails
   db: Database
   conn: Connection
   eventId: string
-  /** Ark wallet — sub-dust sends fund an atomic shared vtxo (atomic_send.ts). */
   wallet: Wallet
-  /** Boltz REST base (no /v2 suffix). */
-  boltzApiUrl: string
   /** ASP (arkd) REST base — the atomic sub-dust send needs server params. */
   arkServerUrl: string
   /**
-   * Operator DM sink, forwarded into sendLightning. Submarine terminals are
-   * notified from boltz.ts's SDK listener (single source), so this handler
-   * itself never calls it — only the atomic sub-dust path underneath does.
+   * Operator DM sink, forwarded into sendLightning. This handler never calls it
+   * itself — the atomic send underneath owns the send DMs.
    */
   notify?: NotifyFn
-  /** Forwarded to sendLightning — see LnSendDeps.getArkInfo. */
-  getArkInfo?: LnSendDeps['getArkInfo']
+  /** The LN send; sendLightning unless a test scripts the outcome. */
+  send?: typeof sendLightning
 }
 
 export async function handlePayInvoice(
@@ -39,6 +37,8 @@ export async function handlePayInvoice(
   if (!invoice) {
     throw new NwcError('OTHER', 'invoice (bolt11) is required')
   }
+  const lightning = deps.lightning
+  if (!lightning) throw new NwcError('NOT_IMPLEMENTED', 'this wallet has no Lightning rail configured')
 
   let decoded
   try {
@@ -105,75 +105,39 @@ export async function handlePayInvoice(
     createdAt,
   })
 
-  // sendLightning is the shared LN-send path (src/ln_send.ts): a Boltz
-  // submarine swap for amounts >= dust, the atomic sub-dust send below it
-  // (where a submarine swap can't settle). Both are atomic. Can take minutes —
-  // bounded by Boltz's LN payment timeout, not by our code.
+  // sendLightning is the shared LN-send path (src/ln_send.ts): the atomic send
+  // against subdustd, any amount. Can take minutes — bounded by the payment's
+  // own timeout, not by our code.
   let result
   try {
-    result = await sendLightning(
+    result = await (deps.send ?? sendLightning)(
       {
-        swaps: deps.swaps,
+        lightning,
         wallet: deps.wallet,
-        boltzApiUrl: deps.boltzApiUrl,
         arkServerUrl: deps.arkServerUrl,
         db: deps.db,
         notify: deps.notify,
-        getArkInfo: deps.getArkInfo,
-        // R1: link the ledger row to the swap the instant it's created, so a
-        // crash during the long settlement wait still recovers on restart
-        // (SwapManager resume → syncSwapToDb) instead of leaving a permanent
-        // pending row that eats budget and blocks this invoice's retry.
-        onSwapCreated: (swapId) => {
-          deps.db
-            .query(
-              `UPDATE transactions SET swap_id = ? WHERE request_event_id = ? AND state = 'pending'`,
-            )
-            .run(swapId, deps.eventId)
-        },
       },
       invoice,
     )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    deps.db
-      .query(`UPDATE transactions SET state = 'failed', error = ? WHERE request_event_id = ?`)
-      .run(msg, deps.eventId)
-
-    if (err instanceof NetworkError) {
-      const boltzMessage = (err.errorData as { error?: string } | undefined)?.error
-      throw new NwcError('PAYMENT_FAILED', `boltz: ${boltzMessage ?? err.message}`)
+    if (err instanceof LnSendUnresolved) {
+      // The money may still move: the row keeps its reservation and stays
+      // pending until the swap resolves (the atomic reconcile flips it). Retrying this invoice is refused meanwhile.
+      throw new NwcError('INTERNAL', `${msg} — do not retry; the payment may still complete`)
     }
+    failOutgoing(deps.db, { requestEventId: deps.eventId }, msg)
+    if (err instanceof LnSendRefused && err.insufficientFunds) throw new NwcError('INSUFFICIENT_BALANCE', msg)
     throw new NwcError('PAYMENT_FAILED', msg)
   }
 
-  // SendLightningPaymentResponse.amount is "Amount paid in satoshis" — the
-  // on-Ark total handed to the swap provider (invoice + swap fee + any drain
-  // residue). amount_msat keeps the invoice nominal written at INSERT — the
-  // number the payee received — and the whole gap becomes fees_paid_msat:
-  // our cost of the send, never part of the amount. What left the wallet is
-  // derived as amount + fees, not stored.
-  const paidMsat = satsToMsats(result.amount)
-  const feesPaidMsat = Math.max(0, paidMsat - invoiceMsat)
-  const settledAt = Math.floor(Date.now() / 1000)
-
-  // One transaction: the 'never' budget path reads counter + pending rows,
-  // so flipping the row out of 'pending' and bumping the counter must be
-  // atomic — a crash in between would release the pending reservation
-  // without ever landing it in the counter, permanently under-counting the
-  // payment. The counter adds paidMsat (wallet movement, fee included) —
-  // amount + fees of the settled row.
-  deps.db.transaction(() => {
-    deps.db
-      .query(
-        `UPDATE transactions SET state = 'settled', preimage = ?, fees_paid_msat = ?, settled_at = ?, swap_id = ?
-         WHERE request_event_id = ?`,
-      )
-      .run(result.preimage, feesPaidMsat, settledAt, result.swapId, deps.eventId)
-    deps.db
-      .query(`UPDATE connections SET spent_msat = spent_msat + ? WHERE id = ?`)
-      .run(paidMsat, deps.conn.id)
-  })()
+  // result.amount is what left the wallet (invoice + swap fee). amount_msat
+  // keeps the invoice nominal written at INSERT — the number the payee
+  // received — and the gap becomes fees_paid_msat: our cost, never part of
+  // the amount.
+  const feesPaidMsat = Math.max(0, satsToMsats(result.amount) - invoiceMsat)
+  settleOutgoing(deps.db, { requestEventId: deps.eventId }, { preimage: result.preimage, paidSats: result.amount, swapId: result.swapId })
 
   return {
     preimage: result.preimage,

@@ -1,35 +1,31 @@
 import type { Database } from 'bun:sqlite'
-import { decodeInvoice, type ArkadeSwaps } from '@arkade-os/boltz-swap'
+import { decodeInvoice } from './lib/bolt11'
 import type { Wallet } from '@arkade-os/sdk'
 import { issueAtomicReceive, driveAtomicReceives, type AtomicReceiveDeps } from './atomic/receive'
 import { SqliteAtomicSwapRepository, SwapDirection } from './atomic'
 import type { NotifyFn } from './nostr/notifier'
 
-// Bitcoin P2TR standard dust. Below this a Boltz reverse swap can't settle: the
-// vHTLC lockup vtxo is sub-dust, arkd marks it VTXO_RECOVERABLE and rejects the
-// claim's spend, so the swap strands. Sub-dust receives take the ATOMIC path
-// instead (atomic_receive.ts → boltz /v2/subdust/atomic/receive/*): the bridge
-// generates the preimage, boltz mints a HOLD invoice, and on funding the bridge
-// claims + tells boltz to settle. The bridge owns the preimage, so the 9735
-// receipt uses it directly.
-const DUST_SATS = 330
+// Every LN receive is an ATOMIC receive against subdustd, whatever the amount
+// (D10): the bridge generates the preimage, subdustd mints a HOLD invoice
+// (carrying the NIP-57 description hash when given),
+// funds a shared vtxo once the payer's HTLC is held, and we claim with our own
+// preimage. The bridge owns the preimage, so receipts use it directly.
 
 export interface LnReceiveDeps {
-  swaps: ArkadeSwaps
-  /** Ark wallet — the sub-dust receive claims to its address; wallet.identity signs. */
+  /** Ark wallet — the receive claims to its address; wallet.identity signs. */
   wallet: Wallet
-  /** Boltz REST base (no /v2 suffix). */
-  boltzApiUrl: string
-  /** ASP (arkd) REST base — the atomic sub-dust receive needs server params. */
+  /** subdustd's API base. */
+  subdustdUrl: string
+  /** ASP (arkd) REST base — the claim needs server params. */
   arkServerUrl: string
-  /** sqlite handle — the atomic sub-dust receive persists swaps for restart-safe claiming. */
+  /** sqlite handle — atomic receives persist for restart-safe claiming. */
   db: Database
   /** Operator DM sink — passed through to the atomic receive driver. */
   notify?: NotifyFn
 }
 
 function atomicDeps(deps: LnReceiveDeps): AtomicReceiveDeps {
-  return { identity: deps.wallet.identity, arkServerUrl: deps.arkServerUrl, db: deps.db, boltzApiUrl: deps.boltzApiUrl, notify: deps.notify }
+  return { identity: deps.wallet.identity, arkServerUrl: deps.arkServerUrl, db: deps.db, subdustdUrl: deps.subdustdUrl, notify: deps.notify }
 }
 
 export interface IssueInvoiceParams {
@@ -48,86 +44,47 @@ export interface IssueInvoiceParams {
  * Absolute BOLT11 expiry (unix secs). decodeInvoice().expiry is documented as
  * an absolute timestamp but actually returns the raw relative `x`-tag seconds:
  * light-bolt11-decoder defines an absolute getter, then its TAGCODES
- * defineProperty loop clobbers it with the raw section value (and boltz-swap
- * passes that through with a relative 3600 fallback). Normalize by magnitude
- * so an upstream fix can't double-count.
+ * defineProperty loop clobbers it with the raw section value. Normalize by
+ * magnitude so an upstream fix can't double-count.
  */
 export function absoluteExpiry(invoice: string): number {
   const decoded = decodeInvoice(invoice)
   return decoded.expiry > 1e9 ? decoded.expiry : decoded.timestamp + decoded.expiry
 }
 
-export type IssuedInvoice = {
+export interface IssuedInvoice {
+  /** Always 'subdust' — the atomic receive; kept as a tag for the callers' branches. */
+  kind: 'subdust'
   invoice: string
   paymentHash: string
   /** Absolute Unix seconds after which the BOLT11 can no longer be paid. */
   expiresAt: number
-  /**
-   * Sats that land on Ark when paid: invoice nominal minus the swap
-   * provider's fee for the reverse-swap path, exactly the nominal (1:1, no
-   * swap fee) for sub-dust.
-   */
+  /** Sats that land on Ark when paid: the nominal, 1:1 (no fee on receives). */
   receivedSats: number
-} & (
-  | { kind: 'subdust'; swapId: string; preimage: string }
-  | { kind: 'swap'; swapId: string }
-)
+  swapId: string
+  preimage: string
+}
 
 /**
- * Mint a BOLT11 that lands on Ark — the single LN-receive entry point shared
- * by every caller (CLINK offers, NWC make_invoice). For amounts >= dust it's a
- * Boltz reverse swap: on payment the SwapManager (boltz.ts) auto-claims the
- * VHTLC into the Ark wallet. For sub-dust amounts a reverse swap can't settle
- * (the VHTLC lockup vtxo would be sub-dust -> arkd VTXO_RECOVERABLE -> the
- * claim strands), so it routes through the atomic sub-dust path
- * (atomic_receive.ts): boltz funds a shared 4-leaf vtxo against a hold
- * invoice, we verify its pre-signed claim before revealing anything, then
- * claim with our own preimage — 1:1, no swap fee on this leg.
+ * Mint a BOLT11 that lands on Ark — the single LN-receive entry point (CLINK
+ * offers, NWC make_invoice). Atomic either way it ends: the preimage is
+ * revealed only by our claim, so either the payer is settled and the vtxo is
+ * ours, or T passes and subdustd refunds the payer — never debited without
+ * the vtxo arriving (ATOMIC_SUBDUST_PLAN.md §3).
  *
- * Atomicity is preserved, not traded away: either the preimage is revealed
- * and both legs settle, or T passes and boltz refunds the payer. There is no
- * state where the payer is debited and the vtxo never arrives. See
- * ATOMIC_SUBDUST_PLAN.md §3 for the split construction.
- *
- * Sub-dust limitation: the atomic receive route takes only
- * amount/paymentHash/userPubkey/descriptionHash, so a plaintext `description`
- * is dropped on that branch (same trade-off CLINK has always made).
- *
- * Any new LN receive entry point MUST go through here, not raw
- * swaps.createLightningInvoice — that mints a reverse swap unconditionally,
- * and a sub-dust reverse swap strands on claim.
+ * Any new LN receive entry point MUST go through here.
  */
-export async function issueInvoice(
-  deps: LnReceiveDeps,
-  params: IssueInvoiceParams,
-): Promise<IssuedInvoice> {
+export async function issueInvoice(deps: LnReceiveDeps, params: IssueInvoiceParams): Promise<IssuedInvoice> {
   const { amountSats, description, descriptionHash } = params
-
-  if (amountSats < DUST_SATS) {
-    const r = await issueAtomicReceive(atomicDeps(deps), amountSats, descriptionHash)
-    return {
-      kind: 'subdust',
-      invoice: r.invoice,
-      paymentHash: r.paymentHash,
-      expiresAt: absoluteExpiry(r.invoice),
-      receivedSats: amountSats, // 1:1 — no swap fee on the atomic path (v1)
-      swapId: r.swapId,
-      preimage: r.preimage,
-    }
-  }
-
-  const result = await deps.swaps.createLightningInvoice({
-    amount: amountSats,
-    description,
-    descriptionHash,
-  })
+  const r = await issueAtomicReceive(atomicDeps(deps), amountSats, descriptionHash, description)
   return {
-    kind: 'swap',
-    invoice: result.invoice,
-    paymentHash: result.paymentHash,
-    expiresAt: absoluteExpiry(result.invoice),
-    receivedSats: result.amount,
-    swapId: result.pendingSwap.id,
+    kind: 'subdust',
+    invoice: r.invoice,
+    paymentHash: r.paymentHash,
+    expiresAt: absoluteExpiry(r.invoice),
+    receivedSats: amountSats,
+    swapId: r.swapId,
+    preimage: r.preimage,
   }
 }
 
@@ -137,9 +94,9 @@ const EXPIRY_GRACE_SECONDS = 15 * 60
 
 /**
  * Boot + periodic pass for atomic sub-dust receives. Two jobs:
- *  1. drive every non-terminal receive swap (poll boltz status → once funded,
- *     verify-before-act, claim revealing our preimage, then settle boltz's hold
- *     invoice) — restart-safe, so a swap boltz funded while we were down resumes.
+ *  1. drive every non-terminal receive swap (poll subdustd status → once funded,
+ *     verify-before-act, claim revealing our preimage, then settle subdustd's hold
+ *     invoice) — restart-safe, so a swap subdustd funded while we were down resumes.
  *  2. flip the matching `transactions` row (NWC make_invoice, swap_id IS NULL)
  *     to settled with our own preimage, or to expired once the grace passes.
  *  3. terminalize never-funded receives past their invoice expiry (below).
@@ -150,12 +107,12 @@ export type ExpiryDecoder = (invoice: string) => number
 
 /**
  * Terminalize never-funded receives past their invoice expiry. A receive stuck
- * at `invoice_issued` (boltz never funded — empty mini-wallet, or the old
+ * at `invoice_issued` (subdustd never funded — empty mini-wallet, or the old
  * funding bug) can't complete: its held hold-invoice htlc just times out and
  * refunds the payer. Without this, driveAtomicReceives polls its status every
  * tick forever. Keyed off the invoice's own expiry (decoded from the stored
  * BOLT11), so it covers both NWC and CLINK receives (only NWC has a
- * `transactions` row). funded/claimed are in-flight and left alone (boltz
+ * `transactions` row). funded/claimed are in-flight and left alone (subdustd
  * refunds funded past T; claimed retries settle). Returns the swept swap ids.
  */
 export function sweepExpiredAtomicReceives(

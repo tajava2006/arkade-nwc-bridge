@@ -34,7 +34,7 @@ export function transactionRowToNwc(row: TransactionRow): Record<string, unknown
   // preimage and settled_at are payment evidence — NIP-47 defines both as
   // present only for paid invoices. Internally the writers use settled_at as
   // a generic "resolved at" on some failure paths (M1), and rows written
-  // before the onSwapTerminal fix may carry a preimage despite never being
+  // before the Boltz-era onSwapTerminal fix may carry a preimage despite never being
   // paid — gate on state here so the NWC surface can't attest a payment that
   // didn't happen.
   const settled = row.state === 'settled'

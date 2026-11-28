@@ -1,3 +1,4 @@
+import { LnSendRefused } from '../../src/ln_send'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { Config } from '../../src/config'
 import { NwcError } from '../../src/lib/errors'
@@ -12,17 +13,16 @@ import { openTempDb, type TempDb } from '../helpers/db'
 import {
   INVOICE_2000_SAT,
   emptyBalance,
-  fakeInvoiceResponse,
   fakeSpendableVtxo,
-  fakeSubmarineSwap,
-  makeSwapsStub,
+  knownPreimageInvoice,
+  makeLightningStub,
+  stubSubdustdReceive,
   makeWalletStub,
 } from '../helpers/mocks'
 
 // The submarine rail reads dust (change guard) + deprecatedSigners (the
 // explicit-selection safety valve) before picking inputs; injected so these
 // stay offline.
-const arkInfoStub = async () => ({ dust: 330n, deprecatedSigners: [] }) as never
 
 const CFG = {
   network: 'bitcoin',
@@ -92,234 +92,191 @@ describe('handlers', () => {
       globalThis.fetch = realFetch
     })
 
+    const mkDeps = (conn: Connection, eventId: string) => ({
+      lightning: { subdustdUrl: 'http://subdustd.invalid' },
+      db: temp.db,
+      conn,
+      eventId,
+      wallet: makeWalletStub(),
+      arkServerUrl: 'http://arkd.invalid',
+    })
+
     test('rejects non-positive amounts with OTHER', async () => {
-      const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-a', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
-      await expect(handleMakeInvoice(deps, { amount: -1 })).rejects.toMatchObject({
-        code: 'OTHER',
-      })
+      const deps = mkDeps(newConn(temp), 'evt-a')
+      await expect(handleMakeInvoice(deps, { amount: -1 })).rejects.toMatchObject({ code: 'OTHER' })
       await expect(handleMakeInvoice(deps, {})).rejects.toMatchObject({ code: 'OTHER' })
     })
 
     test('rejects sub-sat amounts (non-multiple of 1000 msat) with OTHER', async () => {
-      const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
-      await expect(handleMakeInvoice(deps, { amount: 1500 })).rejects.toMatchObject({
-        code: 'OTHER',
-      })
+      await expect(handleMakeInvoice(mkDeps(newConn(temp), 'evt-b'), { amount: 1500 })).rejects.toMatchObject({ code: 'OTHER' })
     })
 
     test('rejects a malformed description_hash with OTHER', async () => {
-      const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-b2', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
       await expect(
-        handleMakeInvoice(deps, { amount: 1_000_000, description_hash: 'not-hex' }),
+        handleMakeInvoice(mkDeps(newConn(temp), 'evt-b2'), { amount: 1_000_000, description_hash: 'not-hex' }),
       ).rejects.toMatchObject({ code: 'OTHER' })
     })
 
-    test('≥dust inserts a pending swap row — amount = BOLT11 nominal, fee = the swap cut', async () => {
-      const conn = newConn(temp)
-      // Client asks for 1000 sat. Boltz takes 10 sat fee, 990 sat lands on Ark.
-      const swaps = makeSwapsStub({
-        createLightningInvoice: async (args) => {
-          expect(args.amount).toBe(1000)
-          return fakeInvoiceResponse({
-            amount: 990,
-            // A real decodable bolt11 — issueInvoice now decodes it for the
-            // absolute expiry (absoluteExpiry), so a short stub throws.
-            invoice: INVOICE_2000_SAT,
-            paymentHash: 'aa'.repeat(32),
-          })
-        },
-      })
-      const r = (await handleMakeInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-c', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' },
-        { amount: 1_000_000, description: 'tea' },
-      )) as Record<string, unknown>
-
-      expect(r.type).toBe('incoming')
-      expect(r.state).toBe('pending')
-      expect(r.invoice).toBe(INVOICE_2000_SAT)
-      expect(r.amount).toBe(1_000_000) // the nominal the client asked for — never inflated
-      expect(r.fees_paid).toBe(10_000) // the credit is derived: 1000 − 10 lands on Ark
-      expect(r.description).toBe('tea')
-      expect(r.payment_hash).toBe('aa'.repeat(32))
-
-      const row = temp.db
-        .query<
-          { state: string; amount_msat: number; fees_paid_msat: number; description: string; swap_id: string | null; expires_at: number | null },
-          []
-        >(
-          `SELECT state, amount_msat, fees_paid_msat, description, swap_id, expires_at FROM transactions`,
-        )
-        .get()
-      expect(row?.state).toBe('pending')
-      expect(row?.amount_msat).toBe(1_000_000)
-      expect(row?.fees_paid_msat).toBe(10_000)
-      expect(row?.description).toBe('tea')
-      // syncSwapToDb (boltz.ts) flips this row on settlement via the swap id.
-      expect(row?.swap_id).toBe('swap-id-fake')
-      expect(typeof row?.expires_at).toBe('number')
+    test('an Ark-only bridge refuses with NOT_IMPLEMENTED', async () => {
+      await expect(
+        handleMakeInvoice({ ...mkDeps(newConn(temp), 'evt-noln'), lightning: undefined }, { amount: 1_000_000 }),
+      ).rejects.toMatchObject({ code: 'NOT_IMPLEMENTED' })
     })
 
-    // The sub-dust make_invoice branch now routes through the ATOMIC receive
-    // (issueAtomicReceive → boltz /v2/subdust/atomic/receive/*), which needs the
-    // SDK's ark providers + a live boltz — too coupled to mock here. It's
-    // validated end-to-end by the #14 receive drill (atomic_receive_e2e).
+    test('inserts a pending row — amount = BOLT11 nominal, no fee (1:1), matched later by payment hash', async () => {
+      const { bodies } = stubSubdustdReceive('http://subdustd.invalid')
+      const r = (await handleMakeInvoice(mkDeps(newConn(temp), 'evt-c'), { amount: 1_000_000, description: 'tea' })) as Record<string, unknown>
+      expect(bodies[0]).toMatchObject({ amount: 1000, description: 'tea' })
+      expect(r).toMatchObject({ type: 'incoming', state: 'pending', amount: 1_000_000, description: 'tea' })
+      expect(r.fees_paid).toBeUndefined()
+      const row = temp.db
+        .query<{ state: string; amount_msat: number; fees_paid_msat: number; payment_hash: string; swap_id: string | null; expires_at: number | null }, []>(
+          `SELECT state, amount_msat, fees_paid_msat, payment_hash, swap_id, expires_at FROM transactions`,
+        )
+        .get()!
+      expect(row).toMatchObject({ state: 'pending', amount_msat: 1_000_000, fees_paid_msat: 0, swap_id: null })
+      expect(row.payment_hash).toBe(String(r.payment_hash))
+      expect(typeof row.expires_at).toBe('number')
+    })
+
+    test('a NIP-57 zap: description_hash reaches subdustd (a 21-sat zap is a 21-sat invoice)', async () => {
+      const { bodies } = stubSubdustdReceive('http://subdustd.invalid')
+      const r = (await handleMakeInvoice(mkDeps(newConn(temp), 'evt-z'), { amount: 21_000, description_hash: 'cd'.repeat(32) })) as Record<string, unknown>
+      expect(bodies[0]).toMatchObject({ amount: 21, descriptionHash: 'cd'.repeat(32) })
+      expect(r.amount).toBe(21_000)
+    })
+
+    test('a subdustd refusal is an OTHER error and leaves no row', async () => {
+      globalThis.fetch = (async () => new Response('no float', { status: 503 })) as unknown as typeof fetch
+      await expect(handleMakeInvoice(mkDeps(newConn(temp), 'evt-r'), { amount: 1_000_000 })).rejects.toMatchObject({ code: 'OTHER' })
+      expect(temp.db.query('SELECT COUNT(*) AS n FROM transactions').get()).toEqual({ n: 0 })
+    })
   })
 
   describe('pay_invoice', () => {
+    const payDeps = (conn: Connection, eventId: string, stub = makeLightningStub()) => ({
+      lightning: stub.lightning,
+      send: stub.send,
+      db: temp.db,
+      conn,
+      eventId,
+      wallet: makeWalletStub(),
+      arkServerUrl: 'http://arkd.invalid',
+    })
+    const rowOf = (eventId: string) =>
+      temp.db
+        .query<{ state: string; amount_msat: number; fees_paid_msat: number | null; preimage: string | null; error: string | null; swap_id: string | null }, [string]>(
+          `SELECT state, amount_msat, fees_paid_msat, preimage, error, swap_id FROM transactions WHERE request_event_id = ?`,
+        )
+        .get(eventId)
+    const spentOf = (conn: Connection) =>
+      temp.db.query<{ spent_msat: number }, [number]>('SELECT spent_msat FROM connections WHERE id = ?').get(conn.id)!.spent_msat
+
     test('rejects missing/invalid invoice with OTHER', async () => {
-      const conn = newConn(temp)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-d', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
+      const deps = payDeps(newConn(temp), 'evt-d')
       await expect(handlePayInvoice(deps, {})).rejects.toMatchObject({ code: 'OTHER' })
-      await expect(handlePayInvoice(deps, { invoice: 'not-a-bolt11' })).rejects.toMatchObject({
-        code: 'OTHER',
-      })
+      await expect(handlePayInvoice(deps, { invoice: 'not-a-bolt11' })).rejects.toMatchObject({ code: 'OTHER' })
+    })
+
+    test('an Ark-only bridge (no Lightning rails) refuses with NOT_IMPLEMENTED', async () => {
+      const deps = { ...payDeps(newConn(temp), 'evt-noln'), lightning: undefined }
+      await expect(handlePayInvoice(deps, { invoice: INVOICE_2000_SAT })).rejects.toMatchObject({ code: 'NOT_IMPLEMENTED' })
     })
 
     test('over-budget connections fail with QUOTA_EXCEEDED', async () => {
-      const r = createConnection(temp.db, {
-        label: null,
-        relays: ['wss://r'],
-        budgetMsat: 500_000, // 500 sat budget
+      const conn = createConnection(temp.db, { label: null, relays: ['wss://r'], budgetMsat: 500_000 }).connection
+      await expect(handlePayInvoice(payDeps(conn, 'evt-e'), { invoice: INVOICE_2000_SAT })).rejects.toMatchObject({
+        code: 'QUOTA_EXCEEDED',
       })
-      const conn = r.connection
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-e', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
-      // 2000 sat invoice > 500 sat budget
-      await expect(
-        handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
-      ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' })
     })
 
-    test('successful pay updates transaction + connection.spent_msat', async () => {
+    test('successful pay: amount stays the nominal, fees_paid is the swap fee, budget books both', async () => {
       const conn = newConn(temp)
-      const swaps = makeSwapsStub({
-        createSubmarineSwap: async (args) => {
-          expect(args.invoice).toBe(INVOICE_2000_SAT)
-          // Boltz takes ~5 sat fee on a 2000-sat invoice — total leaving
-          // the wallet is 2005 sat.
-          return fakeSubmarineSwap({ expectedAmount: 2005 })
-        },
-        waitForSwapSettlement: async () => ({ preimage: 'be'.repeat(32) }),
-      })
-      // Well above expectedAmount + drain slack, so the funding stays exact.
-      const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
-      const r = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-f', wallet, boltzApiUrl: '', arkServerUrl: '', getArkInfo: arkInfoStub },
-        { invoice: INVOICE_2000_SAT },
-      )) as Record<string, unknown>
-      expect(r.preimage).toBe('be'.repeat(32))
+      const { preimage, invoice } = knownPreimageInvoice()
+      const r = (await handlePayInvoice(payDeps(conn, 'evt-f', makeLightningStub({ feeSats: 5, preimage })), { invoice })) as Record<string, unknown>
+      expect(r.preimage).toBe(preimage)
       expect(r.fees_paid).toBe(5_000)
+      const row = rowOf('evt-f')!
+      expect(row.state).toBe('settled')
+      expect(row.amount_msat).toBe(2_000_000) // stays the BOLT11 nominal — fee is separate
+      expect(row.fees_paid_msat).toBe(5_000)
+      expect(row.swap_id).toBe('atomic-swap-1')
+      expect(spentOf(conn)).toBe(2_005_000) // budget tracks wallet movement, fee included
+    })
 
-      const row = temp.db
-        .query<
-          { state: string; amount_msat: number; fees_paid_msat: number; preimage: string },
-          []
-        >(`SELECT state, amount_msat, fees_paid_msat, preimage FROM transactions`)
-        .get()
-      expect(row?.state).toBe('settled')
-      expect(row?.amount_msat).toBe(2_000_000) // stays the BOLT11 nominal — fee is separate
-      expect(row?.fees_paid_msat).toBe(5_000)
-
-      const spent = temp.db
-        .query<{ spent_msat: number }, [number]>(
-          'SELECT spent_msat FROM connections WHERE id = ?',
-        )
-        .get(conn.id)
-      expect(spent?.spent_msat).toBe(2_005_000) // budget tracks wallet movement, fee included
+    test('a zero-fee pay reports no fees_paid', async () => {
+      const { preimage, invoice } = knownPreimageInvoice()
+      const r = (await handlePayInvoice(payDeps(newConn(temp), 'evt-f0', makeLightningStub({ preimage })), {
+        invoice,
+      })) as Record<string, unknown>
+      expect(r.fees_paid).toBeUndefined()
     })
 
     test('periodic renewal: spend from a previous window does not count', async () => {
       // 2500 sat daily budget with 1000 sats spent two days ago — lifetime
       // total (3000) would bust the cap, the daily window (2000) does not.
-      const r = createConnection(temp.db, {
-        label: null,
-        relays: ['wss://r'],
-        budgetMsat: 2_500_000,
-        budgetRenewal: 'daily',
-      })
-      const conn = r.connection
+      const conn = createConnection(temp.db, { label: null, relays: ['wss://r'], budgetMsat: 2_500_000, budgetRenewal: 'daily' }).connection
       temp.db
         .query(
-          `INSERT INTO transactions (
-             connection_id, type, request_event_id, invoice, payment_hash,
-             amount_msat, state, created_at
-           ) VALUES (?, 'outgoing', 'evt-old', 'lnbc1', 'hash-old', ?, 'settled', ?)`,
+          `INSERT INTO transactions (connection_id, type, request_event_id, invoice, payment_hash, amount_msat, state, created_at)
+           VALUES (?, 'outgoing', 'evt-old', 'lnbc1', 'hash-old', ?, 'settled', ?)`,
         )
         .run(conn.id, 1_000_000, Math.floor(Date.now() / 1000) - 2 * 86_400)
       temp.db.query('UPDATE connections SET spent_msat = ? WHERE id = ?').run(1_000_000, conn.id)
-
-      const swaps = makeSwapsStub({
-        createSubmarineSwap: async () => fakeSubmarineSwap({ expectedAmount: 2005 }),
-        waitForSwapSettlement: async () => ({ preimage: 'be'.repeat(32) }),
-      })
-      const wallet = makeWalletStub({ vtxos: [fakeSpendableVtxo(10_000)] })
-      const res = (await handlePayInvoice(
-        { swaps, db: temp.db, conn, eventId: 'evt-window', wallet, boltzApiUrl: '', arkServerUrl: '', getArkInfo: arkInfoStub },
-        { invoice: INVOICE_2000_SAT },
-      )) as Record<string, unknown>
-      expect(res.preimage).toBe('be'.repeat(32))
+      const { preimage, invoice } = knownPreimageInvoice()
+      const res = (await handlePayInvoice(payDeps(conn, 'evt-window', makeLightningStub({ feeSats: 5, preimage })), {
+        invoice,
+      })) as Record<string, unknown>
+      expect(res.preimage).toBe(preimage)
     })
 
-    test("never renewal: the same lifetime spend still busts the cap", async () => {
-      const r = createConnection(temp.db, {
-        label: null,
-        relays: ['wss://r'],
-        budgetMsat: 2_500_000,
-        budgetRenewal: 'never',
-      })
-      const conn = r.connection
+    test('never renewal: the same lifetime spend still busts the cap', async () => {
+      const conn = createConnection(temp.db, { label: null, relays: ['wss://r'], budgetMsat: 2_500_000, budgetRenewal: 'never' }).connection
       temp.db.query('UPDATE connections SET spent_msat = ? WHERE id = ?').run(1_000_000, conn.id)
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-life', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
-      await expect(
-        handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
-      ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' })
+      await expect(handlePayInvoice(payDeps(conn, 'evt-life'), { invoice: INVOICE_2000_SAT })).rejects.toMatchObject({
+        code: 'QUOTA_EXCEEDED',
+      })
     })
 
     test('pending payments reserve budget', async () => {
-      const r = createConnection(temp.db, {
-        label: null,
-        relays: ['wss://r'],
-        budgetMsat: 2_500_000,
-        budgetRenewal: 'daily',
-      })
-      const conn = r.connection
+      const conn = createConnection(temp.db, { label: null, relays: ['wss://r'], budgetMsat: 2_500_000, budgetRenewal: 'daily' }).connection
       temp.db
         .query(
-          `INSERT INTO transactions (
-             connection_id, type, request_event_id, invoice, payment_hash,
-             amount_msat, state, created_at
-           ) VALUES (?, 'outgoing', 'evt-inflight', 'lnbc1', 'hash-p', ?, 'pending', ?)`,
+          `INSERT INTO transactions (connection_id, type, request_event_id, invoice, payment_hash, amount_msat, state, created_at)
+           VALUES (?, 'outgoing', 'evt-inflight', 'lnbc1', 'hash-p', ?, 'pending', ?)`,
         )
         .run(conn.id, 1_000_000, Math.floor(Date.now() / 1000))
-      const deps = { swaps: makeSwapsStub(), db: temp.db, conn, eventId: 'evt-reserve', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' }
-      await expect(
-        handlePayInvoice(deps, { invoice: INVOICE_2000_SAT }),
-      ).rejects.toMatchObject({ code: 'QUOTA_EXCEEDED' })
+      await expect(handlePayInvoice(payDeps(conn, 'evt-reserve'), { invoice: INVOICE_2000_SAT })).rejects.toMatchObject({
+        code: 'QUOTA_EXCEEDED',
+      })
     })
 
-    test('SDK failure marks the row failed and throws PAYMENT_FAILED', async () => {
-      const conn = newConn(temp)
-      const swaps = makeSwapsStub({
-        createSubmarineSwap: async () => {
-          throw new Error('route closed')
-        },
-      })
+    test('a failed payment marks the row failed and throws PAYMENT_FAILED', async () => {
+      const { invoice } = knownPreimageInvoice()
       await expect(
-        handlePayInvoice(
-          { swaps, db: temp.db, conn, eventId: 'evt-g', wallet: makeWalletStub(), boltzApiUrl: '', arkServerUrl: '' },
-          { invoice: INVOICE_2000_SAT },
-        ),
+        handlePayInvoice(payDeps(newConn(temp), 'evt-g', makeLightningStub({ outcome: 'failed' })), { invoice }),
       ).rejects.toMatchObject({ code: 'PAYMENT_FAILED' })
+      expect(rowOf('evt-g')).toMatchObject({ state: 'failed' })
+      expect(rowOf('evt-g')!.error).toContain('NO_ROUTE')
+    })
 
-      const row = temp.db
-        .query<{ state: string; error: string }, []>(
-          `SELECT state, error FROM transactions WHERE request_event_id = 'evt-g'`,
-        )
-        .get()
-      expect(row?.state).toBe('failed')
-      expect(row?.error).toContain('route closed')
+    test('a refusal for funds is INSUFFICIENT_BALANCE, row failed', async () => {
+      const refusal = new LnSendRefused('atomic send needs 2340 sats of eligible vtxos', true)
+      const { invoice } = knownPreimageInvoice()
+      await expect(
+        handlePayInvoice(payDeps(newConn(temp), 'evt-g2', makeLightningStub({ payError: refusal })), { invoice }),
+      ).rejects.toMatchObject({ code: 'INSUFFICIENT_BALANCE' })
+      expect(rowOf('evt-g2')).toMatchObject({ state: 'failed' })
+    })
+
+    test('an unresolved outcome keeps the row pending (reservation held, retry refused)', async () => {
+      const conn = newConn(temp)
+      const { invoice } = knownPreimageInvoice()
+      await expect(
+        handlePayInvoice(payDeps(conn, 'evt-u', makeLightningStub({ outcome: 'unresolved' })), { invoice }),
+      ).rejects.toMatchObject({ code: 'INTERNAL' })
+      expect(rowOf('evt-u')).toMatchObject({ state: 'pending' })
+      await expect(handlePayInvoice(payDeps(conn, 'evt-u2'), { invoice })).rejects.toThrow(/already being paid/)
     })
   })
 
