@@ -95,6 +95,16 @@ describe.skipIf(!SUBDUSTD_URL)('LN receive core on regtest', () => {
     expect(JSON.parse(sh('exec', 'lnd', 'lncli', '--network=regtest', 'lookupinvoice', r.payment_hash)).state).toBe('SETTLED')
     const coins = await wallet.getSpendableVtxos({ withRecoverable: false } as never)
     expect(coins.map((v) => v.value)).toContain(5_000)
+    // ≥ dust → claimed off a VHTLC (F32_VHTLC_PLAN): its terms are on the row, the 4-leaf was never offered
+    const row = db
+      .query<{ vhtlc: string | null; peer_pubkey: string | null; refund_locktime: number; state: string }, [string]>(
+        `SELECT vhtlc, peer_pubkey, refund_locktime, state FROM atomic_swaps WHERE payment_hash = ?`,
+      )
+      .get(r.payment_hash)!
+    expect(row.state).toBe('settled')
+    expect(JSON.parse(row.vhtlc!).refundNoReceiverDelaySecs).toBeGreaterThan(JSON.parse(row.vhtlc!).claimDelaySecs)
+    expect(row.peer_pubkey).toMatch(/^[0-9a-f]{64}$/)
+    expect(row.refund_locktime).toBeGreaterThan(Date.now() / 1000)
   }, 300_000)
 
   test('a 21-sat zap: the invoice is 21 sats with the description hash alone (NIP-57), and settles', async () => {

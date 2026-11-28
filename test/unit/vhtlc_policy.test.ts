@@ -8,7 +8,7 @@ import {
   CSV_UNIT_SECS,
   DEFAULT_VHTLC_POLICY,
   policyFor,
-  receiveFundingMinLifeSecs,
+  receiveFundingMarginSecs,
   receiveTimeouts,
   ripemd160,
   roundUpCsv,
@@ -39,11 +39,12 @@ describe('policyFor — block assumptions come from the network, not the counter
   test('mainnet keeps the 9/11-minute bounds and an hour of MTP lag', () => {
     expect(policyFor(E, 'bitcoin')).toEqual({ ...DEFAULT_VHTLC_POLICY, exitDelaySecs: E })
   })
-  test('regtest runs on the harness’s ~30-second tick', () => {
+  test('regtest fits its 2-hour batches (E 2048, 1h send window, 10-minute invoices)', () => {
     const r = policyFor(2048, 'regtest')
     expect([r.fastBlockSecs, r.slowBlockSecs, r.mtpLagSecs]).toEqual([20, 30, 180])
-    // a 2-hour regtest batch can fund a 1-hour send window
     expect(sendFundingMinLifeSecs(r, 3_600)).toBeLessThan(7_200)
+    const recv = receiveTimeouts(r, 0, 600)
+    expect(recv.refundLocktime + receiveFundingMarginSecs(r)).toBeLessThan(7_200)
   })
 })
 
@@ -99,14 +100,16 @@ describe('checkSendOffer — the user vets subdustd’s send terms before fundin
 })
 
 describe('receive timeouts (sender = subdustd, receiver = user)', () => {
-  const t = receiveTimeouts(p, NOW)
+  const INVOICE_EXPIRY = 21_600
+  const t = receiveTimeouts(p, NOW, INVOICE_EXPIRY)
 
   test('every CSV is a 512-second multiple arkd will spend', () => {
     for (const s of [t.claimDelaySecs, t.refundDelaySecs, t.refundNoReceiverDelaySecs]) expect(csvOk(s)).toBe(true)
   })
 
-  test('R1: detect + unroll + d_c + confirm all fit before T, at slow blocks', () => {
-    expect(t.refundLocktime - NOW).toBeGreaterThanOrEqual(t.claimDelaySecs + slow(p.detectBlocks + U + K))
+  test('R1: paid at the invoice’s last second, detect + unroll + d_c + confirm still fit before T', () => {
+    const paidAt = NOW + INVOICE_EXPIRY
+    expect(t.refundLocktime - paidAt).toBeGreaterThanOrEqual(t.claimDelaySecs + slow(p.detectBlocks + U + K))
   })
 
   test('C1/R5: the user’s claim leaf beats subdustd’s by K slow blocks', () => {
@@ -124,8 +127,8 @@ describe('receive timeouts (sender = subdustd, receiver = user)', () => {
 })
 
 describe('checkReceiveBeforeClaim — the user vets a funded receive before showing the preimage', () => {
-  const own = receiveTimeouts(p, NOW)
-  const fresh = { nowSecs: NOW, batchExpirySecs: NOW + receiveFundingMinLifeSecs(p), vhtlcDepth: 3 }
+  const own = receiveTimeouts(p, NOW, 0)
+  const fresh = { nowSecs: NOW, batchExpirySecs: own.refundLocktime + receiveFundingMarginSecs(p), vhtlcDepth: 3 }
 
   test('subdustd’s own terms on a coin it may fund from pass', () => expect(checkReceiveBeforeClaim(p, own, fresh)).toEqual([]))
 
@@ -156,7 +159,7 @@ describe('buildVhtlc', () => {
   const key = () => randomBytes(32)
   const [user, peer, server] = [key(), key(), key()]
   const H = createHash('sha256').update(randomBytes(32)).digest()
-  const timeouts = receiveTimeouts(p, NOW)
+  const timeouts = receiveTimeouts(p, NOW, 0)
 
   test('locks on HASH160 of the preimage = ripemd160(H), same as the 4-leaf claim', () => {
     const v = buildVhtlc({ sender: peer, receiver: user, server, paymentHash: H, timeouts })

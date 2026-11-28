@@ -11,9 +11,14 @@ import {
 } from '@arkade-os/sdk'
 import {
   AtomicVtxoScript,
+  buildVhtlc,
   canTransition,
+  checkReceiveBeforeClaim,
+  claimAlone,
   computeClaimSplit,
   finishClaim,
+  policyFor,
+  vtxoUnrollDepth,
   serverUnrollScript,
   SqliteAtomicSwapRepository,
   SwapDirection,
@@ -21,6 +26,7 @@ import {
   type AtomicSwapState,
   type AtomicPresig,
   type SharedVtxo,
+  type VhtlcDelays,
 } from './index'
 import { postJson, getJson } from './http'
 import { confirmSpent, hrp, timelockType, toXOnly } from './ark_util'
@@ -36,6 +42,15 @@ import type { NotifyFn } from '../nostr/notifier'
 // this is an ACTIVE flow the bridge drives: init → poll status → claim → settle.
 // It runs on a boot + periodic pass (driveAtomicReceives) so a restart resumes
 // any swap that subdustd funded while we were down.
+
+/**
+ * The largest receive we accept on the 4-leaf script, where we (the claimer)
+ * have no unilateral leaf (F32): the operator could see our preimage and keep
+ * both sides, so the exposure must stay below dust. Our own constant, not
+ * arkd's dust: arkd is the operator too, and a dust it inflated would push big
+ * receives back onto the 4-leaf. 330 is mainnet's P2TR dust.
+ */
+export const FOUR_LEAF_RECEIVE_LIMIT_SATS = 330
 
 export interface AtomicReceiveDeps {
   identity: Identity
@@ -113,7 +128,7 @@ export async function issueAtomicReceive(
   const H = sha256(preimage)
   const userXOnly = toXOnly(await deps.identity.xOnlyPublicKey())
 
-  const init = await postJson<{ swapId: string; invoice: string }>(
+  const init = await postJson<{ swapId: string; invoice: string; script?: 'vhtlc' | 'atomic4' }>(
     `${deps.subdustdUrl}/v2/subdust/atomic/receive/init`,
     {
       amount: amountSats,
@@ -122,6 +137,13 @@ export async function issueAtomicReceive(
       ...(descriptionHash ? { descriptionHash } : description ? { description } : {}),
     },
   )
+
+  // F32: an invoice we would never claim is not handed out.
+  if (amountSats >= FOUR_LEAF_RECEIVE_LIMIT_SATS && init.script !== 'vhtlc') {
+    throw new Error(
+      `subdustd offered a ${init.script ?? '4-leaf'} receive for ${amountSats} sats — at ${FOUR_LEAF_RECEIVE_LIMIT_SATS}+ only a VHTLC protects it; refusing`,
+    )
+  }
 
   // Persist BEFORE returning the invoice: if the payer pays and we crash, the
   // boot pass resumes the claim from the stored preimage.
@@ -156,6 +178,9 @@ interface ReceiveStatus {
    * hardcode 605184). Absent on older subdustd → fall back to the info delay.
    */
   boltzScriptDelay?: string
+  /** 'vhtlc' (a ≥ dust): claim through the VHTLC claim leaf, no presig. Absent = 4-leaf. */
+  script?: 'vhtlc' | 'atomic4'
+  vhtlc?: VhtlcDelays
 }
 
 /**
@@ -189,7 +214,14 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
     return false
   }
 
-  if (status.state !== 'funded' || !status.fundingOutpoint || !status.presigs || status.boltzPubkey === undefined || status.refundLocktime === undefined) {
+  const isVhtlc = status.script === 'vhtlc'
+  if (
+    status.state !== 'funded' ||
+    !status.fundingOutpoint ||
+    (isVhtlc ? !status.vhtlc : !status.presigs) ||
+    status.boltzPubkey === undefined ||
+    status.refundLocktime === undefined
+  ) {
     return false // subdustd hasn't funded yet
   }
 
@@ -204,14 +236,28 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   const userXOnly = toXOnly(await deps.identity.xOnlyPublicKey())
   const peerXOnly = toXOnly(hex.decode(status.boltzPubkey))
 
-  const script = new AtomicVtxoScript({
-    funder: peerXOnly,
-    claimer: userXOnly,
-    server,
-    paymentHash: hex.decode(swap.paymentHash),
-    refundLocktime: BigInt(status.refundLocktime),
-    exitDelay: d,
-  })
+  // F32 again at claim time: never show our preimage on a 4-leaf at or above
+  // dust (a receive issued before this rule, or a server that changed its mind).
+  if (!isVhtlc && a >= FOUR_LEAF_RECEIVE_LIMIT_SATS) {
+    console.warn(`atomic receive ${swapId}: funded as a 4-leaf for ${a} sats — not claiming (F32); subdustd refunds the payer at T`)
+    return false
+  }
+  const script = isVhtlc
+    ? buildVhtlc({
+        sender: peerXOnly,
+        receiver: userXOnly,
+        server,
+        paymentHash: hex.decode(swap.paymentHash),
+        timeouts: { refundLocktime: status.refundLocktime, ...status.vhtlc! },
+      })
+    : new AtomicVtxoScript({
+        funder: peerXOnly,
+        claimer: userXOnly,
+        server,
+        paymentHash: hex.decode(swap.paymentHash),
+        refundLocktime: BigInt(status.refundLocktime),
+        exitDelay: d,
+      })
 
   const [txid, voutStr] = status.fundingOutpoint.split(':')
   if (!txid || voutStr === undefined) throw new Error(`bad funding outpoint ${status.fundingOutpoint}`)
@@ -222,6 +268,28 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
 
   const shared: SharedVtxo = { txid, vout: Number(voutStr), value: v.value, script }
   const netHrp = hrp(info.network)
+
+  // Before the preimage leaves us (the claim shows it to the operator): the
+  // VHTLC's terms must still let an on-chain claim beat T (R1), its batch must
+  // outlive an unroll (R2), our leaf must mature first (C1/R5), and its unroll
+  // must be bounded. Failing any, we never claim — no preimage out, the HTLC
+  // times out and the payer is refunded. Rechecked each pass: T only gets closer.
+  if (isVhtlc && swap.state === 'invoice_issued') {
+    if (v.value < a) throw new Error(`VHTLC ${status.fundingOutpoint} holds ${v.value} < ${a} sats`)
+    const problems = checkReceiveBeforeClaim(
+      policyFor(Number(d), info.network),
+      { refundLocktime: status.refundLocktime, ...status.vhtlc! },
+      {
+        nowSecs: Math.floor(Date.now() / 1000),
+        batchExpirySecs: v.expiresAt ? Math.floor(v.expiresAt.getTime() / 1000) : 0,
+        vhtlcDepth: await vtxoUnrollDepth(indexer, { txid, vout: Number(voutStr) }),
+      },
+    )
+    if (problems.length > 0) {
+      console.warn(`atomic receive ${swapId}: not claiming — ${problems.join('; ')}`)
+      return false
+    }
+  }
   // subdustd's change output rides on subdustd's OWN wallet-script delay, not the
   // info delay — a wrong guess shifts the reconstructed claim txid off the
   // presig. Only subdustd's money depends on this value; our output stays pinned
@@ -238,12 +306,19 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   // funded, and re-claiming an already-spent shared vtxo can't succeed).
   let state = swap.state
   if (state === 'invoice_issued') {
+    // The row alone must rebuild the script later (an on-chain claim needs it).
+    repo.setScript(swapId, { refundLocktime: status.refundLocktime, peerPubkey: hex.encode(peerXOnly), vhtlc: isVhtlc ? status.vhtlc : undefined })
     repo.setFundingOutpoint(swapId, status.fundingOutpoint)
     repo.transition(swapId, 'funded')
     state = 'funded'
   }
   if (state === 'funded') {
-    await finishClaim(shared, split.outputs, unroll, status.presigs, deps.identity, preimage, ark)
+    if (isVhtlc) {
+      // The whole VHTLC is ours: subdustd funded exactly a (its change left in the funding tx).
+      await claimAlone(shared, [{ script: bridgeAddr.pkScript, amount: BigInt(v.value) }], unroll, deps.identity, preimage, ark)
+    } else {
+      await finishClaim(shared, split.outputs, unroll, status.presigs!, deps.identity, preimage, ark)
+    }
     repo.transition(swapId, 'claimed')
   }
 

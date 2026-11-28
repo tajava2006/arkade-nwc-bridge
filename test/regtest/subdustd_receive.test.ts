@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { hex } from '@scure/base'
 import { DefaultVtxo, SingleKey, type ArkTxInput } from '@arkade-os/sdk'
-import { AtomicVtxoScript, computeClaimSplit, finishClaim, fundShared, type SharedVtxo } from '../../src/atomic/index.ts'
+import { AtomicVtxoScript, buildVhtlc, claimAlone, computeClaimSplit, finishClaim, fundShared, policyFor, receiveTimeouts, type SharedVtxo } from '../../src/atomic/index.ts'
 import { ReceiveService, receiveFinalCltv } from '../../subdustd/api/receive.ts'
 import { SwapLocks } from '../../subdustd/api/http_error.ts'
 import { ArkSigner, hrpOf } from '../../subdustd/ark/signer.ts'
@@ -145,7 +145,8 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd receive endpoints on 
     const descriptionHash = sha256('cd'.repeat(16))
     const a = await post('init', { amount: 21, paymentHash: r.hash, userPubkey: user, descriptionHash })
     expect(a.status).toBe(200)
-    expect(Object.keys(a.body).sort()).toEqual(['invoice', 'swapId'])
+    expect(Object.keys(a.body).sort()).toEqual(['invoice', 'script', 'swapId'])
+    expect(a.body.script).toBe('atomic4') // 21 < dust
     const decoded = await lnd.decodeInvoice(a.body.invoice)
     expect(decoded).toMatchObject({ valueSat: 21, paymentHash: r.hash, descriptionHash, expirySecs: knobs.receiveWindowSecs })
     expect(decoded.cltvExpiry).toBe(receiveFinalCltv(knobs))
@@ -157,6 +158,11 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd receive endpoints on 
     const b = await post('init', { amount: 400, paymentHash: big.hash, userPubkey: user, description: 'tea' })
     expect(b.status).toBe(200)
     expect(await lnd.decodeInvoice(b.body.invoice)).toMatchObject({ valueSat: 400, paymentHash: big.hash })
+    // ≥ dust → the VHTLC, its hold invoice sized for R4 (a claim d_s after an unroll begun at T)
+    expect(b.body.script).toBe('vhtlc')
+    const info = await signer.getInfo()
+    const t = receiveTimeouts(policyFor(Number(info.unilateralExitDelay), info.network), 0, knobs.receiveWindowSecs)
+    expect((await lnd.decodeInvoice(b.body.invoice)).cltvExpiry).toBe(t.finalCltvBlocks)
     await lnd.cancelHoldInvoice(big.hash)
     expect((await post('init', { amount: 400, paymentHash: newReceiver().hash, userPubkey: user, description: 'x', descriptionHash })).body.error).toContain('not both')
     expect((await post('init', { amount: 21, paymentHash: 'xyz', userPubkey: user })).body.error).toBe('invalid parameter: paymentHash')
@@ -181,7 +187,7 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd receive endpoints on 
       const s = await status(init.body.swapId)
       return s.state === 'funded' ? s : undefined
     })
-    expect(Object.keys(st).sort()).toEqual(['boltzPubkey', 'boltzScriptDelay', 'exitDelay', 'fundingOutpoint', 'presigs', 'refundLocktime', 'state'])
+    expect(Object.keys(st).sort()).toEqual(['boltzPubkey', 'boltzScriptDelay', 'exitDelay', 'fundingOutpoint', 'presigs', 'refundLocktime', 'script', 'state'])
     const { claimTxid, shared } = await claim(st, r, 21)
 
     expect((await post('settle', { swapId: init.body.swapId, preimage: r.preimage })).body).toEqual({ settled: true })
@@ -192,6 +198,53 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('subdustd receive endpoints on 
     const back = await waitFor('our change', async () => (await signer.ownVtxos()).find((v) => v.txid === claimTxid))
     expect(back.value).toBe(shared.value - 21)
   }, 120_000)
+
+  test('dust+ VHTLC receive: funded with exactly a, claimed through the claim leaf alone; subdustd harvests the preimage from that claim', async () => {
+    const r = newReceiver()
+    const userXOnly = await r.user.xOnlyPublicKey()
+    const init = await post('init', { amount: 400, paymentHash: r.hash, userPubkey: hex.encode(userXOnly) })
+    expect(init.body.script).toBe('vhtlc')
+    peerPays(init.body.invoice)
+    const st = await waitFor('funded', async () => {
+      const s = await status(init.body.swapId)
+      return s.state === 'funded' ? s : undefined
+    })
+    expect(st.script).toBe('vhtlc')
+    expect(st.presigs).toBeUndefined()
+    expect(st.vhtlc.refundNoReceiverDelaySecs).toBeGreaterThan(st.vhtlc.claimDelaySecs)
+
+    const info = await signer.getInfo()
+    const server = await signer.serverXOnly()
+    const script = buildVhtlc({
+      sender: hex.decode(st.boltzPubkey),
+      receiver: userXOnly,
+      server,
+      paymentHash: hex.decode(r.hash),
+      timeouts: { refundLocktime: st.refundLocktime, ...st.vhtlc },
+    })
+    const [txid, vout] = st.fundingOutpoint.split(':')
+    const { vtxos } = await signer.indexer.getVtxos({ outpoints: [{ txid, vout: Number(vout) }] })
+    expect(hex.encode(hex.decode(vtxos[0]!.script))).toBe(hex.encode(script.pkScript)) // the VHTLC we expect, nothing else
+    expect(vtxos[0]!.value).toBe(400) // exactly a — subdustd's change stayed in the funding tx
+    // The rest of the picked coin came back to subdustd in the same tx, as a real
+    // coin (the selector never leaves 1..dust−1). Which coin it picked depends on
+    // the earlier tests (the 21-sat receive leaves a 979), so only the shape is pinned.
+    const change = await waitFor('subdustd’s funding change', async () => (await signer.ownVtxos()).find((v) => v.txid === txid))
+    expect(change.value).toBeGreaterThanOrEqual(330)
+
+    const d = BigInt(st.exitDelay)
+    const ours = new DefaultVtxo.Script({ pubKey: userXOnly, serverPubKey: server, csvTimelock: { type: d >= 512n ? 'seconds' : 'blocks', value: d } }).address(hrpOf(info), server)
+    const shared: SharedVtxo = { txid, vout: Number(vout), value: 400, script }
+    await claimAlone(shared, [{ script: ours.pkScript, amount: 400n }], await signer.serverUnroll(), r.user, hex.decode(r.preimage), signer.ark)
+
+    // No /receive/settle: the scan finds the VHTLC spent and reads the preimage out of the claim (F1).
+    await waitFor('subdustd to settle from the harvested preimage', async () => {
+      await service.resumeFunded(init.body.swapId, undefined)
+      return store.get(init.body.swapId)?.state === 'settled' ? true : undefined
+    })
+    expect(store.get(init.body.swapId)?.preimage).toBe(r.preimage)
+    await waitFor('the payer to see SUCCEEDED', () => peerPaymentStatus(r.hash) === 'SUCCEEDED' || undefined)
+  }, 180_000)
 
   test('F14: a restart loses the listener — the resume pass funds the held invoice', async () => {
     const before = new ReceiveService({ store, signer, lnd, knobs, log, locks, emit: () => {} })

@@ -91,7 +91,9 @@ export function stubSubdustdReceive(subdustdUrl: string, invoice?: string): { bo
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>
     bodies.push(body)
     const inv = invoice ?? invoiceWithHash(String(body.paymentHash))
-    return new Response(JSON.stringify({ swapId: `swap-${bodies.length}`, invoice: inv }), { status: 201, headers: { 'content-type': 'application/json' } })
+    // like subdustd: the VHTLC from dust up (the bridge refuses a 4-leaf there)
+    const script = Number(body.amount) >= 330 ? 'vhtlc' : 'atomic4'
+    return new Response(JSON.stringify({ swapId: `swap-${bodies.length}`, invoice: inv, script }), { status: 201, headers: { 'content-type': 'application/json' } })
   }) as unknown as typeof fetch
   return { bodies }
 }

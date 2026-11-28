@@ -53,13 +53,23 @@ export const DEFAULT_VHTLC_POLICY: Omit<VhtlcPolicy, 'exitDelaySecs'> = {
  * The policy for an arkd advertising this unilateralExitDelay on this network.
  * The block-time assumptions are the network's, never the counterparty's word:
  * they are what each side's checks protect its own funds with. Regtest mines
- * on a ~30-second tick (the harness), so mainnet's 9/11-minute bounds would
- * ask its 2-hour batches for 17 hours of life.
+ * on a ~30-second tick with no fee market and 2-hour batches, so it also gets
+ * a smaller K and one block per unroll level — mainnet's margins would leave
+ * no regtest coin old enough to fund anything.
  */
-export const policyFor = (exitDelaySecs: number, network: string): VhtlcPolicy =>
-  network === 'regtest'
-    ? { ...DEFAULT_VHTLC_POLICY, exitDelaySecs, fastBlockSecs: 20, slowBlockSecs: 30, mtpLagSecs: 180 }
-    : { ...DEFAULT_VHTLC_POLICY, exitDelaySecs }
+export const REGTEST_VHTLC_POLICY: Omit<VhtlcPolicy, 'exitDelaySecs'> = {
+  ...DEFAULT_VHTLC_POLICY,
+  confirmBlocks: 12,
+  unrollBlocksPerLevel: 1,
+  fastBlockSecs: 20,
+  slowBlockSecs: 30,
+  mtpLagSecs: 180,
+}
+
+export const policyFor = (exitDelaySecs: number, network: string): VhtlcPolicy => ({
+  ...(network === 'regtest' ? REGTEST_VHTLC_POLICY : DEFAULT_VHTLC_POLICY),
+  exitDelaySecs,
+})
 
 /** A VHTLC sits one checkpoint + one ark tx below its deepest funding input. */
 export const VHTLC_DEPTH_OVER_INPUTS = 2
@@ -140,10 +150,12 @@ const receiveWindowSecs = (p: VhtlcPolicy, claimDelaySecs: number): number =>
 export function receiveTimeouts(
   p: VhtlcPolicy,
   nowSecs: number,
+  /** How long the invoice stays payable. T is fixed at init, so it must still leave R1's window after a late payment. */
+  invoiceExpirySecs: number,
 ): VhtlcTimeouts & { windowSecs: number; finalCltvBlocks: number } {
   const claim = roundUpCsv(p.exitDelaySecs)
   const noReceiver = roundUpCsv(claim + slow(p, p.confirmBlocks))
-  const windowSecs = receiveWindowSecs(p, claim)
+  const windowSecs = invoiceExpirySecs + receiveWindowSecs(p, claim)
   const finalCltvBlocks =
     fastBlocks(p, windowSecs) + unrollBlocks(p) + fastBlocks(p, noReceiver) + p.confirmBlocks + p.settleMarginBlocks
   return {
@@ -156,9 +168,12 @@ export function receiveTimeouts(
   }
 }
 
-/** R2 from subdustd's side: fund receives only from coins the user can still unroll anywhere up to T. */
-export const receiveFundingMinLifeSecs = (p: VhtlcPolicy): number =>
-  receiveWindowSecs(p, roundUpCsv(p.exitDelaySecs)) + slow(p, p.detectBlocks + unrollBlocks(p) + p.confirmBlocks)
+/**
+ * R2 from subdustd's side: fund a receive only from coins whose batch outlives
+ * T by an unroll — the user may claim (and, censored, unroll) right up to T.
+ * The eligibility margin past T.
+ */
+export const receiveFundingMarginSecs = (p: VhtlcPolicy): number => slow(p, p.detectBlocks + unrollBlocks(p) + p.confirmBlocks)
 
 /** A VHTLC's three CSV delays; with T they rebuild the script. */
 export type VhtlcDelays = Omit<OfferedVhtlc, 'refundLocktime'>

@@ -22,6 +22,7 @@ import {
   presignCancel,
   presignClaim,
   refundSpend,
+  selectWithinDepthCap,
   sendFundingMinLifeSecs,
   serverUnrollScript,
   SqliteAtomicSwapRepository,
@@ -39,8 +40,7 @@ import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from '.
 import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
 import { makeExitCostOracle } from '../exit/cost_oracle'
 import { gcOrphanProofs, removeVtxo } from '../exit/vault'
-import { selectSpendInputs, type SelectOptions } from '../coin_select'
-import { chainGraph } from '../exit/chain_order'
+import { selectSpendInputs } from '../coin_select'
 import type { NotifyFn } from '../nostr/notifier'
 
 // Bridge side of the atomic sub-dust SEND (ARK -> LN). The bridge is the funder
@@ -139,38 +139,6 @@ function sendScriptForRow(swap: AtomicSwapRow, userXOnly: Uint8Array, serverXOnl
   })
 }
 
-/**
- * Pick funding coins as selectSpendInputs does, but never one whose unroll is
- * deeper than the cap — a VHTLC's on-chain fallback is timed for a bounded
- * unroll (vhtlc.ts U). A too-deep coin is dropped and the pick rerun; one
- * indexer chain read per picked coin, memoized.
- */
-async function selectWithinDepthCap<T extends VirtualCoin>(
-  pool: T[],
-  opts: SelectOptions<T>,
-  indexer: RestIndexerProvider,
-  cap: number,
-): Promise<T[]> {
-  const depth = new Map<string, number>()
-  const depthOf = async (c: T): Promise<number> => {
-    const key = `${c.txid}:${c.vout}`
-    let d = depth.get(key)
-    if (d === undefined) {
-      const { chain } = await indexer.getVtxoChain({ txid: c.txid, vout: c.vout })
-      d = chainGraph(chain).levels.length - 1
-      depth.set(key, d)
-    }
-    return d
-  }
-  for (;;) {
-    const picked = selectSpendInputs(pool, opts)
-    if (picked.length === 0) return []
-    const deep = new Set<string>()
-    for (const c of picked) if ((await depthOf(c)) > cap) deep.add(`${c.txid}:${c.vout}`)
-    if (deep.size === 0) return picked
-    pool = pool.filter((c) => !deep.has(`${c.txid}:${c.vout}`))
-  }
-}
 
 /** Funding-input batch expiry must clear T by this (mirror of subdustd's payMargin). */
 const FUNDING_MARGIN_SECS = 600
@@ -308,7 +276,7 @@ export async function atomicSubdustSend(
   const eligible = ownVtxos.filter((v) => isEligibleFundingInput(v, eligibility).eligible)
   const selectOpts = { target: a + fee, changeDust: dust, exitCostOf: makeExitCostOracle(deps.db) }
   const funding = vhtlc
-    ? await selectWithinDepthCap(eligible, selectOpts, indexer, policy.maxChainDepth)
+    ? await selectWithinDepthCap(eligible, (pool) => selectSpendInputs(pool, selectOpts), indexer, policy.maxChainDepth)
     : selectSpendInputs(eligible, selectOpts)
   if (funding.length === 0) {
     const life = vhtlc

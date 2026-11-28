@@ -189,6 +189,13 @@ export class SqliteAtomicSwapRepository {
     return this.get(id)!
   }
 
+  /** A receive learns its script only from subdustd's status; record it so the row alone can rebuild it. */
+  setScript(id: string, s: { refundLocktime: number; peerPubkey: string; vhtlc?: VhtlcDelays }): void {
+    this.db
+      .query('UPDATE atomic_swaps SET refund_locktime = ?, peer_pubkey = ?, vhtlc = ?, updated_at = ? WHERE id = ?')
+      .run(s.refundLocktime, s.peerPubkey, s.vhtlc ? JSON.stringify(s.vhtlc) : null, Date.now(), id)
+  }
+
   setFundingOutpoint(id: string, outpoint: string): void {
     this.touch(id, 'funding_outpoint', outpoint)
   }

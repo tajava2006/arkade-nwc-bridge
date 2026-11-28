@@ -43,6 +43,21 @@ describe('issueInvoice — atomic receive for every amount', () => {
     })
   }
 
+  test('F32: a 4-leaf offer at 330+ sats is refused — no invoice is handed out, no row kept', async () => {
+    for (const [amount, script] of [[330, 'atomic4'], [50_000, undefined]] as const) {
+      globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { paymentHash: string }
+        return new Response(JSON.stringify({ swapId: `old-${amount}`, invoice: 'lnbcrt1x', ...(script ? { script } : {}), _h: body.paymentHash }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        })
+      }) as unknown as typeof fetch
+      const err = await issueInvoice(deps(), { amountSats: amount, description: 'x' }).catch((e) => e)
+      expect(String(err)).toContain('only a VHTLC protects it')
+      expect(new SqliteAtomicSwapRepository(temp.db).get(`old-${amount}`)).toBeUndefined()
+    }
+  })
+
   test('a NIP-57 description hash goes alone — the plain description is dropped, never both', async () => {
     const { bodies } = stubSubdustdReceive(SUBDUSTD)
     await issueInvoice(deps(), { amountSats: 1_000, description: 'zap', descriptionHash: 'ab'.repeat(32) })

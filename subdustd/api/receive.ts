@@ -3,16 +3,27 @@ import { hex } from '@scure/base'
 import { DefaultVtxo, getAllNormalizedVtxos, type ArkTxInput } from '@arkade-os/sdk'
 import {
   AtomicVtxoScript,
+  buildVhtlc,
   computeClaimSplit,
   freshTxidAttempts,
   fundShared,
   isBlocktimeLocked,
   isEligibleFundingInput,
+  policyFor,
   presignClaim,
+  receiveFundingMarginSecs,
+  receiveTimeouts,
   refundSpend,
   selectFundingInputs,
+  selectWithinDepthCap,
+  SwapDirection,
+  usesVhtlc,
+  type AtomicOutput,
   type SharedVtxo,
+  type SwapScript,
+  type VhtlcPolicy,
 } from '../../src/atomic/index.ts'
+import { selectSpendInputs } from '../../src/coin_select.ts'
 import { extractPreimageFromClaim } from '../preimage.ts'
 import type { SubdustKnobs } from '../config.ts'
 import { hrpOf, type ArkSigner } from '../ark/signer.ts'
@@ -24,12 +35,17 @@ import { FloatLock } from '../float.ts'
 
 // Atomic RECEIVE (LN → ARK), server side — every bridge receive, sub-dust or
 // not (D10: the solver's hold invoice cannot carry a NIP-57 description
-// hash; this one can, and the split already pays a ≥ dust claimer a regular
-// vtxo). We are the FUNDER: we issue
-// a HOLD invoice for the payer, and once their HTLC is held we fund a 4-leaf
-// shared vtxo from our own float and presign the claim (a → user, the rest
-// back to us). The user claims with the preimage; we settle the hold invoice
-// with it. Request/response shapes are the Boltz fork's.
+// hash; this one can). We are the FUNDER: we issue a HOLD invoice for the
+// payer, and once their HTLC is held we fund the swap script from our own
+// float. The user claims with the preimage; we settle the hold invoice with
+// it. Request/response shapes are the Boltz fork's.
+//
+// Two scripts (F32_VHTLC_PLAN.md, D12). a ≥ dust rides the SDK's VHTLC: we
+// fund exactly a (change back to us in the funding tx), there is no presig,
+// and the user's unilateralClaim leaf beats our own — so neither we nor the
+// arkd signer can take a payment the user has proved. Its T and the hold
+// invoice's CLTV are sized by vhtlc.ts (R1, R4). Sub-dust keeps the 4-leaf
+// (we presign the split), whose exposure is < dust.
 //
 // Added over the fork: init refuses when the float cannot fund this amount
 // right now, and an accepted HTLC we provably cannot fund is cancelled at once
@@ -89,6 +105,38 @@ export class ReceiveService {
     this.subscriptions.clear()
   }
 
+  private async policy(): Promise<VhtlcPolicy> {
+    const info = await this.d.signer.getInfo()
+    return policyFor(Number(info.unilateralExitDelay), info.network)
+  }
+
+  /**
+   * A VHTLC receive's coins: exactly `amount` out (change 0 or ≥ dust), from
+   * coins whose batch outlives T by an unroll (R2) and whose unroll depth is
+   * capped (U) — the user checks both before claiming, and would refuse.
+   */
+  private async vhtlcFundingFor(amount: number, refundLocktime: number) {
+    const { signer } = this.d
+    const dust = Number((await signer.getInfo()).dust)
+    const p = await this.policy()
+    const args = { dust, refundLocktime: BigInt(refundLocktime), marginSecs: receiveFundingMarginSecs(p) }
+    const own = await signer.ownVtxos()
+    const eligible = own.filter((v) => isEligibleFundingInput(v, args).eligible)
+    const picked = await selectWithinDepthCap(
+      eligible,
+      (pool) => selectSpendInputs(pool, { target: amount, changeDust: dust, exitCostOf: () => 0 }),
+      signer.indexer,
+      p.maxChainDepth,
+    )
+    if (picked.length > 0) return picked
+    if (own.length === 0) throw new NoFunding('the subdustd float holds no vtxo — top up the address logged at boot')
+    const reasons = [...new Set(own.map((v) => isEligibleFundingInput(v, args).reason ?? 'eligible'))]
+    throw new NoFunding(
+      `no float coins fund ${amount} sats here: they must outlive T by ${args.marginSecs}s, be at most ${p.maxChainDepth} ` +
+        `levels deep, and total exactly ${amount} or at least ${amount + dust}. Per-vtxo: ${reasons.join(' | ')}`,
+    )
+  }
+
   private async fundingFor(amount: number, refundLocktime: number) {
     const { signer, knobs } = this.d
     const dust = Number((await signer.getInfo()).dust)
@@ -138,15 +186,21 @@ export class ReceiveService {
     const prior = store.getByPaymentHash(paymentHash)
     if (prior) {
       if (prior.direction === 'receive' && prior.state === 'invoice_issued' && prior.invoice) {
-        return { swapId: prior.id, invoice: prior.invoice }
+        return { swapId: prior.id, invoice: prior.invoice, script: prior.vhtlc ? 'vhtlc' : 'atomic4' }
       }
       throw badRequest(`payment hash already has an atomic swap (${prior.state})`)
     }
 
+    // The invoice stays payable for receiveWindowSecs. A 4-leaf receive's T is
+    // that; a VHTLC's T adds the window an on-chain claim needs after a late
+    // payment (R1), and the hold invoice outlives a claim made d_s after an
+    // unroll begun at T (R4).
     const window = knobs.receiveWindowSecs
-    const refundLocktime = nowSecs() + window
+    const now = nowSecs()
+    const t = usesVhtlc(SwapDirection.Receive, a, 0, Number(info.dust)) ? receiveTimeouts(await this.policy(), now, window) : undefined
+    const refundLocktime = t ? t.refundLocktime : now + window
     try {
-      await this.fundingFor(a, refundLocktime)
+      await (t ? this.vhtlcFundingFor(a, refundLocktime) : this.fundingFor(a, refundLocktime))
     } catch (e) {
       if (e instanceof NoFunding) throw new HttpError(503, `cannot fund a receive right now: ${e.message}`)
       throw e
@@ -155,7 +209,7 @@ export class ReceiveService {
     const invoice = await lnd.addHoldInvoice({
       valueSat: a,
       paymentHash,
-      cltvExpiry: receiveFinalCltv(knobs),
+      cltvExpiry: t ? t.finalCltvBlocks : receiveFinalCltv(knobs),
       expirySecs: window,
       // BOLT11 carries a description or its hash, never both: a zap's hash
       // must stand alone for the NIP-57 receipt to verify.
@@ -172,6 +226,11 @@ export class ReceiveService {
         userPubkey,
         selfDelay: info.unilateralExitDelay,
         invoice,
+        vhtlc: t && {
+          claimDelaySecs: t.claimDelaySecs,
+          refundDelaySecs: t.refundDelaySecs,
+          refundNoReceiverDelaySecs: t.refundNoReceiverDelaySecs,
+        },
       })
     } catch (e) {
       if (e instanceof DuplicatePaymentHash) throw badRequest(`payment hash already has an atomic swap: ${e.message}`)
@@ -179,7 +238,7 @@ export class ReceiveService {
     }
     this.d.emit(id, 'invoice_issued')
     this.watch(id, paymentHash, window)
-    return { swapId: id, invoice }
+    return { swapId: id, invoice, script: t ? 'vhtlc' : 'atomic4' }
   }
 
   /**
@@ -230,14 +289,7 @@ export class ReceiveService {
     const server = await signer.serverXOnly()
     const delay = swap.selfDelay!
     const user = hex.decode(swap.userPubkey)
-    const script = new AtomicVtxoScript({
-      funder: await signer.xOnlyPublicKey(),
-      claimer: user,
-      server,
-      paymentHash: hex.decode(swap.paymentHash),
-      refundLocktime: BigInt(swap.refundLocktime),
-      exitDelay: delay,
-    })
+    const script = this.sharedScript(swap, server, await signer.xOnlyPublicKey())
     const unroll = await signer.serverUnroll()
 
     // Crash window (F15): a funding that landed before we recorded it is adopted,
@@ -253,7 +305,9 @@ export class ReceiveService {
         // Pick and spend under the float lock: a renewal round or another
         // receive must not take the same coins between selection and submit.
         ;({ outpoint, value } = await this.floatLock.run(async () => {
-          const funding = await this.fundingFor(swap.amount, swap.refundLocktime)
+          const funding = swap.vhtlc
+            ? await this.vhtlcFundingFor(swap.amount, swap.refundLocktime)
+            : await this.fundingFor(swap.amount, swap.refundLocktime)
           const self = await signer.selfScript(delay)
           const inputs: ArkTxInput[] = funding.map((f) => ({
             txid: f.txid,
@@ -262,11 +316,18 @@ export class ReceiveService {
             tapLeafScript: self.forfeit(),
             tapTree: self.encode(),
           }))
-          // Spent WHOLE: the shared value is the picked total; the excess comes back
-          // to us as regular change in the claim.
           const total = funding.reduce((n, f) => n + f.value, 0)
-          const op = await fundShared(inputs, [{ script: script.pkScript, amount: BigInt(total) }], unroll, signer.identity, signer.ark)
-          return { outpoint: op, value: total }
+          // 4-leaf: spent WHOLE — the shared value is the picked total and the
+          // excess comes back to us in the claim split. VHTLC: exactly a, the
+          // change back to us here (the shared output stays first, vout 0).
+          const outputs: AtomicOutput[] = swap.vhtlc
+            ? [
+                { script: script.pkScript, amount: BigInt(swap.amount) },
+                ...(total > swap.amount ? [{ script: (await signer.receiveAddress(delay)).pkScript, amount: BigInt(total - swap.amount) }] : []),
+              ]
+            : [{ script: script.pkScript, amount: BigInt(total) }]
+          const op = await fundShared(inputs, outputs, unroll, signer.identity, signer.ark)
+          return { outpoint: op, value: swap.vhtlc ? swap.amount : total }
         }))
       } catch (e) {
         if (!(e instanceof NoFunding)) throw e
@@ -281,27 +342,32 @@ export class ReceiveService {
       shared = { txid: outpoint!.txid, vout: outpoint!.vout, value, script }
     }
 
-    const userAddress = new DefaultVtxo.Script({
-      pubKey: user,
-      serverPubKey: server,
-      csvTimelock: { type: timelockType(delay), value: delay },
-    }).address(hrpOf(info), server)
-    const split = computeClaimSplit({
-      funderAddress: await signer.receiveAddress(delay),
-      claimerAddress: userAddress,
-      fundingValue: shared.value,
-      amount: swap.amount,
-      dust: Number(info.dust),
-    })
-    const presig = await presignClaim(shared, split.outputs, unroll, signer.identity)
+    // 4-leaf only: presign the split. The VHTLC's claim leaf is the user + the
+    // server + the preimage — nothing of ours to give.
+    let presigs: string | null = null
+    if (!swap.vhtlc) {
+      const userAddress = new DefaultVtxo.Script({
+        pubKey: user,
+        serverPubKey: server,
+        csvTimelock: { type: timelockType(delay), value: delay },
+      }).address(hrpOf(info), server)
+      const split = computeClaimSplit({
+        funderAddress: await signer.receiveAddress(delay),
+        claimerAddress: userAddress,
+        fundingValue: shared.value,
+        amount: swap.amount,
+        dust: Number(info.dust),
+      })
+      presigs = JSON.stringify(await presignClaim(shared, split.outputs, unroll, signer.identity))
+    }
     store.transition(swap.id, 'invoice_issued', 'funded', {
       fundingOutpoint: `${shared.txid}:${shared.vout}`,
       fundingValue: shared.value,
-      presigs: JSON.stringify(presig),
+      presigs,
     })
     // The latency-critical update: the user's claim starts the moment this lands.
     this.d.emit(swap.id, 'funded')
-    this.d.log.info(`receive ${swap.id}: funded ${shared.txid}:${shared.vout} (${shared.value} sats) + presigned`)
+    this.d.log.info(`receive ${swap.id}: funded ${shared.txid}:${shared.vout} (${shared.value} sats)${presigs ? ' + presigned' : ' (VHTLC)'}`)
   }
 
   /**
@@ -334,7 +400,17 @@ export class ReceiveService {
     }
   }
 
-  private sharedScript(swap: SwapRow, server: Uint8Array, funder: Uint8Array): AtomicVtxoScript {
+  /** The receive's script from its row: the VHTLC when it carries delays, else the 4-leaf. */
+  private sharedScript(swap: SwapRow, server: Uint8Array, funder: Uint8Array): SwapScript {
+    if (swap.vhtlc) {
+      return buildVhtlc({
+        sender: funder,
+        receiver: hex.decode(swap.userPubkey),
+        server,
+        paymentHash: hex.decode(swap.paymentHash),
+        timeouts: { refundLocktime: swap.refundLocktime, ...swap.vhtlc },
+      })
+    }
     return new AtomicVtxoScript({
       funder,
       claimer: hex.decode(swap.userPubkey),
@@ -502,6 +578,8 @@ export class ReceiveService {
       // Our change output in the presigned claim uses this; equal to exitDelay
       // now that the key is ours alone.
       boltzScriptDelay: delay,
+      script: swap.vhtlc ? 'vhtlc' : 'atomic4',
+      ...(swap.vhtlc ? { vhtlc: swap.vhtlc } : {}),
     }
   }
 
