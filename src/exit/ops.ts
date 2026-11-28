@@ -80,6 +80,16 @@ export function setExitOpState(
   )
 }
 
+/**
+ * A swap's exit op that failed (a broadcast race with the other side's unroll,
+ * a fee read, no fuel yet) is restarted by the swap's reconciler — no operator
+ * in the loop — but at most this often, so a lasting failure doesn't churn.
+ */
+export const SWAP_EXIT_RETRY_SECS = 120
+
+export const shouldRetrySwapExit = (op: ExitOp, nowSecs: number): boolean =>
+  op.state === 'failed' && nowSecs - op.updatedAt >= SWAP_EXIT_RETRY_SECS
+
 /** getExitOp that reads a missing exit_ops table (a swap-only db) as "no op" — the swap paths must not fail on it. */
 export function findExitOp(db: Database, txid: string, vout: number): ExitOp | null {
   try {

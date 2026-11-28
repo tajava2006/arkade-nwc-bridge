@@ -8,6 +8,19 @@ import { buildVhtlc, signLeafSpend, signLeafSpendAtRate, roleLeaves } from '../.
 import { BitcoindOnchainProvider, BitcoindRpc } from '../../src/chain/bitcoind'
 import { findSpender } from '../../src/chain/spender'
 
+/**
+ * Hand the clock back after a jump. setmocktime 0 only works while the chain's
+ * MTP is within bitcoind's 2-hour future limit of the wall clock; past it every
+ * new block is time-too-new and mining stops for whatever runs next. So the
+ * mock time stays just past MTP until the wall catches up.
+ */
+const releaseClock = async (rpc: { call<T>(m: string, p?: unknown[]): Promise<T> }) => {
+  const mtp = (await rpc.call<{ mediantime: number }>('getblockchaininfo')).mediantime
+  const now = Math.floor(Date.now() / 1000)
+  await rpc.call('setmocktime', [mtp < now + 3_600 ? 0 : mtp + 1])
+}
+
+
 // The VHTLC's two on-chain leaves under real consensus rules. An unrolled
 // VHTLC is just a taproot output carrying the VHTLC's script, so a plain
 // onchain payment to that script is the same thing without the Ark unroll in
@@ -66,7 +79,7 @@ describe.skipIf(!RUN)('VHTLC on-chain leaves on regtest', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await rpc.call('setmocktime', [0]).catch(() => {})
+    await releaseClock(rpc).catch(() => {})
   })
 
   test('before d_c: the claim leaf is not yet final (BIP-68)', async () => {

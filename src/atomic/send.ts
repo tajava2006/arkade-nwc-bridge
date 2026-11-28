@@ -42,7 +42,8 @@ import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from '.
 import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
 import { makeExitCostOracle } from '../exit/cost_oracle'
 import { gcOrphanProofs, getVaultVtxo, removeVtxo } from '../exit/vault'
-import { findExitOp } from '../exit/ops'
+import { findExitOp, shouldRetrySwapExit } from '../exit/ops'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { selectSpendInputs } from '../coin_select'
 import type { NotifyFn } from '../nostr/notifier'
 
@@ -1059,9 +1060,27 @@ export async function resumeAtomicSends(
       if (exitOp.state === 'swept' && canTransition(SwapDirection.Send, swap.state, 'refunded')) {
         repo.transition(swap.id, 'refunded')
         result.refunded.push(swap.id)
-      } else {
-        result.waiting++
+        continue
       }
+      // subdustd back with a preimage that opens the hash: the LN payment went
+      // through, so the send is done whichever side's leaf takes the funding
+      // (subdustd's claim leaf matures first). Releasing the vault row ends the
+      // engine's sweep retries.
+      const st = await sendStatusSafe(deps.subdustdUrl, swap.id)
+      if (st?.state === 'claimed' && st.preimage && hex.encode(sha256(hex.decode(st.preimage))) === swap.paymentHash) {
+        repo.setPreimage(swap.id, st.preimage)
+        if (swap.state === 'funded') repo.transition(swap.id, 'ln_inflight')
+        if (canTransition(SwapDirection.Send, repo.get(swap.id)!.state, 'claimed')) repo.transition(swap.id, 'claimed')
+        releaseVaultRow(deps.db, ftxid!, Number(fvout))
+        console.log(`atomic send ${swap.id}: paid (subdustd holds the preimage) while we were exiting — booked as claimed`)
+        result.claimed.push(swap.id)
+        continue
+      }
+      if (deps.startExit && shouldRetrySwapExit(exitOp, Number(nowSecs))) {
+        console.warn(`atomic send ${swap.id}: on-chain refund failed (${exitOp.error}) — retrying`)
+        deps.startExit(ftxid!, Number(fvout))
+      }
+      result.waiting++
       continue
     }
     if (inflightSends.has(swap.id)) {

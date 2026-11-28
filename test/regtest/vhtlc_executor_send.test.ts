@@ -18,6 +18,19 @@ import { createLogger } from '../../subdustd/log.ts'
 import { OnchainExecutor } from '../../subdustd/onchain.ts'
 import { SwapStore } from '../../subdustd/store.ts'
 
+/**
+ * Hand the clock back after a jump. setmocktime 0 only works while the chain's
+ * MTP is within bitcoind's 2-hour future limit of the wall clock; past it every
+ * new block is time-too-new and mining stops for whatever runs next. So the
+ * mock time stays just past MTP until the wall catches up.
+ */
+const releaseClock = async (rpc: { call<T>(m: string, p?: unknown[]): Promise<T> }) => {
+  const mtp = (await rpc.call<{ mediantime: number }>('getblockchaininfo')).mediantime
+  const now = Math.floor(Date.now() / 1000)
+  await rpc.call('setmocktime', [mtp < now + 3_600 ? 0 : mtp + 1])
+}
+
+
 // S1 (F32_VHTLC_PLAN §5.3) as an attack, end to end: a funder funds a dust+
 // send's VHTLC, makes subdustd pay its own hold invoice, unrolls the VHTLC
 // while holding the HTLC, then settles — the preimage reaches subdustd, but
@@ -104,7 +117,7 @@ describe.skipIf(!ARKD_URL || !CERT || !MACAROON)('S1 on regtest: the funder unro
   afterAll(async () => {
     if (ticking) clearInterval(ticking)
     executor?.stop()
-    await rpc.call('setmocktime', [0]).catch(() => {})
+    await releaseClock(rpc).catch(() => {})
     lnd?.close()
     store?.close()
   })

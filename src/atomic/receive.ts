@@ -32,7 +32,7 @@ import {
 import { postJson, getJson } from './http'
 import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
 import { gcOrphanProofs, removeVtxo } from '../exit/vault'
-import { findExitOp } from '../exit/ops'
+import { findExitOp, shouldRetrySwapExit } from '../exit/ops'
 import { confirmSpent, hrp, timelockType, toXOnly } from './ark_util'
 import type { NotifyFn } from '../nostr/notifier'
 
@@ -283,6 +283,10 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
       // swept = our claim is on chain; subdustd harvests the preimage from it and
       // settles, and the 'settled' status above converges this row.
       if (op.state === 'swept' && canTransition(SwapDirection.Receive, swap.state, 'claimed')) repo.transition(swapId, 'claimed')
+      if (deps.startExit && shouldRetrySwapExit(op, Math.floor(Date.now() / 1000))) {
+        console.warn(`atomic receive ${swapId}: on-chain claim failed (${op.error}) — retrying`)
+        deps.startExit(txid, Number(voutStr))
+      }
       return false
     }
     const { vtxos: any } = await indexer.getVtxos({ outpoints: [{ txid, vout: Number(voutStr) }] })
@@ -298,7 +302,11 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
     }
   }
 
-  const { vtxos } = await indexer.getVtxos({ scripts: [sharedPk], spendableOnly: true })
+  // A VHTLC is read by outpoint, unfiltered: an unrolled one must still be
+  // seen (and claimed on chain), not reported missing.
+  const { vtxos } = isVhtlc
+    ? await indexer.getVtxos({ outpoints: [{ txid, vout: Number(voutStr) }] })
+    : await indexer.getVtxos({ scripts: [sharedPk], spendableOnly: true })
   const v = vtxos.find((x) => x.txid === txid && x.vout === Number(voutStr))
   if (!v) throw new Error(`shared vtxo ${status.fundingOutpoint} not found`)
 
@@ -369,6 +377,13 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
     state = 'funded'
   }
   if (state === 'funded') {
+    if (isVhtlc && v.isUnrolled && deps.startExit) {
+      // R5 before our first claim: the VHTLC was unrolled (the server, or anyone)
+      // — arkd won't co-sign a claim of it. Ours on chain after d_c, before T.
+      console.warn(`atomic receive ${swapId}: the VHTLC was unrolled before our claim — claiming on chain`)
+      deps.startExit(txid, Number(voutStr))
+      return false
+    }
     if (isVhtlc) {
       // The whole VHTLC is ours: subdustd funded exactly a (its change left in the funding tx).
       await claimAlone(shared, [{ script: bridgeAddr.pkScript, amount: BigInt(v.value) }], unroll, deps.identity, preimage, ark)

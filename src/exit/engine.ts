@@ -231,14 +231,23 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
       setExitOpState(db, op.txid, op.vout, 'sweepable')
       log(`exit-engine: ${op.txid}:${op.vout} CSV elapsed — sweepable`)
       notify(op.txid, op.vout)
-      // A swap's VHTLC / shared vtxo is swept at once: a receive's claim must
-      // confirm before T (F32_VHTLC_PLAN R1), and nothing else waits on it.
-      if (vtxo.source === 'atomic') {
-        void engine
-          .sweep([{ txid: op.txid, vout: op.vout }])
-          .catch((e) => log(`exit-engine: auto-sweep of swap vtxo ${op.txid}:${op.vout} failed — ${e instanceof Error ? e.message : e}`))
-      }
+      sweepSwapVtxo(op.txid, op.vout)
     }
+  }
+
+  // A swap's VHTLC / shared vtxo is swept at once: a receive's claim must
+  // confirm before T (F32_VHTLC_PLAN R1), and nothing else waits on it. The
+  // poll retries one that failed (fee read, a broadcast race); it stops once
+  // the swap's own bookkeeping releases the vault row.
+  const sweeping = new Set<string>()
+  const sweepSwapVtxo = (txid: string, vout: number): void => {
+    const key = `${txid}:${vout}`
+    if (sweeping.has(key) || getVaultVtxo(db, txid, vout)?.source !== 'atomic') return
+    sweeping.add(key)
+    void engine
+      .sweep([{ txid, vout }])
+      .catch((e) => log(`exit-engine: auto-sweep of swap vtxo ${key} failed — ${e instanceof Error ? e.message : e}`))
+      .finally(() => sweeping.delete(key))
   }
 
   const runOp = async (txid: string, vout: number): Promise<void> => {
@@ -321,6 +330,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
         ),
       )
     }
+    for (const op of listExitOps(db, ['sweepable'])) sweepSwapVtxo(op.txid, op.vout)
   }, deps.pollIntervalMs ?? DEFAULT_POLL_MS)
 
   // The nsec-derived onchain wallet: CPFP fuel source, default sweep
