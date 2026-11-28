@@ -4,9 +4,13 @@
 > is now the atomic send against the operator's `subdustd` (`src/ln_send.ts`,
 > D11; an intent solver carried dust+ sends briefly before that). The fee is
 > subdustd's fixed share (`src/atomic/fees.ts`, read from `/send/fees` for the
-> preview), and the funding is whole coins worth at least invoice + fee + dust
-> with the excess back as one coin — so an LN send can't empty the wallet
-> (dust stays). Sections that describe Boltz submarine swaps, `boltz.conf` or
+> preview), and the funding is whole coins worth exactly invoice + fee (no
+> change) or at least invoice + fee + dust (the excess back as one coin) — a
+> total in between would strand sub-dust change and is refused. So an LN send
+> empties the wallet when the invoice is `lnDrainInvoiceSat(total, fee%)`, which
+> the /send drain hint shows; at the few totals the rounded-up fee skips (at
+> 0.5%, every 201k + 1) it can't (SM-90). The older "exact drain is
+> structurally impossible" below is Boltz-era. Sections that describe Boltz submarine swaps, `boltz.conf` or
 > `FeesResponse` are history; coin selection, the hot pockets, offboard and
 > consolidate-all are unchanged. Record: the operator workspace's
 > `SOLVER_MIGRATION_PLAN.md` (SM-43, SM-46, SM-81).

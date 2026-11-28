@@ -111,7 +111,7 @@ const FUNDING_MARGIN_SECS = 600
  */
 export const inflightSends = new Set<string>()
 
-/** Refused before anything moved: the wallet has too few eligible coins for a + fee + dust. */
+/** Refused before anything moved: no eligible coins sum to exactly a + fee or to at least a + fee + dust. */
 export class AtomicInsufficientFunds extends Error {}
 
 // confirmClaimSpent = the shared confirmSpent poll (verify-before-bookkeep, F4):
@@ -120,7 +120,7 @@ export class AtomicInsufficientFunds extends Error {}
 
 /**
  * Send an amount over LN through the atomic path (any size since D11). The bridge funds a
- * shared vtxo from its own vtxos spent WHOLE (V′ ≥ a + fee + dust, no funding
+ * shared vtxo from its own vtxos spent WHOLE (V′ = a + fee or V′ ≥ a + fee + dust, no funding
  * change), pre-signs the split, then subdustd pays + claims a (+ its advertised
  * feeSats — it fronts the LN routing cost). The claim change V′ − a − fee comes
  * back as one regular vtxo; net wallet cost is a + fee.
@@ -176,8 +176,9 @@ export async function atomicSubdustSend(
   // subdustd receive funder uses — ascending accumulation until V is covered, so
   // the smallest fragments get consolidated by the returning change). No
   // funding change ⇒ the wallet can never be left with a sub-dust remainder
-  // here; the claim split returns V′ − a − fee (≥ dust ⇒ regular).
-  // V′ ≥ a + fee + dust; net cost stays a + fee.
+  // here; the claim split returns V′ − a − fee, which is 0 (no change output,
+  // the coins were exactly a + fee — how Lightning empties the wallet) or
+  // ≥ dust (regular). Net cost stays a + fee either way.
   // Coin source is the WALLET, not a raw indexer read: getSpendableVtxos is
   // where the SDK masks inputs a concurrent spend has already claimed (its
   // pending-spend set), plus contract-locked, pending-recovery, held and
@@ -189,16 +190,20 @@ export async function atomicSubdustSend(
   // Eligibility (regular / spendable / outlasts T) is the vendored rule subdustd
   // shares; WHICH eligible coin to burn is a bridge-only policy, so the
   // ascending-by-value accumulation is replaced by the exit-cost-aware selector
-  // (coin_select.ts). Whole-input still, so no changeDust: the funding tx
-  // leaves no remainder and the claim split returns V′ − a − fee ≥ dust.
+  // (coin_select.ts). The funding tx is whole-input (no remainder there); the
+  // change that matters is the claim split's, so changeDust rules out totals
+  // that would leave it sub-dust. The shared vtxo is ≥ dust either way: every
+  // eligible coin is, so an exact a + fee can only be hit when a + fee ≥ dust —
+  // a sub-dust send still needs a + fee + dust, as before.
   const eligibility = { dust, refundLocktime: T, marginSecs: FUNDING_MARGIN_SECS }
   const funding = selectSpendInputs(
     ownVtxos.filter((v) => isEligibleFundingInput(v, eligibility).eligible),
-    { target: dust + a + fee, exitCostOf: makeExitCostOracle(deps.db) },
+    { target: a + fee, changeDust: dust, exitCostOf: makeExitCostOracle(deps.db) },
   )
   if (funding.length === 0) {
     throw new AtomicInsufficientFunds(
-      `atomic send needs ${a + fee + dust} sats of eligible vtxos (regular, spendable, batch expiry past T+${FUNDING_MARGIN_SECS}s) — ` +
+      `atomic send needs eligible vtxos (regular, spendable, batch expiry past T+${FUNDING_MARGIN_SECS}s) summing to exactly ` +
+        `${a + fee} or to at least ${a + fee + dust} sats — a change of 1–${dust - 1} would be stranded as sub-dust; ` +
         `sub-dust/swept funds and soon-expiring vtxos don't qualify`,
     )
   }

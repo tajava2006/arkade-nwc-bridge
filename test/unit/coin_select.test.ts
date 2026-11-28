@@ -145,3 +145,28 @@ describe('selectSpendInputs — boundaries', () => {
     expect(picked).toEqual([small]) // lowest n = smallest value
   })
 })
+
+// SM-90: the atomic send funds with { target: a + fee, changeDust: dust }. Its
+// claim split then pays a + fee and returns the rest, so the rest must be 0 or
+// a real coin.
+describe('selectSpendInputs — atomic send funding', () => {
+  const fund = (coins: Coin[], a: number, fee: number): number[] =>
+    ids(selectSpendInputs(coins, { target: a + fee, changeDust: DUST, exitCostOf }))
+
+  test('coins worth exactly a + fee are spent whole — the wallet empties', () => {
+    expect(fund([coin(4_000), coin(6_000)], 9_950, 50)).toEqual([4_000, 6_000].sort((x, y) => y - x))
+    expect(fund([coin(10_000)], 9_950, 50)).toEqual([10_000])
+  })
+
+  test('a total that would leave 1..dust−1 behind is refused, not stranded as sub-dust', () => {
+    expect(fund([coin(10_001)], 9_950, 50)).toEqual([])
+    expect(fund([coin(10_329)], 9_950, 50)).toEqual([])
+    expect(fund([coin(10_330)], 9_950, 50)).toEqual([10_330])
+  })
+
+  test('a sub-dust send still needs a + fee + dust (no coin is below dust)', () => {
+    expect(fund([coin(352)], 21, 1)).toEqual([352])
+    expect(fund([coin(351)], 21, 1)).toEqual([])
+    expect(fund([coin(340)], 21, 1)).toEqual([])
+  })
+})

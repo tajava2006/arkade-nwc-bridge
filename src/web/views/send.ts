@@ -12,6 +12,7 @@ import {
   type VtxoBuckets,
 } from '../../send'
 import { AUTO_REFRESH_THRESHOLD_SECONDS } from '../../auto_refresh'
+import { lnDrainInvoiceSat } from '../../atomic/fees'
 
 // "3 days" / "12 hours" / "90 minutes" — the largest unit that divides
 // cleanly, for the Refresh copy here and the FAQ's refresh answer.
@@ -117,12 +118,12 @@ export function renderOffboardsFragment(rows: OffboardRow[]): RawHtml {
  * Standing "how do I empty this wallet" guidance, independent of the Max
  * button. Onchain: the offboard rail is the one path that always works — a
  * settlement round consumes sub-dust and swept/expired VTXOs directly, no
- * Refresh needed. Lightning can't empty the wallet: the atomic send funds
- * whole coins worth at least invoice + fee + dust and the excess (≥ dust)
- * comes back as one coin, so dust always stays. Amounts come from arkInfo,
- * never hardcoded.
+ * Refresh needed. Lightning: the atomic send can fund exactly invoice + fee
+ * (no change), so it empties the spendable balance when the invoice is the
+ * amount lnDrainInvoiceSat finds — not at the few totals the rounded-up fee
+ * can't hit. Amounts come from arkInfo and subdustd's fee rule, never hardcoded.
  */
-function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets): RawHtml {
+function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets, lnFeePercent: number | null): RawHtml {
   if (buckets.roundTotalSat === 0) return html``
   const fee = offboardFeeSat(arkInfo, buckets.roundTotalSat)
   const dust = Number(arkInfo.dust)
@@ -146,19 +147,36 @@ function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets): RawHtml {
             of 1–${(dust - 1).toLocaleString()} sats is rejected before anything moves.
           </p>`
 
-  const needsRefresh = buckets.subdustSat + buckets.recoverableSat > 0
-  const ln = html`
-    <p class="muted">
-      <strong>Emptying the wallet — Lightning:</strong> not all the way. A Lightning send spends whole
-      coins worth at least the invoice + fee + ${fmtSats(dust)}, and the excess comes back as one coin,
-      so at least ${fmtSats(dust)} stays. ${needsRefresh
-        ? html`Hit Refresh first (free, the total doesn't change) — sub-dust/swept funds can't back an
-            LN send. `
-        : html``}The confirm page shows the exact total (invoice + fee) before anything moves; to take
-      the rest out, use the onchain withdraw above.
-    </p>`
+  return html`${onchain}${lnDrainHint(buckets, lnFeePercent)}`
+}
 
-  return html`${onchain}${ln}`
+function lnDrainHint(buckets: VtxoBuckets, lnFeePercent: number | null): RawHtml {
+  if (lnFeePercent === null) return html``
+  // Sub-dust and swept coins can't fund a Lightning send; a Refresh (free, so
+  // the total holds) turns them into one spendable coin first.
+  const needsRefresh = buckets.subdustSat + buckets.recoverableSat > 0
+  const total = needsRefresh ? buckets.roundTotalSat : buckets.spendableSat
+  const invoice = lnDrainInvoiceSat(total, lnFeePercent)
+  const refreshFirst = needsRefresh
+    ? html`Hit Refresh first (free, the total doesn't change) — sub-dust/swept funds can't back a
+        Lightning send. Then `
+    : html``
+  if (invoice === null) {
+    return html`
+      <p class="muted">
+        <strong>Emptying the wallet — Lightning:</strong> not exactly at ${fmtSats(total)} — no invoice
+        amount plus its ${lnFeePercent}% fee (rounded up) lands on that total, and a leftover sat can't
+        stay behind as change. Use the onchain withdraw above, or try again once the balance moves.
+      </p>`
+  }
+  return html`
+    <p class="muted">
+      <strong>Emptying the wallet — Lightning:</strong> ${refreshFirst}pay an invoice of exactly
+      <strong>${fmtSats(invoice)}</strong> — with the ${lnFeePercent}% fee
+      (${fmtSats(total - invoice)}) that is ${fmtSats(total)}, the whole balance. Any other amount
+      must leave either nothing or at least a dust coin behind. If the confirm step refuses it, Refresh
+      first — coins whose batch expires inside the send window can't fund it.
+    </p>`
 }
 
 /**
@@ -170,7 +188,7 @@ function drainHint(arkInfo: OperatorInfo, buckets: VtxoBuckets): RawHtml {
 export function renderBreakdownFragment(value: SendData | null): RawHtml {
   if (!value) return html`<p class="muted">Loading…</p>`
   const buckets = classifyVtxos(value.vtxos, value.arkInfo.dust)
-  return html`${breakdownTable(buckets)}${drainHint(value.arkInfo, buckets)}`
+  return html`${breakdownTable(buckets)}${drainHint(value.arkInfo, buckets, value.lnFeePercent)}`
 }
 
 export function sendView(args: {

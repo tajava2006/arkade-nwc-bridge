@@ -45,12 +45,15 @@ export function classifyDestination(raw: string): Rail | null {
 }
 
 /**
- * The reads the /send breakdown needs, fetched together. Lightning fees aren't
- * here: the preview asks subdustd for its fee rule when an invoice is pasted.
+ * The reads the /send breakdown needs, fetched together. The preview asks
+ * subdustd for its fee rule again when an invoice is pasted; this copy only
+ * feeds the "empty the wallet over Lightning" hint.
  */
 export interface SendData {
   arkInfo: OperatorInfo
   vtxos: ExtendedVirtualCoin[]
+  /** subdustd's send fee rule; null without Lightning or when subdustd didn't answer. */
+  lnFeePercent: number | null
 }
 
 export interface VtxoBuckets {

@@ -15,6 +15,7 @@ import {
   SingleKey,
   Wallet,
 } from '@arkade-os/sdk'
+import { lnDrainInvoiceSat } from '../../src/atomic/fees'
 import { openDatabase } from '../../src/db'
 import { handlePayInvoice } from '../../src/handlers/pay_invoice'
 import { reconcileAtomicSendRows } from '../../src/ln_ledger'
@@ -155,25 +156,37 @@ describe.skipIf(!SUBDUSTD_URL)('LN send core on regtest', () => {
     expect(spent() - before).toBe(4_000_000)
   }, 300_000)
 
-  test('a too-small wallet is INSUFFICIENT_BALANCE before anything moves; the most it can send leaves dust behind', async () => {
+  test('Lightning empties the wallet (SM-90); amounts that would strand sub-dust change are refused first', async () => {
     const w = await newWallet()
     arkSend(await w.getAddress(), 3_001)
     await waitFor('funded', async () => ((await w.getBalance()).available >= 3_001 ? true : undefined))
     const dbw = openDatabase(join(mkdtempSync(join(tmpdir(), 'bridge-small-')), 'bridge.sqlite'))
     const connw = createConnection(dbw, { label: null, relays: ['wss://r'] }).connection
     try {
-      // 3,000 + 15 fee + 330 dust > 3,001
-      const refused = await pay('evt-s1', peer('addinvoice', '--amt', '3000').payment_request, w, dbw, connw).catch((e) => e)
-      expect(refused).toMatchObject({ code: 'INSUFFICIENT_BALANCE' })
-      expect(row('evt-s1', dbw).state).toBe('failed')
+      // 3,000 + 15 fee > 3,001
+      const short = await pay('evt-s1', peer('addinvoice', '--amt', '3000').payment_request, w, dbw, connw).catch((e) => e)
+      expect(short).toMatchObject({ code: 'INSUFFICIENT_BALANCE' })
+      // 2,980 + 15 fee = 2,995 would leave 6 sats: refused, not stranded as sub-dust
+      const stranding = await pay('evt-s2', peer('addinvoice', '--amt', '2980').payment_request, w, dbw, connw).catch((e) => e)
+      expect(stranding).toMatchObject({ code: 'INSUFFICIENT_BALANCE' })
+      expect(row('evt-s2', dbw).state).toBe('failed')
       expect((await w.getSpendableVtxos()).map((v) => v.value)).toEqual([3_001])
-      // 2,657 + 14 fee + 330 dust = 3,001: the whole coin goes in, 330 comes back.
-      const inv = peer('addinvoice', '--amt', '2657')
-      const res = await pay('evt-s2', inv.payment_request, w, dbw, connw)
+
+      // 2,986 + 15 fee = 3,001: the whole coin funds the swap, the claim has no change output.
+      const drain = lnDrainInvoiceSat(3_001, 0.5)
+      expect(drain).toBe(2_986)
+      const inv = peer('addinvoice', '--amt', String(drain))
+      const res = await pay('evt-s3', inv.payment_request, w, dbw, connw)
       expect(sha256(res.preimage)).toBe(inv.r_hash)
-      await waitFor('dust back as change', async () => {
-        const left = (await w.getSpendableVtxos()).map((v) => v.value)
-        return left.length === 1 && left[0] === 330 ? true : undefined
+      expect(peer('lookupinvoice', inv.r_hash).state).toBe('SETTLED')
+      // claimed = the indexer saw the change-less claim spend the shared vtxo (arkd took it)
+      const swap = dbw
+        .query<{ state: string }, [string]>(`SELECT state FROM atomic_swaps WHERE payment_hash = ?`)
+        .get(inv.r_hash)
+      expect(swap?.state).toBe('claimed')
+      await waitFor('the wallet empty', async () => {
+        const b = await w.getBalance()
+        return (await w.getSpendableVtxos()).length === 0 && b.available === 0 ? true : undefined
       }, 30_000)
     } finally {
       await w.dispose()

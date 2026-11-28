@@ -33,7 +33,7 @@ import { createRelayGate } from './nostr/relay_gate'
 import { startNotifier, type Notifier, type NotifyFn } from './nostr/notifier'
 import { listActiveConnections, prunePersistedEvents } from './nostr/connections'
 import { startWebServer, type AppStateRef, type SwrCaches } from './web/server'
-import type { SendData } from './send'
+import { subdustdFeePercent, type SendData } from './send'
 import { SseHub } from './lib/sse'
 import { AsyncCache } from './lib/cache'
 import {
@@ -485,12 +485,17 @@ async function main(): Promise<void> {
         // VTXO set together — fetched in parallel so the page renders from a
         // snapshot instead of blocking on sequential round-trips. The set
         // churns, but we push the whole table fragment over SSE (no diffing).
-        // LN fees aren't here: /send asks subdustd for its fee rule at preview.
+        // The LN fee rule rides along for the drain hint only; subdustd being
+        // down must not take the breakdown with it.
         sendData: new AsyncCache<SendData>({
           label: 'send-data',
           fetcher: async () => {
-            const [arkInfo, vtxos] = await Promise.all([arkProvider.getInfo(), wallet.getVtxos({ withRecoverable: true })])
-            return { arkInfo, vtxos }
+            const [arkInfo, vtxos, lnFeePercent] = await Promise.all([
+              arkProvider.getInfo(),
+              wallet.getVtxos({ withRecoverable: true }),
+              subdustdUrl ? subdustdFeePercent(subdustdUrl).catch(() => null) : null,
+            ])
+            return { arkInfo, vtxos, lnFeePercent }
           },
           minIntervalMs: 2000,
         }),
@@ -606,7 +611,7 @@ async function main(): Promise<void> {
         // CEL program for the onchain-input intent fee (onboarding); flat
         // configs look like "1000.0", rendered best-effort on the dashboard.
         onboardingFeeProgram = arkInfo.fees?.intentFee?.onchainInput
-        caches.sendData.seed({ arkInfo, vtxos })
+        caches.sendData.seed({ arkInfo, vtxos, lnFeePercent: null })
       } catch (err) {
         console.warn(
           `boot: send-data prefetch failed (onboarding fee + /send breakdown lazy-load): ${err instanceof Error ? err.message : err}`,
