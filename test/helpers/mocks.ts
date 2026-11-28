@@ -125,13 +125,7 @@ export function makeSwrCaches(wallet: Wallet, balance: WalletBalance): SwrCaches
     balance: new AsyncCache({ label: 'test-balance', fetcher: () => wallet.getBalance() }),
     sendData: new AsyncCache<SendData>({
       label: 'test-send-data',
-      // fees carries enough shape for drainHint should a test ever render a
-      // non-empty breakdown (empty vtxos short-circuit before touching it).
-      fetcher: async () => ({
-        arkInfo: {} as never,
-        vtxos: [],
-        fees: { submarine: { percentage: 0.1, minerFees: 0 } } as never,
-      }),
+      fetcher: async () => ({ arkInfo: {} as never, vtxos: [], lnFeePercent: 0.5 }),
     }),
   }
   caches.balance.seed(balance)
