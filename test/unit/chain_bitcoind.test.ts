@@ -41,6 +41,32 @@ describe('BitcoindOnchainProvider', () => {
     expect(calls[0]!.params).toEqual(['start', ['addr(bc1pfuel)']])
   })
 
+  // bitcoind runs one scantxoutset node-wide: ours queue, and another
+  // process's scan (-8) is waited out rather than failing an unroll.
+  test('getCoins: concurrent scans are queued; a scan already in progress elsewhere is waited out', async () => {
+    let running = 0
+    let peak = 0
+    let busy = 1 // the node is busy with someone else's scan for the first try
+    const { provider } = fakeBitcoind({
+      scantxoutset: (params) => {
+        if (busy-- > 0) return { __error: { code: -8, message: 'Scan already in progress, use action "abort" or "status"' } }
+        running++
+        peak = Math.max(peak, running)
+        running--
+        return { success: true, unspents: [{ txid: A, vout: Number(params[1][0].length % 2), amount: 0.0001, height: 1 }] }
+      },
+    })
+    const all = await Promise.all([provider.getCoins('bc1pa'), provider.getCoins('bc1pbb'), provider.getCoins('bc1pccc')])
+    expect(all.map((c) => c.length)).toEqual([1, 1, 1])
+    expect(peak).toBe(1)
+  })
+
+  test('getCoins: another error is not retried', async () => {
+    const { provider, calls } = fakeBitcoind({ scantxoutset: () => ({ __error: { code: -1, message: 'boom' } }) })
+    await expect(provider.getCoins('bc1pa')).rejects.toThrow('boom')
+    expect(calls.length).toBe(1)
+  })
+
   test('getFeeRate: estimatesmartfee BTC/kvB → sat/vB; no estimate → undefined', async () => {
     expect(await fakeBitcoind({ estimatesmartfee: () => ({ feerate: 0.00012 }) }).provider.getFeeRate()).toBeCloseTo(12)
     expect(await fakeBitcoind({ estimatesmartfee: () => ({ errors: ['Insufficient data'] }) }).provider.getFeeRate()).toBeUndefined()

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
 import { hex } from '@scure/base'
-import { OnchainWallet, Unroll, timelockToSequence, type NetworkName, type OnchainProvider } from '@arkade-os/sdk'
+import { OnchainWallet, Unroll, timelockToSequence, type NetworkName, type OnchainProvider, type VirtualCoin } from '@arkade-os/sdk'
 import { buildVhtlc, roleLeaves, signLeafSpendAtRate } from '../src/atomic/index.ts'
 import { findSpender } from '../src/chain/spender.ts'
+import { timelockType } from '../src/atomic/ark_util.ts'
 import type { ArkSigner } from './ark/signer.ts'
 import type { SwapLocks } from './api/http_error.ts'
 import type { ReceiveService } from './api/receive.ts'
@@ -35,6 +36,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** A leaf spend still unconfirmed after this many blocks is re-broadcast at a higher rate. */
 const REBUMP_AFTER_BLOCKS = 6
 const MIN_FEE_RATE = 2
+/** How often arkd is asked for our unrolled coins outside an unroll we saw (a full-history read). */
+const OWN_UNROLLED_QUERY_MS = 600_000
 
 export interface OnchainDeps {
   store: SwapStore
@@ -54,6 +57,14 @@ export class OnchainExecutor {
   private fuelWallet?: Promise<OnchainWallet>
   private readonly driving = new Set<string>()
   private stopped = false
+  /** Own coins an unroll dragged on chain that are dealt with (swept, or not worth it). */
+  private ownDone = new Set<string>()
+  /** Found but not swept yet (maturing) — rechecked every pass without asking arkd again. */
+  private ownPending: VirtualCoin[] = []
+  private ownQueriedAt = 0
+  /** Set when we see an unroll: that is when our change gets dragged out. */
+  private ownDirty = true
+  private sweepingOwn = false
 
   constructor(private readonly d: OnchainDeps) {}
 
@@ -69,6 +80,12 @@ export class OnchainExecutor {
 
   /** One pass: hand every VHTLC swap an unroll has reached to drive(), one task per swap. */
   async scan(): Promise<void> {
+    if (!this.sweepingOwn && !this.stopped) {
+      this.sweepingOwn = true
+      void this.sweepOwnUnrolled()
+        .catch((e) => this.d.log.warn(`onchain: sweeping our unrolled coins failed — ${(e as Error).message}; next pass`))
+        .finally(() => (this.sweepingOwn = false))
+    }
     const { store } = this.d
     const rows = [...store.list('send', ['ln_inflight']), ...store.list('receive', ['funded'])].filter(
       (r) => r.vhtlc && r.fundingOutpoint && r.onchain?.stage !== 'abandoned' && r.onchain?.stage !== 'done',
@@ -113,6 +130,7 @@ export class OnchainExecutor {
     const [txid, voutStr] = row.fundingOutpoint!.split(':')
     const outpoint = { txid: txid!, vout: Number(voutStr) }
     if (!row.onchain) {
+      this.ownDirty = true // the Ark tx's other outputs — our change among them — came on chain too
       log.warn(`onchain ${id}: the VHTLC ${row.fundingOutpoint} was unrolled — taking the swap on chain (${row.direction})`)
       this.progress(row, { stage: 'unrolling' })
     }
@@ -237,6 +255,66 @@ export class OnchainExecutor {
     this.progress(row, { stage: 'done', spendTxid: spenderTxid })
     log.info(`onchain ${row.id}: refunded on chain (${spenderTxid}) — releasing the payer`)
     await this.d.receive.resumeRefundWait(row.id)
+  }
+
+  /**
+   * Our own coins an unroll dragged on chain. The Ark tx that funds a VHTLC
+   * also carries our change, so whoever unrolls the VHTLC puts that change on
+   * chain too (at their cost, not ours). It stays ours through the wallet
+   * script's exit leaf once the exit delay has passed — but only if someone
+   * spends it: swept to the fuel address here, or it would sit there.
+   */
+  private async sweepOwnUnrolled(): Promise<void> {
+    const { signer, provider, log } = this.d
+    if (this.ownDirty || Date.now() - this.ownQueriedAt >= OWN_UNROLLED_QUERY_MS) {
+      this.ownDirty = false
+      this.ownQueriedAt = Date.now()
+      this.ownPending = (await signer.ownUnrolledVtxos()).filter((v) => !this.ownDone.has(`${v.txid}:${v.vout}`))
+    }
+    const coins = this.ownPending.filter((v) => !this.ownDone.has(`${v.txid}:${v.vout}`))
+    if (coins.length === 0) return
+    const delay = await signer.selfDelay()
+    const self = await signer.selfScript(delay)
+    const blocks = timelockType(delay) === 'blocks'
+    for (const coin of coins) {
+      const key = `${coin.txid}:${coin.vout}`
+      const status = await provider.getTxStatus(coin.txid).catch(() => undefined)
+      if (!status?.confirmed) continue // the unroll is still on its way
+      const outs = await provider.getTxOutspends(coin.txid)
+      if (outs[coin.vout]?.spent) {
+        this.ownDone.add(key)
+        log.info(`onchain: our unrolled coin ${key} is spent on chain (${outs[coin.vout]!.txid ?? 'spender unknown'})`)
+        continue
+      }
+      const matured = blocks
+        ? (await provider.getChainTip()).height - status.blockHeight + 1 >= Number(delay)
+        : await this.csvElapsed(status.blockHeight, Number(delay))
+      if (!matured) continue
+      const fuel = await this.fuel()
+      const feeRate = Math.max(MIN_FEE_RATE, (await provider.getFeeRate().catch(() => undefined)) ?? MIN_FEE_RATE)
+      let tx
+      try {
+        tx = await signLeafSpendAtRate(
+          {
+            txid: coin.txid,
+            vout: coin.vout,
+            value: coin.value,
+            pkScript: self.pkScript,
+            leaf: self.exit(),
+            sequence: timelockToSequence({ type: blocks ? 'blocks' : 'seconds', value: delay }),
+            destination: fuel.onchainP2TR.script,
+          },
+          feeRate,
+          signer.identity,
+        )
+      } catch (e) {
+        this.ownDone.add(key)
+        log.warn(`onchain: our unrolled coin ${key} (${coin.value} sats) left on chain — ${(e as Error).message}`)
+        continue
+      }
+      await provider.broadcastTransaction(tx.hex)
+      log.info(`onchain: swept our unrolled coin ${key} (${coin.value} sats) → fuel in ${tx.id}`)
+    }
   }
 
   /** Has `secs` of MTP passed since the block at `height` (BIP-68 time-based)? */

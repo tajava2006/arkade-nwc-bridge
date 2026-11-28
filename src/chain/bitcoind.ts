@@ -20,6 +20,11 @@ export interface BitcoindRpcConfig {
   timeoutMs?: number
 }
 
+/** scantxoutset's "Scan already in progress" (RPC_INVALID_PARAMETER, -8). */
+const SCAN_IN_PROGRESS = -8
+const SCAN_RETRIES = 60
+const SCAN_RETRY_MS = 1_000
+
 export class BitcoindRpcError extends Error {
   constructor(
     readonly method: string,
@@ -96,13 +101,34 @@ export function assertPackageAccepted(result: unknown): void {
 export class BitcoindOnchainProvider implements OnchainProvider {
   constructor(readonly rpc: BitcoindRpc) {}
 
-  /** UTXO-set scan: confirmed coins only — a fuel deposit needs confirming before it can pay a CPFP anyway. */
+  /**
+   * UTXO-set scan: confirmed coins only — a fuel deposit needs confirming
+   * before it can pay a CPFP anyway. bitcoind runs one scantxoutset at a time
+   * node-wide and refuses a second (-8): ours are queued here, and one that
+   * finds a scan by another process (bridge, subdustd and a test can share a
+   * node) waits for it — an unroll failing on a busy node would only retry
+   * later, closer to its deadline.
+   */
   async getCoins(address: string): Promise<Coin[]> {
-    const res = await this.rpc.call<{ success: boolean; unspents: { txid: string; vout: number; amount: number; height: number }[] }>(
-      'scantxoutset',
-      ['start', [`addr(${address})`]],
-    )
-    if (!res.success) throw new Error(`scantxoutset for ${address} did not complete`)
+    const scan = this.scans.then(() => this.scanOnce(address))
+    this.scans = scan.catch(() => {})
+    return scan
+  }
+
+  private scans: Promise<unknown> = Promise.resolve()
+
+  private async scanOnce(address: string): Promise<Coin[]> {
+    let res: { success: boolean; unspents: { txid: string; vout: number; amount: number; height: number }[] } | undefined
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = await this.rpc.call('scantxoutset', ['start', [`addr(${address})`]])
+        break
+      } catch (e) {
+        if (!(e instanceof BitcoindRpcError && e.code === SCAN_IN_PROGRESS) || attempt >= SCAN_RETRIES) throw e
+        await new Promise((r) => setTimeout(r, SCAN_RETRY_MS))
+      }
+    }
+    if (!res?.success) throw new Error(`scantxoutset for ${address} did not complete`)
     return res.unspents.map((u) => ({
       txid: u.txid,
       vout: u.vout,

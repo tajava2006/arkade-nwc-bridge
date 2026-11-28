@@ -1057,10 +1057,17 @@ export async function resumeAtomicSends(
     const [ftxid, fvout] = (swap.fundingOutpoint ?? '').split(':')
     const exitOp = ftxid ? findExitOp(deps.db, ftxid, Number(fvout)) : null
     if (exitOp) {
-      if (exitOp.state === 'swept' && canTransition(SwapDirection.Send, swap.state, 'refunded')) {
-        repo.transition(swap.id, 'refunded')
-        result.refunded.push(swap.id)
-        continue
+      if (exitOp.state === 'swept') {
+        // funded/ln_inflight reach refunded through refund_wait, as an offchain refund does
+        for (const next of ['refund_wait', 'refunded'] as const) {
+          const cur = repo.get(swap.id)!.state
+          if (cur !== 'refunded' && canTransition(SwapDirection.Send, cur, next)) repo.transition(swap.id, next)
+        }
+        if (repo.get(swap.id)!.state === 'refunded') {
+          console.log(`atomic send ${swap.id}: funding back on chain through our lone leaf (${exitOp.sweepTxid})`)
+          result.refunded.push(swap.id)
+          continue
+        }
       }
       // subdustd back with a preimage that opens the hash: the LN payment went
       // through, so the send is done whichever side's leaf takes the funding

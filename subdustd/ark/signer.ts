@@ -102,6 +102,16 @@ export class ArkSigner {
     return getAllNormalizedVtxos(this.indexer, [script], { spendableOnly: true })
   }
 
+  /**
+   * Our coins an unroll put on chain and nobody has spent yet. arkd's
+   * spendableOnly leaves unrolled vtxos out, so this reads the script's whole
+   * history (spent rows too) — called sparingly.
+   */
+  async ownUnrolledVtxos(): Promise<VirtualCoin[]> {
+    const script = hex.encode((await this.selfScript()).pkScript)
+    return (await getAllNormalizedVtxos(this.indexer, [script], {})).filter((v) => v.isUnrolled && !v.isSpent)
+  }
+
   /** Ascending whole-input funding for a receive (we are the funder); [] when nothing can cover it. */
   async selectFunding(args: EligibilityArgs & { amount: number }): Promise<VirtualCoin[]> {
     return selectFundingInputs(await this.ownVtxos(), args)
