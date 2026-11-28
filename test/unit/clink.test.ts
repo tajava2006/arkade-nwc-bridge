@@ -233,6 +233,25 @@ describe('sendClinkAck (the single receipt funnel)', () => {
     }
   })
 
+
+  test('overlapping acks for one payment publish one receipt', async () => {
+    // 2026-11-28 mainnet: the reconcile pass and the inline ack of a same-pass
+    // settle both read the row before either deleted it — two receipts.
+    const temp = openTempDb()
+    try {
+      plantReceive(temp.db, 'settled')
+      plantReceiptRow(temp.db)
+      const published: unknown[] = []
+      const deps = { pool: stubPool(published), db: temp.db, secretKey: SERVICE_SK }
+
+      const results = await Promise.all([sendClinkAck(deps, HASH), sendClinkAck(deps, HASH)])
+      expect(results).toEqual([true, true]) // one run, both callers told it went out
+      expect(published.length).toBe(1)
+      expect(await sendClinkAck(deps, HASH)).toBe(false) // a later call finds the row gone
+    } finally {
+      temp.cleanup()
+    }
+  })
   test('not-settled swap → false, row kept for the reconcile backstop', async () => {
     const temp = openTempDb()
     try {

@@ -415,6 +415,8 @@ export async function reconcileClinkAcks(deps: {
   }
 }
 
+const acksInFlight = new Map<string, Promise<boolean>>()
+
 /**
  * Publish the CLINK receipt (+9735 for zaps) for ONE settled receive, keyed by
  * payment hash — the single receipt funnel. The reconcile loop above calls it
@@ -423,9 +425,24 @@ export async function reconcileClinkAcks(deps: {
  * swap must already be `settled` locally (we publish with OUR stored
  * preimage). No-op when there's no pending row (NWC-originated, or already
  * acked) or the swap isn't settled yet. Returns true once the ack went out;
- * the row DELETE is the dedup.
+ * the row DELETE is the dedup — for callers that come after. Callers that
+ * overlap (the reconcile pass and the inline ack of a same-pass settle) would
+ * both read the row before either deletes it, since the DELETE waits on the
+ * publishes: the payer got two receipts and a zap two 9735s. They share one
+ * run instead.
  */
-export async function sendClinkAck(
+export function sendClinkAck(
+  deps: { pool: SimplePool; db: Database; secretKey: Uint8Array; notify?: NotifyFn },
+  paymentHash: string,
+): Promise<boolean> {
+  const running = acksInFlight.get(paymentHash)
+  if (running) return running
+  const run = ackOnce(deps, paymentHash).finally(() => acksInFlight.delete(paymentHash))
+  acksInFlight.set(paymentHash, run)
+  return run
+}
+
+async function ackOnce(
   deps: { pool: SimplePool; db: Database; secretKey: Uint8Array; notify?: NotifyFn },
   paymentHash: string,
 ): Promise<boolean> {
