@@ -14,12 +14,12 @@ import {
 } from '../server_config'
 import { sendLightning, type LightningRails } from '../ln_send'
 import {
+  claimWebLnSend,
   failWebLn,
   listHistoryPage,
   parseHistoryCursor,
   recordArkSend,
   recordOffboard,
-  recordWebLnPending,
   settleWebLn,
   syncHistoryFromSources,
 } from '../history'
@@ -1280,11 +1280,24 @@ export function startWebServer(deps: WebServerDeps): WebServer {
             // Ledger row before the await (can take minutes) so an in-flight
             // send is visible on /history; a restart mid-send terminalizes it
             // via sweepInterruptedWebSends (the swap itself resumes safely).
-            recordWebLnPending(db, {
+            const claim = claimWebLnSend(db, {
               paymentHash: decoded.paymentHash,
               amountMsat: (decoded.amountSats ?? 0) * 1000,
               description: decoded.description || null,
             })
+            if (claim !== 'claimed') {
+              return htmlResponse(
+                sendResultView({
+                  label: 'lightning',
+                  ok: claim === 'settled' ? true : 'pending',
+                  detail:
+                    claim === 'settled'
+                      ? 'this invoice is already paid — see History'
+                      : 'this invoice is already being paid by an earlier confirm — its outcome lands on History and Swaps',
+                }),
+                { status: 409 },
+              )
+            }
             try {
               if (!ready.lightning) throw new Error('this wallet has no Lightning rail configured')
               const res = await sendLightning(

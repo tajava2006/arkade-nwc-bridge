@@ -271,7 +271,11 @@ export function sendConfirmView(args: {
         )}
       </table>
       ${args.note ? html`<p class="muted">${args.note}</p>` : ''}
-      <form method="post" action="/send/confirm">
+      <form
+        method="post"
+        action="/send/confirm"
+        onsubmit="var b = this.querySelector('button'); if (b.disabled) return false; b.disabled = true; b.textContent = 'Sending…';"
+      >
         <input type="hidden" name="destination" value="${args.destination}" />
         <input type="hidden" name="amount" value="${args.amountField}" />
         <input type="hidden" name="max" value="${args.isMax ? '1' : ''}" />
@@ -284,18 +288,19 @@ export function sendConfirmView(args: {
   })
 }
 
-/** Blocking result for Ark / LN sends (instant–seconds). */
+/** Blocking result for Ark / LN sends (instant–seconds). 'pending' = an earlier send of the same thing is still running. */
 export function sendResultView(args: {
   label: string
-  ok: boolean
+  ok: boolean | 'pending'
   detail: string
 }): RawHtml {
+  const [pill, word] = args.ok === 'pending' ? ['pending', 'In progress'] : args.ok ? ['settled', 'Sent'] : ['failed', 'Failed']
   return layout({
     title: 'Send',
     current: 'send',
     body: html`
-      <p class="pill ${args.ok ? 'settled' : 'failed'}" style="display:inline-block">
-        ${args.ok ? 'Sent' : 'Failed'} · ${args.label}
+      <p class="pill ${pill}" style="display:inline-block">
+        ${word} · ${args.label}
       </p>
       <pre>${args.detail}</pre>
       <p><a href="/send">Back to send</a></p>
