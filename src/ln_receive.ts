@@ -22,10 +22,19 @@ export interface LnReceiveDeps {
   db: Database
   /** Operator DM sink — passed through to the atomic receive driver. */
   notify?: NotifyFn
+  /** Exit-engine hand-off for an on-chain claim (AtomicReceiveDeps.startExit). */
+  startExit?: (txid: string, vout: number) => void
 }
 
 function atomicDeps(deps: LnReceiveDeps): AtomicReceiveDeps {
-  return { identity: deps.wallet.identity, arkServerUrl: deps.arkServerUrl, db: deps.db, subdustdUrl: deps.subdustdUrl, notify: deps.notify }
+  return {
+    identity: deps.wallet.identity,
+    arkServerUrl: deps.arkServerUrl,
+    db: deps.db,
+    subdustdUrl: deps.subdustdUrl,
+    notify: deps.notify,
+    startExit: deps.startExit,
+  }
 }
 
 export interface IssueInvoiceParams {

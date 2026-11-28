@@ -350,8 +350,11 @@ async function main(): Promise<void> {
       // Atomic swaps (every receive, sub-dust sends) live on subdustd; without
       // a configured Lightning block there is nothing to drive them against.
       const subdustdUrl = lightning?.subdustdUrl
+      // A swap that has to go on chain (F32_VHTLC_PLAN: R1/R5 receives, S4 sends)
+      // is unrolled and swept by the same exit engine as any vault vtxo.
+      const startExit = (txid: string, vout: number): void => ensureExitEngine(privateKey).startExit(txid, vout)
       const atomicDeps = subdustdUrl
-        ? { wallet, arkServerUrl: bootCfg.arkServerUrl, db, subdustdUrl, esploraUrl: bootCfg.esploraUrls[0], notify }
+        ? { wallet, arkServerUrl: bootCfg.arkServerUrl, db, subdustdUrl, esploraUrl: bootCfg.esploraUrls[0], notify, startExit }
         : undefined
       const runReconcilePasses = async (): Promise<void> => {
         const acks = reconcileClinkAcks(ackDeps).catch((err) => console.error('clink: ack reconcile failed:', err))
@@ -360,7 +363,7 @@ async function main(): Promise<void> {
           .then(() => reconcileAtomicSendRows(db))
           .catch((err) => console.error('ln: atomic send row reconcile failed:', err))
         const receives = (subdustdUrl
-          ? reconcileAtomicReceives({ wallet, subdustdUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify })
+          ? reconcileAtomicReceives({ wallet, subdustdUrl, arkServerUrl: bootCfg.arkServerUrl, db, notify, startExit })
           : Promise.resolve([] as string[]))
           .then((settledHashes) => {
             // Ack same-pass settles immediately — otherwise the CLINK receipt

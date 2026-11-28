@@ -25,6 +25,8 @@ import {
   selectWithinDepthCap,
   sendFundingMinLifeSecs,
   serverUnrollScript,
+  unrollDeadline,
+  canTransition,
   SqliteAtomicSwapRepository,
   SwapDirection,
   type AtomicOutput,
@@ -39,7 +41,8 @@ import { postJson } from './http'
 import { confirmSpent as confirmClaimSpent, hrp, timelockType, toXOnly } from './ark_util'
 import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
 import { makeExitCostOracle } from '../exit/cost_oracle'
-import { gcOrphanProofs, removeVtxo } from '../exit/vault'
+import { gcOrphanProofs, getVaultVtxo, removeVtxo } from '../exit/vault'
+import { findExitOp } from '../exit/ops'
 import { selectSpendInputs } from '../coin_select'
 import type { NotifyFn } from '../nostr/notifier'
 
@@ -68,6 +71,12 @@ export interface AtomicSendDeps {
   esploraUrl?: string
   /** Operator DM sink — fire-and-forget, never awaited on the swap path. */
   notify?: NotifyFn
+  /**
+   * Hand a vault vtxo to the exit engine. A send stuck past T — subdustd gone
+   * and the arkd signer refusing the T refund (F32_VHTLC_PLAN S4) — is unrolled
+   * before its batch can be swept, and comes back through our lone leaf.
+   */
+  startExit?: (txid: string, vout: number) => void
 }
 
 export interface AtomicSendResult {
@@ -1042,6 +1051,19 @@ export async function resumeAtomicSends(
 
   for (const swap of repo.listResumable()) {
     if (swap.direction !== SwapDirection.Send) continue
+    // The exit engine owns a send it took on chain; once its sweep (our lone
+    // leaf) is out, the funding is back.
+    const [ftxid, fvout] = (swap.fundingOutpoint ?? '').split(':')
+    const exitOp = ftxid ? findExitOp(deps.db, ftxid, Number(fvout)) : null
+    if (exitOp) {
+      if (exitOp.state === 'swept' && canTransition(SwapDirection.Send, swap.state, 'refunded')) {
+        repo.transition(swap.id, 'refunded')
+        result.refunded.push(swap.id)
+      } else {
+        result.waiting++
+      }
+      continue
+    }
     if (inflightSends.has(swap.id)) {
       // The live send is somewhere between its funding spend and its own terminal
       // bookkeeping — any transition landed here would collide with the one
@@ -1118,10 +1140,33 @@ export async function resumeAtomicSends(
         result.waiting++ // blocktime lag — the next pass retries
       } else {
         result.failed.push({ id: swap.id, error: e instanceof Error ? e.message : String(e) })
+        if (action === 'refund') await exitIfOutOfTime(deps, swap)
       }
     }
   }
   return result
+}
+
+/**
+ * S4: past T the refund keeps failing (subdustd gone, the arkd signer refusing
+ * it). The funding is still ours through the lone CSV leaf — but only on
+ * chain, and only if the unroll lands before the batch can be swept. At the
+ * last moment that still holds, hand it to the exit engine. Without arkd's
+ * info the policy falls back to mainnet's, which only starts earlier.
+ */
+async function exitIfOutOfTime(deps: AtomicSendDeps, swap: AtomicSwapRow): Promise<void> {
+  if (!deps.startExit || !swap.fundingOutpoint) return
+  const [txid, voutStr] = swap.fundingOutpoint.split(':')
+  const vaulted = getVaultVtxo(deps.db, txid!, Number(voutStr))
+  if (!vaulted?.expiresAt) return
+  const network = await new RestArkProvider(deps.arkServerUrl)
+    .getInfo()
+    .then((i) => i.network)
+    .catch(() => 'bitcoin')
+  if (Math.floor(Date.now() / 1000) < unrollDeadline(policyFor(0, network), vaulted.expiresAt)) return
+  console.warn(`atomic send ${swap.id}: refund still failing at the unroll deadline — taking the funding back on chain`)
+  deps.notify?.('send-fail', () => `send: refund refused past T — unrolling the funding before its batch expires [hash ${swap.paymentHash.slice(0, 8)}]`)
+  deps.startExit(txid!, Number(voutStr))
 }
 
 /** Terminal state housekeeping: drop the lifecycle-owned vault row + orphaned proofs. */

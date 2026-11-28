@@ -178,6 +178,18 @@ export const receiveFundingMarginSecs = (p: VhtlcPolicy): number => slow(p, p.de
 /** A VHTLC's three CSV delays; with T they rebuild the script. */
 export type VhtlcDelays = Omit<OfferedVhtlc, 'refundLocktime'>
 
+/**
+ * R1: the latest moment a receive's on-chain claim can start and still confirm
+ * before T (detect + unroll + d_c + confirm). Past it with our claim still
+ * unaccepted offchain, the claim goes on chain.
+ */
+export const receiveClaimDeadline = (p: VhtlcPolicy, refundLocktime: number, claimDelaySecs: number): number =>
+  refundLocktime - receiveWindowSecs(p, claimDelaySecs)
+
+/** S4/R2: the latest moment an unroll can start and still be on chain before its batch is swept. */
+export const unrollDeadline = (p: VhtlcPolicy, batchExpirySecs: number): number =>
+  batchExpirySecs - slow(p, p.detectBlocks + unrollBlocks(p) + p.confirmBlocks)
+
 export interface OfferedVhtlc {
   refundLocktime: number
   claimDelaySecs: number

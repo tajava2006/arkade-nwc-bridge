@@ -15,6 +15,7 @@ import {
   canTransition,
   checkReceiveBeforeClaim,
   claimAlone,
+  receiveClaimDeadline,
   computeClaimSplit,
   finishClaim,
   policyFor,
@@ -29,6 +30,9 @@ import {
   type VhtlcDelays,
 } from './index'
 import { postJson, getJson } from './http'
+import { captureVtxo, expirySec, vtxoStatus } from '../exit/proof_sync'
+import { gcOrphanProofs, removeVtxo } from '../exit/vault'
+import { findExitOp } from '../exit/ops'
 import { confirmSpent, hrp, timelockType, toXOnly } from './ark_util'
 import type { NotifyFn } from '../nostr/notifier'
 
@@ -61,6 +65,12 @@ export interface AtomicReceiveDeps {
   subdustdUrl: string
   /** Operator DM sink — fire-and-forget, never awaited on the swap path. */
   notify?: NotifyFn
+  /**
+   * Hand a vault vtxo to the exit engine (unroll + sweep through our leaf). A
+   * VHTLC receive whose claim arkd won't take (R1) or that was unrolled (R5)
+   * is claimed on chain this way, before T.
+   */
+  startExit?: (txid: string, vout: number) => void
 }
 
 // CLINK-originated receives are notified by the CLINK ack funnel with
@@ -262,6 +272,32 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   const [txid, voutStr] = status.fundingOutpoint.split(':')
   if (!txid || voutStr === undefined) throw new Error(`bad funding outpoint ${status.fundingOutpoint}`)
   const sharedPk = hex.encode(script.pkScript)
+
+  // Our claim was attempted (the preimage may be out) and hasn't landed. Once
+  // the VHTLC is unrolled (R5) or the last moment an on-chain claim still
+  // beats T arrives (R1 — arkd refusing our claim, whatever it says), the claim
+  // goes on chain through the exit engine, and offchain attempts stop.
+  if (isVhtlc && swap.state === 'funded') {
+    const op = findExitOp(deps.db, txid, Number(voutStr))
+    if (op) {
+      // swept = our claim is on chain; subdustd harvests the preimage from it and
+      // settles, and the 'settled' status above converges this row.
+      if (op.state === 'swept' && canTransition(SwapDirection.Receive, swap.state, 'claimed')) repo.transition(swapId, 'claimed')
+      return false
+    }
+    const { vtxos: any } = await indexer.getVtxos({ outpoints: [{ txid, vout: Number(voutStr) }] })
+    const cur = any.find((x) => x.txid === txid && x.vout === Number(voutStr))
+    const deadline = receiveClaimDeadline(policyFor(Number(d), info.network), status.refundLocktime, status.vhtlc!.claimDelaySecs)
+    const unrolled = !!cur?.isUnrolled
+    if (deps.startExit && (unrolled || Math.floor(Date.now() / 1000) >= deadline)) {
+      const why = unrolled ? 'the VHTLC was unrolled' : 'our claim is still not accepted at the last moment an on-chain claim beats T'
+      console.warn(`atomic receive ${swapId}: ${why} — claiming on chain`)
+      deps.notify?.('recv-noffer', () => `receive: ${why} — claiming ${a} sats on chain [hash ${swap.paymentHash.slice(0, 8)}]`)
+      deps.startExit(txid, Number(voutStr))
+      return false
+    }
+  }
+
   const { vtxos } = await indexer.getVtxos({ scripts: [sharedPk], spendableOnly: true })
   const v = vtxos.find((x) => x.txid === txid && x.vout === Number(voutStr))
   if (!v) throw new Error(`shared vtxo ${status.fundingOutpoint} not found`)
@@ -305,6 +341,26 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   // died after a phase must not re-run it (transition() rejects funded →
   // funded, and re-claiming an already-spent shared vtxo can't succeed).
   let state = swap.state
+  if (state === 'invoice_issued' && isVhtlc) {
+    // Its proofs in the vault BEFORE the preimage leaves us: if the operator
+    // then refuses our claim, it can refuse to serve the chain as well (R1).
+    // No vault copy, no claim this pass.
+    try {
+      await captureVtxo(deps.db, indexer, {
+        txid,
+        vout: Number(voutStr),
+        valueSat: v.value,
+        source: 'atomic',
+        script: sharedPk,
+        tapTree: hex.encode(script.encode()),
+        status: vtxoStatus(v),
+        expiresAt: expirySec(v),
+      })
+    } catch (e) {
+      console.warn(`atomic receive ${swapId}: not claiming yet — the VHTLC's proofs couldn't be vaulted (${e instanceof Error ? e.message : e})`)
+      return false
+    }
+  }
   if (state === 'invoice_issued') {
     // The row alone must rebuild the script later (an on-chain claim needs it).
     repo.setScript(swapId, { refundLocktime: status.refundLocktime, peerPubkey: hex.encode(peerXOnly), vhtlc: isVhtlc ? status.vhtlc : undefined })
@@ -336,6 +392,15 @@ export async function driveAtomicReceive(deps: AtomicReceiveDeps, swapId: string
   await postJson(`${deps.subdustdUrl}/v2/subdust/atomic/receive/settle`, { swapId, preimage: swap.preimage })
   repo.transition(swapId, 'settled')
   notifyReceiveSettled(deps, swap)
+  if (isVhtlc) {
+    // claimed offchain: the vaulted VHTLC is spent, its proofs no longer needed
+    try {
+      removeVtxo(deps.db, txid, Number(voutStr))
+      gcOrphanProofs(deps.db)
+    } catch (err) {
+      console.warn(`atomic receive ${swapId}: vault release failed:`, err)
+    }
+  }
   return true
 }
 

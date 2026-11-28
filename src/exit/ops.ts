@@ -80,6 +80,15 @@ export function setExitOpState(
   )
 }
 
+/** getExitOp that reads a missing exit_ops table (a swap-only db) as "no op" — the swap paths must not fail on it. */
+export function findExitOp(db: Database, txid: string, vout: number): ExitOp | null {
+  try {
+    return getExitOp(db, txid, vout)
+  } catch {
+    return null
+  }
+}
+
 export function getExitOp(db: Database, txid: string, vout: number): ExitOp | null {
   const row = db
     .query<Row, [string, number]>(`SELECT * FROM exit_ops WHERE txid = ? AND vout = ?`)

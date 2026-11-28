@@ -231,6 +231,13 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
       setExitOpState(db, op.txid, op.vout, 'sweepable')
       log(`exit-engine: ${op.txid}:${op.vout} CSV elapsed — sweepable`)
       notify(op.txid, op.vout)
+      // A swap's VHTLC / shared vtxo is swept at once: a receive's claim must
+      // confirm before T (F32_VHTLC_PLAN R1), and nothing else waits on it.
+      if (vtxo.source === 'atomic') {
+        void engine
+          .sweep([{ txid: op.txid, vout: op.vout }])
+          .catch((e) => log(`exit-engine: auto-sweep of swap vtxo ${op.txid}:${op.vout} failed — ${e instanceof Error ? e.message : e}`))
+      }
     }
   }
 
@@ -331,7 +338,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     return fundingWalletPromise
   }
 
-  return {
+  const engine: ExitEngine = {
     startExit(txid, vout) {
       createOrRestartExitOp(db, txid, vout)
       notify(txid, vout)
@@ -484,4 +491,5 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
       listeners.clear()
     },
   }
+  return engine
 }
