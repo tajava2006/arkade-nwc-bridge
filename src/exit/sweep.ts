@@ -12,7 +12,8 @@ import {
 } from '@arkade-os/sdk'
 import type { Network } from '../defaults'
 import { getVaultVtxo, type VaultVtxo } from './vault'
-import { availableExitPath } from './csv'
+import { availableExitPath, swapPreimageFor } from './csv'
+import { finalizeConditionInput } from '../atomic/onchain_leaf'
 
 // The last exit step: spend fully-unrolled vtxos through their CSV exit
 // path to a plain address. Local adaptation of the SDK's
@@ -57,6 +58,8 @@ interface SweepInput {
   leaf: VaultSpendingLeaf
   sequence: number
   pkScript: Uint8Array
+  /** Set when the leaf is a receive VHTLC's claim: its preimage goes in the witness. */
+  preimage?: Uint8Array
 }
 
 async function resolveInput(deps: SweepDeps, txid: string, vout: number): Promise<SweepInput> {
@@ -69,12 +72,15 @@ async function resolveInput(deps: SweepDeps, txid: string, vout: number): Promis
   }
   const tip = await deps.explorer.getChainTip()
   // Only a leaf we can sign alone: a swap lockup's other CSV leaves need the
-  // provider's signature or the preimage (SM-55).
+  // provider's signature or the preimage (SM-55) — unless it's our own receive
+  // VHTLC's claim leaf and the swap row holds that preimage (F32_VHTLC_PLAN §7).
+  const preimage = swapPreimageFor(deps.db, txid, vout)
   const exit = availableExitPath(
     vtxo.tapTree,
     { height: status.blockHeight, time: status.blockTime },
     tip,
     await deps.identity.xOnlyPublicKey(),
+    preimage,
   )
   if (!exit) {
     throw new Error(`CSV timelock not elapsed yet for ${txid}:${vout}`)
@@ -89,6 +95,7 @@ async function resolveInput(deps: SweepDeps, txid: string, vout: number): Promis
     leaf,
     sequence: timelockToSequence(exit.params.timelock),
     pkScript: script.pkScript,
+    preimage: 'conditionScript' in exit.params ? preimage : undefined,
   }
 }
 
@@ -126,7 +133,8 @@ export async function buildSweepTx(
       witnessUtxo: { amount: BigInt(input.vtxo.valueSat), script: input.pkScript },
       sighashType: SigHash.DEFAULT,
     })
-    estimator.addTapscriptInput(64, input.leaf[1].length, controlBlockLen(input.leaf))
+    // a claim leaf's witness also carries the 32-byte preimage (+1 length byte)
+    estimator.addTapscriptInput(input.preimage ? 64 + 33 : 64, input.leaf[1].length, controlBlockLen(input.leaf))
   }
   estimator.addOutputAddress(destAddress, network)
 
@@ -148,7 +156,8 @@ export async function buildSweepTx(
 
   tx.addOutputAddress(destAddress, amountSat, network)
   const signed = await deps.identity.sign(tx)
-  signed.finalize()
+  // scure's finalize can't place a condition witness: those inputs by hand
+  inputs.forEach((input, i) => (input.preimage ? finalizeConditionInput(signed, i, input.preimage) : signed.finalizeIdx(i)))
 
   return {
     txid: signed.id,

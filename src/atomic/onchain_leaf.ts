@@ -42,8 +42,9 @@ function unsigned(a: LeafSpendArgs): Transaction {
   return tx
 }
 
-function finalizeCondition(tx: Transaction, preimage: Uint8Array): void {
-  const input = tx.getInput(0)
+/** Finalize input `index` of a signed tx spending a condition (preimage) leaf. */
+export function finalizeConditionInput(tx: Transaction, index: number, preimage: Uint8Array): void {
+  const input = tx.getInput(index)
   const leaf = input.tapLeafScript?.[0]
   if (!leaf) throw new Error('leaf spend has no tap leaf')
   const script = scriptFromTapLeafScript(leaf)
@@ -57,13 +58,13 @@ function finalizeCondition(tx: Transaction, preimage: Uint8Array): void {
     .map((s) => s.sig)
     .reverse()
   if (sigs.length === 0) throw new Error('leaf spend carries no signature for its leaf')
-  tx.updateInput(0, { finalScriptWitness: [...sigs, preimage, script, TaprootControlBlock.encode(leaf[0])] })
+  tx.updateInput(index, { finalScriptWitness: [...sigs, preimage, script, TaprootControlBlock.encode(leaf[0])] })
 }
 
 /** Build, sign and finalize the spend; returns the raw tx. */
 export async function signLeafSpend(a: LeafSpendArgs, identity: Identity): Promise<Transaction> {
   const tx = await identity.sign(unsigned(a))
-  if (a.preimage) finalizeCondition(tx, a.preimage)
+  if (a.preimage) finalizeConditionInput(tx, 0, a.preimage)
   else tx.finalize()
   return tx
 }

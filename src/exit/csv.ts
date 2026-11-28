@@ -4,6 +4,8 @@ import {
   VtxoScript,
   type ConditionCSVMultisigTapscript,
 } from '@arkade-os/sdk'
+import { sha256 } from '@noble/hashes/sha2.js'
+import { hashlockConditionScript } from '../atomic/script'
 
 // CSV-satisfaction judgment for a fully-unrolled vtxo. The SDK has this
 // logic inside prepareUnrollTransaction as a module-private helper
@@ -39,12 +41,18 @@ export interface CsvPathStatus {
  * lockup, SM-55; kept because any multi-leaf script can do it). Without `ourXOnly`, every exit path
  * (display / estimates that don't care whose it is).
  */
-export function exitPathsFor(tapTreeHex: string, ourXOnly?: Uint8Array): ExitPath[] {
+export function exitPathsFor(tapTreeHex: string, ourXOnly?: Uint8Array, preimage?: Uint8Array): ExitPath[] {
   const exits = VtxoScript.decode(hex.decode(tapTreeHex)).exitPaths()
   if (!ourXOnly) return exits
   const ours = hex.encode(ourXOnly)
-  return exits.filter(
-    (p) => CSVMultisigTapscript.is(p) && p.params.pubkeys.length === 1 && hex.encode(p.params.pubkeys[0]!) === ours,
+  const alone = (p: ExitPath) => p.params.pubkeys.length === 1 && hex.encode(p.params.pubkeys[0]!) === ours
+  // A receive VHTLC's unilateralClaim is ours too — but only with the preimage
+  // its hashlock wants (F32_VHTLC_PLAN §7), which the swap row holds.
+  const hashlock = preimage ? hex.encode(hashlockConditionScript(sha256(preimage))) : undefined
+  return exits.filter((p) =>
+    CSVMultisigTapscript.is(p)
+      ? alone(p)
+      : hashlock !== undefined && alone(p) && hex.encode((p as ConditionCSVMultisigTapscript.Type).params.conditionScript) === hashlock,
   )
 }
 
@@ -53,8 +61,9 @@ export function csvPathStatuses(
   confirmedAt: BlockTime,
   tip: BlockTime,
   ourXOnly?: Uint8Array,
+  preimage?: Uint8Array,
 ): CsvPathStatus[] {
-  const exits = exitPathsFor(tapTreeHex, ourXOnly)
+  const exits = exitPathsFor(tapTreeHex, ourXOnly, preimage)
   return exits.map((path) => {
     const { type, value } = path.params.timelock
     const need = Number(value)
@@ -70,6 +79,17 @@ export function availableExitPath(
   confirmedAt: BlockTime,
   tip: BlockTime,
   ourXOnly?: Uint8Array,
+  preimage?: Uint8Array,
 ): ExitPath | undefined {
-  return csvPathStatuses(tapTreeHex, confirmedAt, tip, ourXOnly).find((s) => s.satisfied)?.path
+  return csvPathStatuses(tapTreeHex, confirmedAt, tip, ourXOnly, preimage).find((s) => s.satisfied)?.path
+}
+
+/** The preimage of a receive swap whose VHTLC is this vault vtxo — what unlocks its claim leaf on chain. */
+export function swapPreimageFor(db: import('bun:sqlite').Database, txid: string, vout: number): Uint8Array | undefined {
+  const r = db
+    .query<{ preimage: string }, [string]>(
+      `SELECT preimage FROM atomic_swaps WHERE funding_outpoint = ? AND direction = 'receive' AND preimage IS NOT NULL`,
+    )
+    .get(`${txid}:${vout}`)
+  return r ? hex.decode(r.preimage) : undefined
 }

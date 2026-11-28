@@ -11,7 +11,7 @@ import type { Network } from '../defaults'
 import { pickEsplora } from './esplora'
 import { getVaultVtxo } from './vault'
 import { VaultIndexer } from './vault_indexer'
-import { availableExitPath } from './csv'
+import { availableExitPath, swapPreimageFor } from './csv'
 import {
   createOrRestartExitOp,
   getExitOp,
@@ -227,7 +227,7 @@ export function startExitEngine(deps: ExitEngineDeps): ExitEngine {
     if (!status.confirmed) return
     const tip = await explorer.getChainTip()
     const confirmedAt = { height: status.blockHeight, time: status.blockTime }
-    if (availableExitPath(vtxo.tapTree, confirmedAt, tip, await deps.identity.xOnlyPublicKey())) {
+    if (availableExitPath(vtxo.tapTree, confirmedAt, tip, await deps.identity.xOnlyPublicKey(), swapPreimageFor(db, op.txid, op.vout))) {
       setExitOpState(db, op.txid, op.vout, 'sweepable')
       log(`exit-engine: ${op.txid}:${op.vout} CSV elapsed — sweepable`)
       notify(op.txid, op.vout)

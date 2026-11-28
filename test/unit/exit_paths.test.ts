@@ -71,3 +71,46 @@ describe('exit paths we can sign alone (SM-55)', () => {
     expect(exitPathsFor(hex.encode(shared.encode()), SOLVER)).toHaveLength(0)
   })
 })
+
+// F32_VHTLC_PLAN §7: a receive VHTLC's claim leaf (receiver + preimage + CSV)
+// is ours too — but only with the preimage its hashlock wants.
+describe('a receive VHTLC: our claim leaf needs the preimage', () => {
+  const preimage = new Uint8Array(32).fill(9)
+  const H = new Uint8Array(require('node:crypto').createHash('sha256').update(preimage).digest())
+  const { buildVhtlc } = require('../../src/atomic') as typeof import('../../src/atomic')
+  const receive = buildVhtlc({
+    sender: SOLVER,
+    receiver: OURS,
+    server: SERVER,
+    paymentHash: H,
+    timeouts: { refundLocktime: 1_800_000_000, claimDelaySecs: 1024, refundDelaySecs: 2048, refundNoReceiverDelaySecs: 2048 },
+  })
+  const tree = hex.encode(receive.encode())
+  const confirmed = { height: 100, time: 1_000_000 }
+  const after = (s: number) => ({ height: 200, time: 1_000_000 + s })
+
+  test('without the preimage nothing in it is ours alone', () => {
+    expect(exitPathsFor(tree, OURS)).toEqual([])
+  })
+  test('with it, the claim leaf — and only after d_c', () => {
+    const paths = exitPathsFor(tree, OURS, preimage)
+    expect(paths.length).toBe(1)
+    expect(hex.encode(paths[0]!.script)).toBe(receive.unilateralClaimScript)
+    expect(availableExitPath(tree, confirmed, after(1023), OURS, preimage)).toBeUndefined()
+    expect(hex.encode(availableExitPath(tree, confirmed, after(1024), OURS, preimage)!.script)).toBe(receive.unilateralClaimScript)
+  })
+  test('a wrong preimage unlocks nothing', () => {
+    expect(exitPathsFor(tree, OURS, new Uint8Array(32).fill(8))).toEqual([])
+  })
+  test('as the sender of a send VHTLC, our leaf is the lone refund, preimage or not', () => {
+    const send = buildVhtlc({
+      sender: OURS,
+      receiver: SOLVER,
+      server: SERVER,
+      paymentHash: H,
+      timeouts: { refundLocktime: 1_800_000_000, claimDelaySecs: 1024, refundDelaySecs: 2048, refundNoReceiverDelaySecs: 2048 },
+    })
+    const paths = exitPathsFor(hex.encode(send.encode()), OURS, preimage)
+    expect(paths.map((p) => hex.encode(p.script))).toEqual([send.unilateralRefundWithoutReceiverScript])
+  })
+})
