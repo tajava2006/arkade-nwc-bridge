@@ -403,6 +403,32 @@ rebuilds the identical spend (same inputs, same destination) above the RBF
 floor via `buildSweepTx(minFeeSat)` and updates every op the batched sweep
 settled to the replacement txid.
 
+### 5b. Swap VHTLCs (F32, 2026-11)
+
+A dust+ Lightning swap rides the SDK VHTLC (operator workspace
+`F32_VHTLC_PLAN.md`), and two of its outcomes need this engine, started by the
+swap reconcilers rather than the operator (`startExit` in the atomic deps):
+
+- **receive, claim not landing** — the bridge is the VHTLC's receiver. Its
+  proofs are vaulted **before** the preimage leaves us (an operator that refuses
+  the claim could refuse to serve the chain too). Once the VHTLC is unrolled by
+  anyone (R5), or the R1 deadline arrives (`receiveClaimDeadline`: the last
+  moment an on-chain claim still confirms before T), the op starts. The exit
+  path is the **preimage leaf** (unilateralClaim: our key + `hashlock(sha256(P))`,
+  CSV d_c): `exitPathsFor` admits a ConditionCSV leaf over our key alone when
+  its condition opens with the swap's preimage (looked up by funding outpoint),
+  and the sweep lays its witness out by hand (`finalizeConditionInput`).
+- **send, refund refused past T** (S4) — at `unrollDeadline` (batch expiry minus
+  an unroll's worth of blocks) the funding is unrolled and comes back through
+  our lone leaf (unilateralRefundWithoutReceiver, CSV d_s).
+
+Swap vtxos (`source = 'atomic'`) are swept the moment they turn sweepable, and
+the poll retries a failed sweep until the swap's bookkeeping releases the vault
+row — nothing else waits on them, and a receive's claim must confirm before T.
+A swap op that fails (two parties pushing the same unroll race on its anchors)
+is restarted by the reconciler every `SWAP_EXIT_RETRY_SECS`; an operator op
+stays manual.
+
 ## 6. The tab
 
 - **`/exit` list** — one row per mirrored VTXO: value, expiry countdown (the

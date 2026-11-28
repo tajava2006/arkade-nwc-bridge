@@ -320,11 +320,17 @@ row exists. Logs go to stdout; when running in background pipe to
   SDK declares and stops on a mismatch. Bump those three by hand only when
   the SDK bumps its own pins. (`@noble/hashes` 2.0.1 also
   sits in the tree via nostr-tools — off the ark signing path, left alone.)
-- **Atomic sends trust the funder (D11).** The 4-leaf script gives
-  subdustd, the claimer on a send, no unilateral path: a funder who unrolls
-  while subdustd's HTLC is held keeps both sides, up to `a`. Fine while the
-  funder is the operator's own bridge; before subdustd serves anyone else it
-  needs a v2 script with a claimer unilateral leaf.
+- **dust+ swaps ride the VHTLC; only sub-dust trusts the funder.** Since
+  F32 (operator workspace `F32_VHTLC_PLAN.md`) a swap of dust or more uses the
+  SDK VHTLC — both sides have a unilateral leaf, and both check the other's
+  timeouts (`checkSendOffer` / `checkReceiveBeforeClaim` in
+  `src/atomic/vhtlc.ts`) before committing. Below dust the 4-leaf script
+  stays: its claimer has no unilateral path, so a funder who unrolls
+  mid-payment keeps up to `a` (< dust, less than the unroll costs). The
+  timing inequalities are the plan's §4–§6 — change a delay or window only
+  against them. The bridge's on-chain side is the exit engine: a receive
+  VHTLC is vaulted before the preimage leaves us, and R1/R5 receives and S4
+  sends are handed to it (`startExit`); it sweeps swap vtxos on its own.
 - **`transactions.amount_msat` = the BOLT11 nominal, both
   directions; `fees_paid_msat` = our cost.** Wallet movement is
   derived (incoming credits amount − fees, outgoing debits

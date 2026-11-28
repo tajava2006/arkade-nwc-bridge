@@ -219,6 +219,22 @@ as offchain-unspendable on the bridge too.**
 - Mainnet, alpha SDKs: confirm-before-send, surface the detected rail + fee, and
   treat offboard/LN as long-running (reuse the SSE pattern for result state).
 
+## 6b. LN send of dust+: the VHTLC and its on-chain end (F32, 2026-11)
+
+A Lightning send of dust or more funds the SDK VHTLC (`src/atomic/vhtlc.ts`,
+operator workspace `F32_VHTLC_PLAN.md`): the bridge is its sender, subdustd its
+receiver. Before funding, `checkSendOffer` holds subdustd's offer to the timing
+inequalities (S1–S3: its claim leaf matures before our lone refund, T leaves an
+unroll's room), and funding only takes coins that outlive T by an unroll and its
+confirmation (`sendFundingMinLifeSecs`) within the unroll-depth cap. No presig:
+subdustd claims with the preimage.
+
+Recovery, in order: subdustd's cooperative cancel (seconds); after T, the
+refund leaf (us + arkd); and if arkd refuses that too (S4), the exit engine
+unrolls before the batch can be swept and the funding comes back through our
+lone leaf after d_s (EXIT_DESIGN §5b). If subdustd turns up mid-exit with a
+preimage that opens the hash, the payment went through — booked claimed.
+
 ## 7. Send-screen VTXO breakdown + balance (rail-aware)
 
 Show every VTXO (a list/table is enough — a fancy graphic is optional polish,

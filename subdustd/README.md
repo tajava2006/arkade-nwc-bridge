@@ -3,16 +3,21 @@
 The server side of the bridge's atomic Lightning swaps, split out of the Boltz
 fork's `SubdustAtomicRouter` into its own service: **every send and every
 receive, any amount** (decisions D10 and D11 in the operator's migration
-plan — the name is from when it only did sub-dust). The protocol
-(`ATOMIC_SUBDUST_PLAN.md`) is unchanged: 4-leaf shared vtxo, presigned
-claim/cancel pairs, split delta.
+plan — the name is from when it only did sub-dust). Two scripts, picked by
+amount (`usesVhtlc`):
 
-> **One-funder trust on sends.** The script gives subdustd (the claimer on a
-> send) no unilateral path: a funder who unrolls the shared vtxo while holding
-> subdustd's HTLC keeps both the payment and the coin, up to `a`. Below dust
-> that bound was negligible; at any amount it is acceptable only while the
-> funder is the operator's own bridge. Serving anyone else needs a v2 script
-> with a claimer unilateral leaf first. It imports the same
+- **dust and above: the SDK's VHTLC** (operator workspace `F32_VHTLC_PLAN.md`).
+  Both sides have a unilateral leaf — the receiver claims on chain with the
+  preimage after d_c, the sender takes it back alone after d_s > d_c — so
+  neither side can keep both the payment and the coin, and an operator that
+  censors one side's offchain spend doesn't win either. Each side checks the
+  other's timeouts and the funding coin's unroll depth before it commits.
+- **below dust: the 4-leaf shared vtxo** of `ATOMIC_SUBDUST_PLAN.md`, presigned
+  claim/cancel pairs and a split delta (a VHTLC output below dust can't exist).
+  Its claimer has no unilateral path: a funder who unrolls mid-payment keeps
+  up to `a` — less than dust, and less than the unroll's own CPFPs.
+
+It imports the same
 `src/atomic` library the bridge uses, so the client and server cannot drift.
 
 It serves the same REST contract the bridge already speaks
@@ -40,8 +45,8 @@ The request and response shapes are the Boltz fork's. Errors come back as
 
 | endpoint | does |
 |---|---|
-| `POST /v2/subdust/atomic/send/init` `{invoice, userPubkey}` | `{swapId, boltzPubkey, refundLocktime, exitDelay, boltzScriptDelay, feeSats, dust, vtxoMin}`. T is sized from a route measurement, capped by `sendWindowSecs`. Calling it again for an unfunded invoice returns the same swap |
-| `POST …/send/fund` `{swapId, presigs, fundingOutpoint?}` | Finds the funding through arkd's indexer, verifies the presigs, pays, then claims. Returns `{status:'claimed', preimage, claimTxid}` or `{status:'failed', error}` |
+| `POST /v2/subdust/atomic/send/init` `{invoice, userPubkey}` | `{swapId, boltzPubkey, refundLocktime, exitDelay, boltzScriptDelay, feeSats, dust, vtxoMin, script, vhtlc?}`. `script` is `vhtlc` (dust+) or `4leaf`; a VHTLC comes with its three CSV delays. T is sized from a route measurement, capped by `sendWindowSecs`. Calling it again for an unfunded invoice returns the same swap |
+| `POST …/send/fund` `{swapId, presigs?, fundingOutpoint?}` | Finds the funding through arkd's indexer, verifies it (and the presigs — a VHTLC has none), pays, then claims. Returns `{status:'claimed', preimage, claimTxid}` or `{status:'failed', error}` |
 | `POST …/send/cancel` `{swapId, fundingOutpoint, outputs, presigs}` | Co-signs the funder's unwind, only when the cancel gate says the payment is dead. Otherwise `{status:'refused', error}` |
 | `GET …/send/status?swapId=` | `{state, preimage?}` |
 | `GET …/send/fees` | `{feePercent}` — the fee rule (`feeSats = ceil(a × feePercent / 100)`, frozen per swap at init), so a client can price a send before init. subdustd pays the routing out of it |
@@ -108,6 +113,32 @@ from chain and LND state alone, under the per-swap lock:
 
 A pass is skipped while the previous one is still running (F13). An unknown
 MTP refunds nothing.
+
+## On-chain enforcement (VHTLC)
+
+The VHTLC's unilateral paths only matter if someone acts on them. With a
+`chain` backend configured, the executor (`onchain.ts`) does, every scanner pass:
+
+- **detects an unroll** of a swap's VHTLC — its txid on chain (earliest, and
+  works with arkd gone) or arkd's unrolled flag — and pushes the rest of the
+  unroll itself (`Unroll.Session`, CPFPs from the fuel address);
+- **send** (we are the receiver): if LND paid, claims on chain with the
+  preimage after d_c; never paid → nothing of ours, the funder refunds;
+- **receive** (we are the sender): the user's on-chain claim shows the
+  preimage → settle the hold invoice at once; no claim → take the VHTLC back
+  after d_s and cancel the HTLC only once that refund is confirmed;
+- watches its own spend until confirmed, re-broadcasts with a higher fee when
+  it sits or a counterparty spend competes;
+- **sweeps our own coins an unroll dragged on chain**: the Ark tx that funds a
+  VHTLC carries our change, and whoever unrolls the VHTLC puts it on chain
+  too. arkd's `spendableOnly` omits unrolled vtxos, so they are read from the
+  script's full history (every 10 min, and right after an unroll we saw) and
+  swept to the fuel address after the exit delay.
+
+**Fuel:** a P2TR of the subdustd key, logged at boot with its balance (a
+warning when empty). It pays unroll CPFPs and receives what the executor takes
+on chain. Keep a little there — without it a deadline-bound unroll can't move.
+Without `chain` at all, boot warns and an unrolled VHTLC goes unenforced.
 
 ## Ark key
 
@@ -188,6 +219,9 @@ when the LND cert, macaroon or key file is unreadable.
   "dbPath": "/data/subdustd.sqlite",
   "http": { "host": "0.0.0.0", "port": 9010 },
   "logLevel": "info",
+  "chain": {
+    "bitcoind": { "url": "http://172.28.0.1:8332", "user": "subdustd", "passwordPath": "/secrets/bitcoind.password" }
+  },
   "subdust": {
     "sendWindowSecs": 324000,
     "receiveWindowSecs": 21600,
@@ -201,6 +235,12 @@ when the LND cert, macaroon or key file is unreadable.
 Required: `network`, `arkdUrl`, `lnd.*`, `keyPath`, `dbPath`. `http` defaults to
 `127.0.0.1:9010` (set `0.0.0.0` in a container), `logLevel` to `info`, and every
 `subdust` knob to the value below.
+
+`chain` is exactly one of `bitcoind` (JSON-RPC; needs `txindex=1` — the
+executor looks transactions up by txid — and finds spenders by scanning blocks)
+or `esplora` (`{ "url": … }`; must name spenders, as mempool.space does). The
+bitcoind password lives in its own file, read at boot. Optional, but without it
+the VHTLC's on-chain paths go unenforced.
 
 ### Knobs carried over from the Boltz fork
 

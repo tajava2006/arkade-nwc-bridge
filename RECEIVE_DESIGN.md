@@ -146,6 +146,19 @@ reconciler also makes the ≥dust ack restart-safe (catches swaps the live
 **Status: verified end-to-end on mainnet (2026-07-17)** — noffer sub-dust zap
 received over the atomic path (1 sat), alongside an atomic sub-dust send.
 
+### 3b. LN receive of dust+: the VHTLC (F32, 2026-11)
+
+Every LN receive is an atomic receive on subdustd (D10); from dust up it rides
+the SDK VHTLC with the bridge as receiver. Before the claim shows the preimage,
+`checkReceiveBeforeClaim` holds subdustd's offer to the timing inequalities
+(R1: an on-chain claim can still beat T; R2: the funding batch outlives an
+unroll; R4: the hold invoice's CLTV outlasts T and subdustd's refund; C1/R5:
+our leaf matures first; the unroll-depth cap) — failing any, we never claim, no
+preimage leaves, and the payer's HTLC times out back to them. The VHTLC is
+vaulted before the claim. If the claim doesn't land — the VHTLC unrolled, or
+arkd refusing it up to the R1 deadline — the exit engine claims on chain with
+the preimage before T (EXIT_DESIGN §5b), and subdustd settles from that claim.
+
 ## 4. Onchain onboarding: native boarding vs Boltz chain swap
 
 Symmetric to send, two onchain→VTXO routes exist; we use **native boarding only**.
