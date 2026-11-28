@@ -75,7 +75,8 @@ export class FloatRenewer {
       manager: FloatManager
       lock: FloatLock
       /** Renew a coin once its batch has less than this left. */
-      thresholdSecs: number
+      /** Seconds of batch life left at which a coin renews; may need arkd's info (read per pass). */
+      thresholdSecs: number | (() => Promise<number>)
       /** Most outputs one renewal creates (arkd bounds a round's weight). */
       maxOutputs?: number
       log: Logger
@@ -83,9 +84,10 @@ export class FloatRenewer {
   ) {}
 
   async pass(): Promise<{ renewed?: string; recovered?: string }> {
-    const { manager, lock, thresholdSecs, log } = this.d
+    const { manager, lock, log } = this.d
     const out: { renewed?: string; recovered?: string } = {}
     try {
+      const thresholdSecs = typeof this.d.thresholdSecs === 'number' ? this.d.thresholdSecs : await this.d.thresholdSecs()
       const due = await manager.getExpiringVtxos(thresholdSecs * 1000)
       if (due.length > 0) {
         const values = due.map((v) => v.value)

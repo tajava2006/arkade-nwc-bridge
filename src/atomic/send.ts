@@ -122,7 +122,7 @@ interface InitResponse {
  * checkSendOffer also caps d_s from it, so a server can't park our on-chain
  * fallback for weeks.
  */
-const MAX_ACCEPTED_SEND_WINDOW_SECS = 96 * 3600
+export const MAX_ACCEPTED_SEND_WINDOW_SECS = 96 * 3600
 /** subdustd's pay margin and block time (its config, mirrored only to bound d_s). */
 const SUBDUSTD_PAY_MARGIN_SECS = 600
 const SUBDUSTD_BLOCK_SECS = 600

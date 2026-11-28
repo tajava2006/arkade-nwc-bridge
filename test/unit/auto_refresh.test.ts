@@ -6,6 +6,8 @@ import {
   needsRefresh,
 } from '../../src/auto_refresh'
 import { VTXO_RENEW_THRESHOLD_SECONDS } from '../../src/wallet'
+import { policyFor, sendFundingMinLifeSecs } from '../../src/atomic/vhtlc'
+import { MAX_ACCEPTED_SEND_WINDOW_SECS } from '../../src/atomic/send'
 
 const DUST = 330n
 const THRESHOLD_MS = AUTO_REFRESH_THRESHOLD_SECONDS * 1000
@@ -138,4 +140,12 @@ describe('autoRefreshPass', () => {
 // strictly inside the consolidate-all window, or it would race ahead of it.
 test('SDK backstop window stays inside the auto-refresh window', () => {
   expect(VTXO_RENEW_THRESHOLD_SECONDS).toBeLessThan(AUTO_REFRESH_THRESHOLD_SECONDS)
+})
+
+// F32: a coin refreshes while it can still fund the longest dust+ send we'd
+// accept (a VHTLC funding must outlive T by an unroll) — no window where a
+// coin is neither refreshed nor usable. An hour covers the poll + the round.
+test('auto-refresh fires before a coin is too short-lived to fund a dust+ send', () => {
+  const need = sendFundingMinLifeSecs(policyFor(86_016, 'bitcoin'), MAX_ACCEPTED_SEND_WINDOW_SECS)
+  expect(AUTO_REFRESH_THRESHOLD_SECONDS - need).toBeGreaterThanOrEqual(3_600)
 })

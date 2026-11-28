@@ -175,6 +175,21 @@ export function receiveTimeouts(
  */
 export const receiveFundingMarginSecs = (p: VhtlcPolicy): number => slow(p, p.detectBlocks + unrollBlocks(p) + p.confirmBlocks)
 
+/**
+ * The batch life a coin needs to fund a VHTLC receive opened now: its T
+ * (the invoice window + the claim window) plus the on-chain margin past T.
+ */
+export const receiveFundingLifeSecs = (p: VhtlcPolicy, invoiceExpirySecs: number): number =>
+  receiveTimeouts(p, 0, invoiceExpirySecs).refundLocktime + receiveFundingMarginSecs(p)
+
+/**
+ * When subdustd renews a float coin: with a quarter of that life to spare
+ * (rounds, a missed pass), and never below the 4-leaf rule of two receive
+ * windows. Mainnet ≈ 3.1d — inside arkd's gap, which a renewal must be.
+ */
+export const floatRenewThresholdSecs = (p: VhtlcPolicy, receiveWindowSecs: number, payMarginSecs: number): number =>
+  Math.max(2 * (receiveWindowSecs + payMarginSecs), Math.ceil(1.25 * receiveFundingLifeSecs(p, receiveWindowSecs)))
+
 /** A VHTLC's three CSV delays; with T they rebuild the script. */
 export type VhtlcDelays = Omit<OfferedVhtlc, 'refundLocktime'>
 

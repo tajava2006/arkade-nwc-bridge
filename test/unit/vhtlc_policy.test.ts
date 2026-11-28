@@ -19,6 +19,8 @@ import {
   usesVhtlc,
   type OfferedVhtlc,
   type VhtlcPolicy,
+  floatRenewThresholdSecs,
+  receiveFundingLifeSecs,
 } from '../../src/atomic'
 
 // The VHTLC timing rules (my-server F32_VHTLC_PLAN.md §5). Each attack named in
@@ -185,5 +187,24 @@ describe('buildVhtlc', () => {
     const swapped = buildVhtlc({ sender: user, receiver: peer, server, paymentHash: H, timeouts })
     expect(hex.encode(a.pkScript)).toBe(hex.encode(b.pkScript))
     expect(hex.encode(swapped.pkScript)).not.toBe(hex.encode(a.pkScript))
+  })
+})
+
+// The float renews while it can still fund a VHTLC receive — below that life a
+// coin funds nothing ≥ 330 — and inside arkd's gap (a renewal outside it is
+// deferred). Regtest must stay under its 2h batch life or the float renews
+// every pass.
+describe('float renewal threshold', () => {
+  test('mainnet: above a VHTLC receive’s funding life, inside the 4.75d gap', () => {
+    const p = policyFor(86_016, 'bitcoin')
+    const need = receiveFundingLifeSecs(p, 21_600)
+    const t = floatRenewThresholdSecs(p, 21_600, 600)
+    expect(need).toBeGreaterThan(2 * (21_600 + 600)) // the 4-leaf rule alone would leave a dead zone
+    expect(t).toBeGreaterThan(need)
+    expect(t).toBeLessThan(410_400)
+  })
+  test('regtest: under the 2h batch life', () => {
+    const p = policyFor(2_048, 'regtest')
+    expect(floatRenewThresholdSecs(p, 600, 60)).toBeLessThan(7_200)
   })
 })

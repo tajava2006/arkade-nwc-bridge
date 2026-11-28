@@ -9,24 +9,25 @@ import { canSpendOffchain, isSubdust, isVtxoExpiringSoon, type ExtendedVirtualCo
 // EVERYTHING into one fresh VTXO — fewer rounds for the server, one
 // defragmented VTXO and a full expiry reset for the wallet.
 //
-// THE renewal knob. 4 days is not arbitrary — it is pinned by two neighbors:
-//  - arkd's SETTLEMENT_MIN_EXPIRY_GAP (4d): a settle attempted earlier than
-//    this is deferred, so a larger window would just spam rejected intents;
-//  - the atomic sub-dust send gate. A funding VTXO must outlive the swap's T
-//    by 10 min, and T is capped by subdustd's sendWindowSecs (90h). Refreshing
-//    at 4d-before-expiry keeps every VTXO above 90h10m with ~6h to spare (the
-//    10-min poll and the round itself eat a little of it), so no invoice —
-//    however long its route — can land in a window where nothing may fund it.
-//    The cap was 72h with a 3d window until 2026-10: invoices behind an LSP
-//    (final delta 144 + a private hop of 144, e.g. rizful.com via Megalithic)
-//    measured 435 blocks against a 431 budget and failed NO_ROUTE every time.
+// THE renewal knob. 4.75 days is not arbitrary — it is pinned by two neighbors:
+//  - arkd's SETTLEMENT_MIN_EXPIRY_GAP (same 4.75d): a settle attempted earlier
+//    than this is deferred, so a larger window would just spam rejected intents;
+//  - the dust+ send gate. A VHTLC funding VTXO must outlive the swap's T by an
+//    unroll + its confirmation (+ MTP lag) — sendFundingMinLifeSecs: 4.40d at
+//    subdustd's 90h cap, 4.65d at the 96h we'd accept. Refreshing at 4.75d
+//    keeps every VTXO above that with hours to spare (the 10-min poll and the
+//    round itself eat a little of it), so no invoice — however long its route —
+//    can land in a window where nothing may fund it (tested below the knob).
+//    History: 3d with a 72h cap until 2026-10 (invoices behind an LSP measured
+//    435 blocks against a 431 budget and failed NO_ROUTE), then 4d with 90h and
+//    the 4-leaf script's T + 10 min, then 4.75d for the VHTLC (F32, 2026-11).
 // Move all three together (operator workspace SETTINGS.md §1 / §7).
 // Must stay well below the tree expiry (~31.7d) — a window ≥ the
 // VTXO lifetime means every fresh VTXO is instantly "expiring" and rounds
 // loop forever; the wiring's post-success cooldown bounds that failure mode
 // but does not make it sane. The SDK renewal (wallet.ts, fixed 1h) stays on
 // as the backstop and is deliberately NOT scaled with this knob — see there.
-export const AUTO_REFRESH_THRESHOLD_SECONDS = 345_600
+export const AUTO_REFRESH_THRESHOLD_SECONDS = 410_400
 
 /**
  * True when some VTXO that can anchor a settlement round — spendable, dust+,

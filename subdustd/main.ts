@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs'
 import { EsploraProvider, type OnchainProvider } from '@arkade-os/sdk'
 import { BitcoindOnchainProvider, BitcoindRpc } from '../src/chain/bitcoind.ts'
 import { OnchainExecutor } from './onchain.ts'
+import { floatRenewThresholdSecs, policyFor } from '../src/atomic/vhtlc.ts'
 
 const path = process.argv[2]
 if (!path) {
@@ -83,8 +84,18 @@ const send = new SendService({ store, signer, lnd, knobs: config.subdust, log, l
 const floatLock = new FloatLock()
 const receive = new ReceiveService({ store, signer, lnd, knobs: config.subdust, log, locks, emit, floatLock })
 const server = startHttp(config, log, { send, receive, push })
-// Renew a float coin while it still has two receive windows (+ margins) of
-// batch life left: a coin under one window can no longer fund a receive.
+// Renew a float coin while it can still fund a VHTLC receive with room to
+// spare (floatRenewThresholdSecs): under that life it funds nothing ≥ 330, and
+// a float whose coins share a batch would refuse every such receive at once.
+// Needs arkd's exit delay, so it's read per pass — arkd may be down at boot.
+const floatThresholdSecs = async (): Promise<number> => {
+  const info = await signer.getInfo()
+  return floatRenewThresholdSecs(
+    policyFor(Number(info.unilateralExitDelay), info.network),
+    config.subdust.receiveWindowSecs,
+    config.subdust.payMarginSecs,
+  )
+}
 const float = new FloatRenewer({
   manager: lazyFloatManager({
     identity: signer.identity,
@@ -94,7 +105,7 @@ const float = new FloatRenewer({
     chainHeight: async () => (await lnd.getInfo()).blockHeight,
   }),
   lock: floatLock,
-  thresholdSecs: 2 * (config.subdust.receiveWindowSecs + config.subdust.payMarginSecs),
+  thresholdSecs: floatThresholdSecs,
   log,
 })
 // The VHTLC's on-chain paths (F32_VHTLC_PLAN §7): without a chain backend an

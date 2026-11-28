@@ -130,6 +130,10 @@ bun run subdustd:keygen /data/subdustd.key   # once; refuses to overwrite
 - **Funding:** a receive spends the smallest eligible coins whole, ascending,
   until `dust + a` is covered. Eligible means spendable, at least dust, and
   outliving T plus the margin.
+- **Renewal:** a float coin renews at `floatRenewThresholdSecs` of batch life
+  left — 1.25 × what a VHTLC receive needs (its T + the on-chain margin),
+  never below two receive windows; ≈ 3.1d on mainnet. It has to stay inside
+  arkd's expiry gap, or arkd defers the renewal.
 
 ## LND
 
